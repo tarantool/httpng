@@ -1,0 +1,9 @@
+[submodule "third_party/h2o"]
+	path = third_party/h2o
+	url = https://github.com/void234/h2o.git
+[submodule "third_party/msgpuck"]
+	path = third_party/msgpuck
+	url = https://github.com/tarantool/msgpuck.git
+[submodule "third_party/xtm"]
+	path = third_party/xtm
+	url = https://github.com/tarantool/xtm.git
