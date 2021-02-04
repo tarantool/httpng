@@ -84,9 +84,8 @@ static inline shuttle_t *alloc_shuttle(thread_ctx_t *thread_ctx)
 	return shuttle;
 }
 
-void free_shuttle(shuttle_t *shuttle, thread_ctx_t *thread_ctx)
+void free_shuttle(shuttle_t *shuttle)
 {
-	(void)thread_ctx;
 	free(shuttle);
 }
 
@@ -94,12 +93,11 @@ static void anchor_dispose(void *param)
 {
 	anchor_t *const anchor = param;
 	shuttle_t *const shuttle = anchor->shuttle;
-	if (anchor->should_free_shuttle)
-		free_shuttle(shuttle, shuttle->thread_ctx);
+	if (anchor->user_free_shuttle != NULL)
+		anchor->user_free_shuttle(shuttle);
 	else
 		shuttle->disposed = true;
 
-	//x x x;//should notify tx thread IF it is waiting for proceedSending() which would not happen
 	/* probably should implemented support for "stubborn" anchors - 
 	optionally wait for tx processing to finish so TX thread can access h2o_req_t directly
 	thus avoiding copying LARGE buffers, it only makes sense
@@ -110,7 +108,7 @@ static void anchor_dispose(void *param)
 shuttle_t *prepare_shuttle(h2o_req_t *req)
 {
 	anchor_t *const anchor = h2o_mem_alloc_shared(&req->pool, sizeof(anchor_t), &anchor_dispose);
-	anchor->should_free_shuttle = false;
+	anchor->user_free_shuttle = NULL;
 	thread_ctx_t *const thread_ctx = get_curr_thread_ctx();
 	shuttle_t *const shuttle = alloc_shuttle(thread_ctx);
 	shuttle->anchor = anchor;

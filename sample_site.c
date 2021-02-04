@@ -10,12 +10,16 @@
 
 static const char users_path[] = "/users";
 static const char stats_path[] = "/stats";
+static const char large_path[] = "/large";
 static unsigned users_response_data_size;
 static unsigned stats_response_data_size_minus_1;
+static unsigned large_response_data_size;
 
 static struct {
 	uint32_t space_id;
 	uint32_t index_id;
+	uint32_t large_space_id;
+	uint32_t large_index_id;
 } our_userdata; /* Site/path-specific */
 
 typedef struct {
@@ -37,6 +41,14 @@ typedef struct {
 	char data[];
 } response_with_state_t;
 
+typedef struct {
+	box_tuple_t *tuple; /* unref can only be done from TX thread */
+	const char *direct_ptr; /* Initialized only if (tuple != NULL) */
+	h2o_generator_t generator;
+	unsigned len;
+	char data[];
+} large_response_t;
+
 static void continue_processing_stats_req_in_tx(shuttle_t *);
 static void cancel_processing_stats_req_in_tx(shuttle_t *);
 
@@ -47,9 +59,9 @@ static inline shuttle_t *get_shuttle_from_generator(h2o_generator_t *generator)
 }
 
 /* Called when dispatch must not fail */
-static void stubborn_dispatch(struct xtm_queue *queue, void (*func)(void *), shuttle_t *shuttle)
+static void stubborn_dispatch(struct xtm_queue *queue, void (*func)(shuttle_t *), shuttle_t *shuttle)
 {
-	while (xtm_fun_dispatch(queue, func, shuttle, 0)) {
+	while (xtm_fun_dispatch(queue, (void(*)(void *))func, shuttle, 0)) {
 		/* Error; we must not fail so retry a little later */
 		fiber_sleep(0);
 	}
@@ -59,7 +71,7 @@ static void stubborn_dispatch(struct xtm_queue *queue, void (*func)(void *), shu
 static void postprocess_users_req(shuttle_t *shuttle)
 {
 	if (shuttle->disposed) {
-		free_shuttle(shuttle, shuttle->thread_ctx);
+		free_shuttle(shuttle);
 		return;
 	}
 	h2o_req_t *req = shuttle->never_access_this_req_from_tx_thread;
@@ -73,7 +85,7 @@ static void postprocess_users_req(shuttle_t *shuttle)
 	simple_response_t *const response = (simple_response_t *)(&shuttle->payload);
 	buf.base = response->data;
 	buf.len = response->len;
-	shuttle->anchor->should_free_shuttle = true;
+	shuttle->anchor->user_free_shuttle = &free_shuttle;
 	h2o_send(req, &buf, 1, H2O_SEND_STATE_FINAL);
 }
 
@@ -82,7 +94,7 @@ static void proceed_sending_stats(h2o_generator_t *self, h2o_req_t *req)
 {
 	shuttle_t *const shuttle = get_shuttle_from_generator(self);
 	thread_ctx_t *const thread_ctx = get_curr_thread_ctx();
-	stubborn_dispatch(thread_ctx->queue_to_tx, (void(*)(void *))&continue_processing_stats_req_in_tx, shuttle);
+	stubborn_dispatch(thread_ctx->queue_to_tx, &continue_processing_stats_req_in_tx, shuttle);
 }
 
 /* Launched in HTTP server thread when connection has been closed */
@@ -90,9 +102,9 @@ static void stop_sending_stats(h2o_generator_t *self, h2o_req_t *req)
 {
 	shuttle_t *const shuttle = get_shuttle_from_generator(self);
 	response_with_state_t *const response = (response_with_state_t *)(&shuttle->payload);
-	if (response->need_more) {
+	if (response->need_more && !shuttle->stopped) {
 		shuttle->stopped = true;
-		stubborn_dispatch(get_curr_thread_ctx()->queue_to_tx, (void(*)(void *))&cancel_processing_stats_req_in_tx, shuttle);
+		stubborn_dispatch(get_curr_thread_ctx()->queue_to_tx, &cancel_processing_stats_req_in_tx, shuttle);
 	}
 }
 
@@ -102,10 +114,12 @@ static void postprocess_stats_req_first(shuttle_t *shuttle)
 	response_with_state_t *const response = (response_with_state_t *)(&shuttle->payload);
 	if (shuttle->disposed) {
 		if (response->need_more) {
-			if (!shuttle->stopped)
-				stubborn_dispatch(get_curr_thread_ctx()->queue_to_tx, (void(*)(void *))&cancel_processing_stats_req_in_tx, shuttle);
+			if (!shuttle->stopped) {
+				shuttle->stopped = true;
+				stubborn_dispatch(get_curr_thread_ctx()->queue_to_tx, &cancel_processing_stats_req_in_tx, shuttle);
+			}
 		} else
-			free_shuttle(shuttle, get_curr_thread_ctx());
+			free_shuttle(shuttle);
 		return;
 	}
 	h2o_req_t *const req = shuttle->never_access_this_req_from_tx_thread;
@@ -120,7 +134,7 @@ static void postprocess_stats_req_first(shuttle_t *shuttle)
 	if (response->need_more) {
 		h2o_send(req, &buf, 1, H2O_SEND_STATE_IN_PROGRESS);
 	} else {
-		shuttle->anchor->should_free_shuttle = true;
+		shuttle->anchor->user_free_shuttle = &free_shuttle;
 		h2o_send(req, &buf, 1, H2O_SEND_STATE_FINAL);
 	}
 }
@@ -131,10 +145,12 @@ static void postprocess_stats_req_others(shuttle_t *shuttle)
 	response_with_state_t *const response = (response_with_state_t *)(&shuttle->payload);
 	if (shuttle->disposed) {
 		if (response->need_more) {
-			if (!shuttle->stopped)
-				stubborn_dispatch(get_curr_thread_ctx()->queue_to_tx, (void(*)(void *))&cancel_processing_stats_req_in_tx, shuttle);
+			if (!shuttle->stopped) {
+				shuttle->stopped = true;
+				stubborn_dispatch(get_curr_thread_ctx()->queue_to_tx, &cancel_processing_stats_req_in_tx, shuttle);
+			}
 		} else
-			free_shuttle(shuttle, get_curr_thread_ctx());
+			free_shuttle(shuttle);
 		return;
 	}
 	h2o_req_t *const req = shuttle->never_access_this_req_from_tx_thread;
@@ -145,7 +161,7 @@ static void postprocess_stats_req_others(shuttle_t *shuttle)
 	if (response->need_more) {
 		h2o_send(req, &buf, 1, H2O_SEND_STATE_IN_PROGRESS);
 	} else {
-		shuttle->anchor->should_free_shuttle = true;
+		shuttle->anchor->user_free_shuttle = &free_shuttle;
 		h2o_send(req, &buf, 1, H2O_SEND_STATE_FINAL);
 	}
 }
@@ -160,6 +176,13 @@ static int init_userdata_in_tx(void *param)
 		return -1;
 	static const char index_name[] = "primary";
 	if ((our_userdata.index_id = box_index_id_by_name(our_userdata.space_id, index_name, sizeof(index_name) - 1)) == BOX_ID_NIL)
+		return -1;
+
+	static const char large_space_name[] = "large";
+	if ((our_userdata.large_space_id = box_space_id_by_name(large_space_name, sizeof(large_space_name) - 1)) == BOX_ID_NIL)
+		return -1;
+	static const char large_index_name[] = "primary";
+	if ((our_userdata.large_index_id = box_index_id_by_name(our_userdata.large_space_id, large_index_name, sizeof(large_index_name) - 1)) == BOX_ID_NIL)
 		return -1;
 
 	return 0;
@@ -205,7 +228,7 @@ static void process_users_req_in_tx(shuttle_t *shuttle)
 		}
 	}
 
-	stubborn_dispatch(shuttle->thread_ctx->queue_from_tx, (void(*)(void *))&postprocess_users_req, shuttle);
+	stubborn_dispatch(shuttle->thread_ctx->queue_from_tx, &postprocess_users_req, shuttle);
 }
 
 /* Launched in TX thread */
@@ -225,7 +248,7 @@ static void process_stats_req_in_tx(shuttle_t *shuttle)
 		static const char error_str[] = err; \
 		memcpy(&response->data, error_str, sizeof(error_str) - 1); \
 		response->len = sizeof(error_str) - 1; \
-		stubborn_dispatch(shuttle->thread_ctx->queue_from_tx, (void(*)(void *))&postprocess_stats_req_first, shuttle); \
+		stubborn_dispatch(shuttle->thread_ctx->queue_from_tx, &postprocess_stats_req_first, shuttle); \
 		return; \
 	} while (0)
 
@@ -263,7 +286,7 @@ static void process_stats_req_in_tx(shuttle_t *shuttle)
 	memcpy(&response->data, name, len);
 	response->data[len] = '\n';
 	response->len = len + 1;
-	stubborn_dispatch(shuttle->thread_ctx->queue_from_tx, (void(*)(void *))&postprocess_stats_req_first, shuttle);
+	stubborn_dispatch(shuttle->thread_ctx->queue_from_tx, &postprocess_stats_req_first, shuttle);
 }
 #undef RETURN_WITH_ERROR_FREE_IT
 #undef RETURN_WITH_ERROR
@@ -272,7 +295,7 @@ static void process_stats_req_in_tx(shuttle_t *shuttle)
 static void cancel_processing_stats_req_in_http_thread(shuttle_t *shuttle)
 {
 	assert(shuttle->disposed);
-	free_shuttle(shuttle, shuttle->thread_ctx);
+	free_shuttle(shuttle);
 }
 
 /* Launched in TX thread */
@@ -283,7 +306,7 @@ static void cancel_processing_stats_req_in_tx(shuttle_t *shuttle)
 	box_iterator_free(response->iterator);
 
 	/* Can't call free_shuttle() from TX thread because it [potentially] uses per-thread pools */
-	stubborn_dispatch(shuttle->thread_ctx->queue_from_tx, (void(*)(void *))&cancel_processing_stats_req_in_http_thread, shuttle);
+	stubborn_dispatch(shuttle->thread_ctx->queue_from_tx, &cancel_processing_stats_req_in_http_thread, shuttle);
 }
 
 /* Launched in TX thread */
@@ -298,7 +321,7 @@ static void continue_processing_stats_req_in_tx(shuttle_t *shuttle)
 		static const char error_str[] = err; \
 		memcpy(&response->data, error_str, sizeof(error_str) - 1); \
 		response->len = sizeof(error_str) - 1; \
-		stubborn_dispatch(shuttle->thread_ctx->queue_from_tx, (void(*)(void *))&postprocess_stats_req_others, shuttle); \
+		stubborn_dispatch(shuttle->thread_ctx->queue_from_tx, &postprocess_stats_req_others, shuttle); \
 		return; \
 	} while (0)
 
@@ -324,11 +347,11 @@ static void continue_processing_stats_req_in_tx(shuttle_t *shuttle)
 	memcpy(&response->data, name, len);
 	response->data[len] = '\n';
 	response->len = len + 1;
-	stubborn_dispatch(shuttle->thread_ctx->queue_from_tx, (void(*)(void *))&postprocess_stats_req_others, shuttle);
+	stubborn_dispatch(shuttle->thread_ctx->queue_from_tx, &postprocess_stats_req_others, shuttle);
 }
 #undef RETURN_WITH_ERROR_FREE_IT
 
-/* Launched in HTTP thread */
+/* Launched in HTTP server thread */
 static int users_req_handler(h2o_handler_t *self, h2o_req_t *req)
 {
 	(void)self;
@@ -366,7 +389,7 @@ static int users_req_handler(h2o_handler_t *self, h2o_req_t *req)
 	thread_ctx_t *const thread_ctx = get_curr_thread_ctx();
 	if (xtm_fun_dispatch(thread_ctx->queue_to_tx, (void(*)(void *))&process_users_req_in_tx, shuttle, 0)) {
 		/* Error */
-		free_shuttle(shuttle, thread_ctx);
+		free_shuttle(shuttle);
 		req->res.status = 500;
 		req->res.reason = "Queue overflow";
 		h2o_send_inline(req, H2O_STRLIT("Queue overflow\n"));
@@ -391,7 +414,154 @@ static int stats_req_handler(h2o_handler_t *self, h2o_req_t *req)
 	thread_ctx_t *const thread_ctx = get_curr_thread_ctx();
 	if (xtm_fun_dispatch(thread_ctx->queue_to_tx, (void(*)(void *))&process_stats_req_in_tx, shuttle, 0)) {
 		/* Error */
-		free_shuttle(shuttle, thread_ctx);
+		free_shuttle(shuttle);
+		req->res.status = 500;
+		req->res.reason = "Queue overflow";
+		h2o_send_inline(req, H2O_STRLIT("Queue overflow\n"));
+		return 0;
+	}
+
+	return 0;
+}
+
+/* Launched in HTTP server thread */
+static void cancel_processing_large_req_in_http_thread(shuttle_t *shuttle)
+{
+	assert(shuttle->disposed);
+	free_shuttle(shuttle);
+}
+
+/* Launched in TX thread */
+static void cancel_processing_large_req_in_tx(shuttle_t *shuttle)
+{
+	large_response_t *const response = (large_response_t *)&shuttle->payload;
+
+	box_tuple_unref(response->tuple);
+
+	/* Can't call free_shuttle() from TX thread because it [potentially] uses per-thread pools */
+	stubborn_dispatch(shuttle->thread_ctx->queue_from_tx, &cancel_processing_large_req_in_http_thread, shuttle);
+}
+
+/* Launched in HTTP server thread */
+static void free_shuttle_after_deref(shuttle_t *shuttle)
+{
+	assert(((large_response_t *)(&shuttle->payload))->tuple != NULL);
+	shuttle->disposed = true;
+	if (!shuttle->stopped) {
+		shuttle->stopped = true;
+		stubborn_dispatch(get_curr_thread_ctx()->queue_to_tx, &cancel_processing_large_req_in_tx, shuttle);
+	}
+}
+
+/* Launched in HTTP server thread to postprocess first response */
+static void postprocess_large_req(shuttle_t *shuttle)
+{
+	large_response_t *const response = (large_response_t *)(&shuttle->payload);
+	if (shuttle->disposed) {
+		if (response->tuple != NULL) {
+			if (!shuttle->stopped) {
+				shuttle->stopped = true;
+				stubborn_dispatch(get_curr_thread_ctx()->queue_to_tx, &cancel_processing_large_req_in_tx, shuttle);
+			}
+		} else
+			free_shuttle(shuttle);
+		return;
+	}
+	h2o_req_t *const req = shuttle->never_access_this_req_from_tx_thread;
+	req->res.status = 200;
+	req->res.reason = "OK";
+	h2o_add_header(&req->pool, &req->res.headers, H2O_TOKEN_CONTENT_TYPE, NULL, H2O_STRLIT("text/plain; charset=utf-8"));
+	char content_length_str[32];
+	const size_t content_length_str_len = snprintf(content_length_str, sizeof(content_length_str), "%llu", (unsigned long long)response->len);
+	h2o_add_header(&req->pool, &req->res.headers, H2O_TOKEN_CONTENT_LENGTH, NULL, content_length_str, content_length_str_len);
+	h2o_start_response(req, &response->generator);
+
+	h2o_iovec_t buf;
+	buf.len = response->len;
+	if (response->tuple == NULL) {
+		buf.base = response->data;
+		shuttle->anchor->user_free_shuttle = &free_shuttle;
+	} else {
+		buf.base = (void *)response->direct_ptr;
+		shuttle->anchor->user_free_shuttle = &free_shuttle_after_deref;
+	}
+	h2o_send(req, &buf, 1, H2O_SEND_STATE_FINAL);
+}
+
+/* Launched in HTTP server thread when connection has been closed */
+static void stop_sending_large(h2o_generator_t *self, h2o_req_t *req)
+{
+	shuttle_t *const shuttle = get_shuttle_from_generator(self);
+	large_response_t *const response = (large_response_t *)(&shuttle->payload);
+	if (response->tuple != NULL && !shuttle->stopped) {
+		shuttle->stopped = true;
+		stubborn_dispatch(get_curr_thread_ctx()->queue_to_tx, &cancel_processing_large_req_in_tx, shuttle);
+	}
+}
+
+/* Launched in TX thread */
+static void process_large_req_in_tx(shuttle_t *shuttle)
+{
+	large_response_t *const response = (large_response_t *)&shuttle->payload;
+	response->generator = (h2o_generator_t){ NULL, stop_sending_large };
+
+	char entry_index_msgpack[16];
+	char *key_end = mp_encode_array(entry_index_msgpack, 1);
+	key_end = mp_encode_uint(key_end, 2 /* FIXME: Hardcoded index */);
+	assert(key_end < &entry_index_msgpack[0] + sizeof(entry_index_msgpack));
+
+#define RETURN_WITH_ERROR(err) \
+	do { \
+		response->tuple = NULL; \
+		static const char error_str[] = err; \
+		memcpy(&response->data, error_str, sizeof(error_str) - 1); \
+		response->len = sizeof(error_str) - 1; \
+		stubborn_dispatch(shuttle->thread_ctx->queue_from_tx, &postprocess_large_req, shuttle); \
+		return; \
+	} while (0)
+
+	box_tuple_t *tuple;
+	if (box_index_get(our_userdata.large_space_id, our_userdata.large_index_id, entry_index_msgpack, key_end, &tuple))
+		RETURN_WITH_ERROR("Query error");
+
+	if (tuple == NULL)
+		RETURN_WITH_ERROR("Entry not found");
+
+	const char *name_msgpack = box_tuple_field(tuple, 1);
+	if (name_msgpack == NULL)
+		RETURN_WITH_ERROR("Invalid entry format");
+
+	uint32_t len;
+	const char *const name = mp_decode_str(&name_msgpack, &len);
+	response->len = len;
+	if (len <= large_response_data_size) {
+		response->tuple = NULL;
+		memcpy(response->data, name, len);
+	} else {
+		box_tuple_ref(tuple);
+		response->tuple = tuple;
+		response->direct_ptr = name;
+	}
+	stubborn_dispatch(shuttle->thread_ctx->queue_from_tx, &postprocess_large_req, shuttle);
+}
+#undef RETURN_WITH_ERROR
+
+/* Launched in HTTP server thread */
+static int large_req_handler(h2o_handler_t *self, h2o_req_t *req)
+{
+	(void)self;
+	if (!(h2o_memis(req->method.base, req->method.len, H2O_STRLIT("GET")) &&
+	    h2o_memis(req->path_normalized.base, req->path_normalized.len, H2O_STRLIT(large_path)))) {
+		return -1;
+	}
+
+	shuttle_t *const shuttle = prepare_shuttle(req);
+	/* Can fill in shuttle->payload here */
+
+	thread_ctx_t *const thread_ctx = get_curr_thread_ctx();
+	if (xtm_fun_dispatch(thread_ctx->queue_to_tx, (void(*)(void *))&process_large_req_in_tx, shuttle, 0)) {
+		/* Error */
+		free_shuttle(shuttle);
 		req->res.status = 500;
 		req->res.reason = "Queue overflow";
 		h2o_send_inline(req, H2O_STRLIT("Queue overflow\n"));
@@ -408,7 +578,8 @@ static const site_desc_t our_site_desc = {
 	.path_descs = {
 		{ .path = users_path, .handler = users_req_handler, .init_userdata_in_tx = init_userdata_in_tx, },
 		{ .path = stats_path, .handler = stats_req_handler, },
-		{ }, /* Terminator */
+		{ .path = large_path, .handler = large_req_handler, },
+		{ .path = NULL }, /* Terminator */
 	},
 };
 
@@ -425,6 +596,9 @@ static void init_site(void)
 {
 	users_response_data_size = our_site_desc.shuttle_size - sizeof(shuttle_t) - offsetof(simple_response_t, data);
 	stats_response_data_size_minus_1 = our_site_desc.shuttle_size - sizeof(shuttle_t) - offsetof(response_with_state_t, data) - 1;
+
+	/* We can use lower value to trigger direct access to tuple */
+	large_response_data_size = our_site_desc.shuttle_size - sizeof(shuttle_t) - offsetof(large_response_t, data);
 }
 
 static const struct luaL_Reg mylib[] = {

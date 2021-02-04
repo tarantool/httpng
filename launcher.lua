@@ -17,10 +17,30 @@ local index = s:create_index('primary',
             parts = {'id'}
         })
 
+local large = box.schema.space.create('large')
+large:format({
+             {name = 'id', type = 'unsigned'},
+             {name = 'desc', type = 'string'},
+         })
+large:create_index('primary',
+        {
+            type = 'tree',
+            parts = {'id'}
+        })
+
 s:insert{1, 'First'}
 s:insert{2, 'Second'}
 
+local long_string = ''
+local large_entry_part_count = 30000
 local counter
+for counter = 1, large_entry_part_count
+do
+	long_string = long_string..'Large entry, part #'..counter..' of '..large_entry_part_count..'\n'
+end
+
+large:insert{2, long_string}
+
 for counter = 3, 10000
 do
 	s:insert{counter, 'Entry #'..counter}

@@ -43,7 +43,7 @@ typedef struct {
 
 typedef struct anchor {
 	shuttle_t *shuttle;
-	char should_free_shuttle;
+	void (*user_free_shuttle)(shuttle_t *); /* Can be NULL; it should set shuttle->disposed to true */
 } anchor_t;
 
 /* Written directly into h2o_create_handler()->on_req */
@@ -73,7 +73,7 @@ static inline thread_ctx_t *get_curr_thread_ctx(void)
 }
 
 extern shuttle_t *prepare_shuttle(h2o_req_t *);
-extern void free_shuttle(shuttle_t *, thread_ctx_t *);
+extern void free_shuttle(shuttle_t *);
 
 #if defined(__cplusplus)
 }
