@@ -11,9 +11,11 @@
 static const char users_path[] = "/users";
 static const char stats_path[] = "/stats";
 static const char large_path[] = "/large";
+static const char fiber_path[] = "/fiber";
 static unsigned users_response_data_size;
 static unsigned stats_response_data_size_minus_1;
 static unsigned large_response_data_size;
+static unsigned fiber_response_data_size;
 
 static struct {
 	uint32_t space_id;
@@ -48,6 +50,13 @@ typedef struct {
 	unsigned len;
 	char data[];
 } large_response_t;
+
+typedef struct {
+	struct fiber *fiber; /* Should only be accessed from TX thread */
+	unsigned len;
+	bool fiber_done; /* Should only be accessed from TX thread */
+	char data[];
+} fiber_response_t;
 
 static void continue_processing_stats_req_in_tx(shuttle_t *);
 static void cancel_processing_stats_req_in_tx(shuttle_t *);
@@ -453,7 +462,7 @@ static void free_shuttle_after_deref(shuttle_t *shuttle)
 	}
 }
 
-/* Launched in HTTP server thread to postprocess first response */
+/* Launched in HTTP server thread to postprocess response */
 static void postprocess_large_req(shuttle_t *shuttle)
 {
 	large_response_t *const response = (large_response_t *)(&shuttle->payload);
@@ -571,14 +580,141 @@ static int large_req_handler(h2o_handler_t *self, h2o_req_t *req)
 	return 0;
 }
 
+/* Launched in HTTP server thread */
+static void cancel_processing_fiber_req_in_http_thread(shuttle_t *shuttle)
+{
+	assert(shuttle->disposed);
+	free_shuttle(shuttle);
+}
+
+/* Launched in TX thread */
+static void cancel_processing_fiber_req_in_tx(shuttle_t *shuttle)
+{
+	fiber_response_t *const response = (fiber_response_t *)&shuttle->payload;
+
+	if (response->fiber != NULL && !response->fiber_done)
+		fiber_cancel(response->fiber);
+
+	/* Can't call free_shuttle() from TX thread because it [potentially] uses per-thread pools */
+	stubborn_dispatch(shuttle->thread_ctx->queue_from_tx, &cancel_processing_fiber_req_in_http_thread, shuttle);
+}
+
+/* Launched in HTTP server thread to postprocess response */
+static void postprocess_fiber_req(shuttle_t *shuttle)
+{
+	fiber_response_t *const response = (fiber_response_t *)(&shuttle->payload);
+	if (shuttle->disposed) {
+		if (!shuttle->stopped) {
+			shuttle->stopped = true;
+			stubborn_dispatch(get_curr_thread_ctx()->queue_to_tx, &cancel_processing_fiber_req_in_tx, shuttle);
+		}
+		return;
+	}
+	h2o_req_t *const req = shuttle->never_access_this_req_from_tx_thread;
+	req->res.status = 200;
+	req->res.reason = "OK";
+	h2o_add_header(&req->pool, &req->res.headers, H2O_TOKEN_CONTENT_TYPE, NULL, H2O_STRLIT("text/plain; charset=utf-8"));
+	char content_length_str[32];
+	const size_t content_length_str_len = snprintf(content_length_str, sizeof(content_length_str), "%llu", (unsigned long long)response->len);
+	h2o_add_header(&req->pool, &req->res.headers, H2O_TOKEN_CONTENT_LENGTH, NULL, content_length_str, content_length_str_len);
+	static h2o_generator_t generator = {NULL, NULL};
+	h2o_start_response(req, &generator);
+
+	h2o_iovec_t buf;
+	buf.base = response->data;
+	buf.len = response->len;
+	shuttle->anchor->user_free_shuttle = &free_shuttle; /* Optimization, replacing &free_shuttle_with_fiber because fiber is already done */
+	h2o_send(req, &buf, 1, H2O_SEND_STATE_FINAL);
+}
+
+/* Launched in TX thread */
+static int
+example_fiber_func(va_list ap)
+{
+	static const double sleep_time = 10.;
+	shuttle_t *const shuttle = va_arg(ap, shuttle_t *);
+
+	fiber_sleep(sleep_time);
+
+	fiber_response_t *const response = (fiber_response_t *)&shuttle->payload;
+	response->len = snprintf(response->data, fiber_response_data_size, "Hello from fiber after sleeping for %.1f seconds", sleep_time);
+	stubborn_dispatch(shuttle->thread_ctx->queue_from_tx, &postprocess_fiber_req, shuttle);
+
+	response->fiber_done = true;
+	return 0;
+}
+
+/* Launched in TX thread */
+static void process_fiber_req_in_tx(shuttle_t *shuttle)
+{
+	fiber_response_t *const response = (fiber_response_t *)&shuttle->payload;
+
+	/* This is just an example of fibers usage, no DB access used at all */
+
+#define RETURN_WITH_ERROR(err) \
+	do { \
+		static const char error_str[] = err; \
+		memcpy(&response->data, error_str, sizeof(error_str) - 1); \
+		response->len = sizeof(error_str) - 1; \
+		stubborn_dispatch(shuttle->thread_ctx->queue_from_tx, &postprocess_fiber_req, shuttle); \
+		return; \
+	} while (0)
+
+	if ((response->fiber = fiber_new("HTTP test fiber", &example_fiber_func)) == NULL)
+		RETURN_WITH_ERROR("Failed to create fiber");
+	response->fiber_done = false;
+	fiber_start(response->fiber, shuttle);
+}
+#undef RETURN_WITH_ERROR
+
+/* Launched in HTTP server thread */
+static void free_shuttle_with_fiber(shuttle_t *shuttle)
+{
+	shuttle->disposed = true;
+	if (!shuttle->stopped) {
+		shuttle->stopped = true;
+		stubborn_dispatch(get_curr_thread_ctx()->queue_to_tx, &cancel_processing_fiber_req_in_tx, shuttle);
+	}
+}
+
+/* Launched in HTTP server thread */
+static int fiber_req_handler(h2o_handler_t *self, h2o_req_t *req)
+{
+	(void)self;
+	if (!(h2o_memis(req->method.base, req->method.len, H2O_STRLIT("GET")) &&
+	    h2o_memis(req->path_normalized.base, req->path_normalized.len, H2O_STRLIT(fiber_path)))) {
+		return -1;
+	}
+
+	shuttle_t *const shuttle = prepare_shuttle(req);
+	/* Can fill in shuttle->payload here */
+
+	thread_ctx_t *const thread_ctx = get_curr_thread_ctx();
+	if (xtm_fun_dispatch(thread_ctx->queue_to_tx, (void(*)(void *))&process_fiber_req_in_tx, shuttle, 0)) {
+		/* Error */
+		free_shuttle_with_anchor(shuttle);
+		req->res.status = 500;
+		req->res.reason = "Queue overflow";
+		h2o_send_inline(req, H2O_STRLIT("Queue overflow\n"));
+		return 0;
+	}
+	shuttle->anchor->user_free_shuttle = &free_shuttle_with_fiber;
+
+	return 0;
+}
+
 static const site_desc_t our_site_desc = {
 	.num_threads = 4,
 	.max_conn_per_thread = 64,
 	.shuttle_size = 256,
+	/* All .init_userdata_in_tx() are called, we can use per-path initialization functions
+	 * (this can be more convenient when integrating several modules)
+	 * or put everything into one. */
 	.path_descs = {
 		{ .path = users_path, .handler = users_req_handler, .init_userdata_in_tx = init_userdata_in_tx, },
 		{ .path = stats_path, .handler = stats_req_handler, },
 		{ .path = large_path, .handler = large_req_handler, },
+		{ .path = fiber_path, .handler = fiber_req_handler, },
 		{ .path = NULL }, /* Terminator */
 	},
 };
@@ -599,6 +735,8 @@ static void init_site(void)
 
 	/* We can use lower value to trigger direct access to tuple */
 	large_response_data_size = our_site_desc.shuttle_size - sizeof(shuttle_t) - offsetof(large_response_t, data);
+
+	fiber_response_data_size = our_site_desc.shuttle_size - sizeof(shuttle_t) - offsetof(fiber_response_t, data);
 }
 
 static const struct luaL_Reg mylib[] = {
