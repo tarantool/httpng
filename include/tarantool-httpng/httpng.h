@@ -73,7 +73,18 @@ static inline thread_ctx_t *get_curr_thread_ctx(void)
 }
 
 extern shuttle_t *prepare_shuttle(h2o_req_t *);
+
+/* Must be called in HTTP server thread.
+ * Should only be called if disposed==true
+ * (anchor_dispose() does not set disposed=true for performance reasons).
+ * Expected usage: handling disposed==true in postprocessing,
+ * setting it as anchor->user_free_shuttle. */
 extern void free_shuttle(shuttle_t *);
+
+/* Must be called in HTTP server thread.
+ * Should only be called if disposed==false.
+ * Expected usage: when req handler can't or wouldn't queue request to TX thread. */
+extern void free_shuttle_with_anchor(shuttle_t *);
 
 #if defined(__cplusplus)
 }

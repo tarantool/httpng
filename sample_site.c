@@ -389,7 +389,7 @@ static int users_req_handler(h2o_handler_t *self, h2o_req_t *req)
 	thread_ctx_t *const thread_ctx = get_curr_thread_ctx();
 	if (xtm_fun_dispatch(thread_ctx->queue_to_tx, (void(*)(void *))&process_users_req_in_tx, shuttle, 0)) {
 		/* Error */
-		free_shuttle(shuttle);
+		free_shuttle_with_anchor(shuttle);
 		req->res.status = 500;
 		req->res.reason = "Queue overflow";
 		h2o_send_inline(req, H2O_STRLIT("Queue overflow\n"));
@@ -414,7 +414,7 @@ static int stats_req_handler(h2o_handler_t *self, h2o_req_t *req)
 	thread_ctx_t *const thread_ctx = get_curr_thread_ctx();
 	if (xtm_fun_dispatch(thread_ctx->queue_to_tx, (void(*)(void *))&process_stats_req_in_tx, shuttle, 0)) {
 		/* Error */
-		free_shuttle(shuttle);
+		free_shuttle_with_anchor(shuttle);
 		req->res.status = 500;
 		req->res.reason = "Queue overflow";
 		h2o_send_inline(req, H2O_STRLIT("Queue overflow\n"));
@@ -561,7 +561,7 @@ static int large_req_handler(h2o_handler_t *self, h2o_req_t *req)
 	thread_ctx_t *const thread_ctx = get_curr_thread_ctx();
 	if (xtm_fun_dispatch(thread_ctx->queue_to_tx, (void(*)(void *))&process_large_req_in_tx, shuttle, 0)) {
 		/* Error */
-		free_shuttle(shuttle);
+		free_shuttle_with_anchor(shuttle);
 		req->res.status = 500;
 		req->res.reason = "Queue overflow";
 		h2o_send_inline(req, H2O_STRLIT("Queue overflow\n"));

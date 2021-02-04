@@ -89,14 +89,23 @@ void free_shuttle(shuttle_t *shuttle)
 	free(shuttle);
 }
 
+void free_shuttle_with_anchor(shuttle_t *shuttle)
+{
+	assert(!shuttle->disposed);
+	shuttle->anchor->shuttle = NULL;
+	free_shuttle(shuttle);
+}
+
 static void anchor_dispose(void *param)
 {
 	anchor_t *const anchor = param;
 	shuttle_t *const shuttle = anchor->shuttle;
-	if (anchor->user_free_shuttle != NULL)
-		anchor->user_free_shuttle(shuttle);
-	else
-		shuttle->disposed = true;
+	if (shuttle != NULL) {
+		if (anchor->user_free_shuttle != NULL)
+			anchor->user_free_shuttle(shuttle);
+		else
+			shuttle->disposed = true;
+	}
 
 	/* probably should implemented support for "stubborn" anchors - 
 	optionally wait for tx processing to finish so TX thread can access h2o_req_t directly
