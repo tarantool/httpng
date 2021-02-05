@@ -8,6 +8,8 @@
 
 #include <tarantool-httpng/httpng.h>
 
+#define USE_FAST_LARGE_REQUEST_CANCELLATION
+
 static const char users_path[] = "/users";
 static const char stats_path[] = "/stats";
 static const char large_path[] = "/large";
@@ -68,12 +70,18 @@ static inline shuttle_t *get_shuttle_from_generator(h2o_generator_t *generator)
 }
 
 /* Called when dispatch must not fail */
-static void stubborn_dispatch(struct xtm_queue *queue, void (*func)(shuttle_t *), shuttle_t *shuttle)
+static void stubborn_dispatch_uni(struct xtm_queue *queue, void *func, void *param)
 {
-	while (xtm_fun_dispatch(queue, (void(*)(void *))func, shuttle, 0)) {
+	while (xtm_fun_dispatch(queue, func, param, 0)) {
 		/* Error; we must not fail so retry a little later */
 		fiber_sleep(0);
 	}
+}
+
+/* Called when dispatch must not fail */
+static inline void stubborn_dispatch(struct xtm_queue *queue, void (*func)(shuttle_t *), shuttle_t *shuttle)
+{
+	stubborn_dispatch_uni(queue, func, shuttle);
 }
 
 /* Launched in HTTP server thread */
@@ -433,12 +441,24 @@ static int stats_req_handler(h2o_handler_t *self, h2o_req_t *req)
 	return 0;
 }
 
+#ifndef USE_FAST_LARGE_REQUEST_CANCELLATION
 /* Launched in HTTP server thread */
 static void cancel_processing_large_req_in_http_thread(shuttle_t *shuttle)
 {
 	assert(shuttle->disposed);
 	free_shuttle(shuttle);
 }
+#endif /* USE_FAST_LARGE_REQUEST_CANCELLATION */
+
+#ifdef USE_FAST_LARGE_REQUEST_CANCELLATION
+
+/* Launched in TX thread */
+static void cancel_processing_large_req_in_tx(box_tuple_t *tuple)
+{
+	box_tuple_unref(tuple);
+}
+
+#else /* USE_FAST_LARGE_REQUEST_CANCELLATION */
 
 /* Launched in TX thread */
 static void cancel_processing_large_req_in_tx(shuttle_t *shuttle)
@@ -451,15 +471,42 @@ static void cancel_processing_large_req_in_tx(shuttle_t *shuttle)
 	stubborn_dispatch(shuttle->thread_ctx->queue_from_tx, &cancel_processing_large_req_in_http_thread, shuttle);
 }
 
+#endif /* USE_FAST_LARGE_REQUEST_CANCELLATION */
+
+#ifdef USE_FAST_LARGE_REQUEST_CANCELLATION
+
+/* Launched in HTTP server thread - helper to free resources */
+static void release_large_shuttle(shuttle_t *shuttle)
+{
+	large_response_t *const response = (large_response_t *)(&shuttle->payload);
+	stubborn_dispatch_uni(get_curr_thread_ctx()->queue_to_tx, &cancel_processing_large_req_in_tx, response->tuple);
+
+	/* We could be called from stop_sending_large() */
+	if (shuttle->disposed)
+		free_shuttle(shuttle);
+	else
+		free_shuttle_with_anchor(shuttle);
+}
+
+#else /* USE_FAST_LARGE_REQUEST_CANCELLATION */
+
+/* Launched in HTTP server thread - helper to free resources */
+static void release_large_shuttle(shuttle_t *shuttle)
+{
+	if (!shuttle->stopped) {
+		shuttle->stopped = true;
+		stubborn_dispatch(get_curr_thread_ctx()->queue_to_tx, &cancel_processing_large_req_in_tx, shuttle);
+	}
+}
+
+#endif /* USE_FAST_LARGE_REQUEST_CANCELLATION */
+
 /* Launched in HTTP server thread */
 static void free_shuttle_after_deref(shuttle_t *shuttle)
 {
 	assert(((large_response_t *)(&shuttle->payload))->tuple != NULL);
 	shuttle->disposed = true;
-	if (!shuttle->stopped) {
-		shuttle->stopped = true;
-		stubborn_dispatch(get_curr_thread_ctx()->queue_to_tx, &cancel_processing_large_req_in_tx, shuttle);
-	}
+	release_large_shuttle(shuttle);
 }
 
 /* Launched in HTTP server thread to postprocess response */
@@ -468,10 +515,7 @@ static void postprocess_large_req(shuttle_t *shuttle)
 	large_response_t *const response = (large_response_t *)(&shuttle->payload);
 	if (shuttle->disposed) {
 		if (response->tuple != NULL) {
-			if (!shuttle->stopped) {
-				shuttle->stopped = true;
-				stubborn_dispatch(get_curr_thread_ctx()->queue_to_tx, &cancel_processing_large_req_in_tx, shuttle);
-			}
+			release_large_shuttle(shuttle);
 		} else
 			free_shuttle(shuttle);
 		return;
@@ -502,9 +546,8 @@ static void stop_sending_large(h2o_generator_t *self, h2o_req_t *req)
 {
 	shuttle_t *const shuttle = get_shuttle_from_generator(self);
 	large_response_t *const response = (large_response_t *)(&shuttle->payload);
-	if (response->tuple != NULL && !shuttle->stopped) {
-		shuttle->stopped = true;
-		stubborn_dispatch(get_curr_thread_ctx()->queue_to_tx, &cancel_processing_large_req_in_tx, shuttle);
+	if (response->tuple != NULL) {
+		release_large_shuttle(shuttle);
 	}
 }
 
