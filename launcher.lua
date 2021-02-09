@@ -75,6 +75,25 @@ local function large_handler(req, header_writer)
 	local payload_writer = header_writer:write_header(200, headers, payload, true)
 end
 
+local function multi_handler(req, header_writer)
+	-- Array of tables because more than one header can have the same field name (key).
+	local headers = {
+		{['content-type'] = 'text/plain; charset=utf-8'},
+		{['x-custom-header'] = 'foo'},
+	}
+
+	local payload_writer = header_writer:write_header(200, headers, nil, false)
+
+	local k, v
+	for k, v in s:pairs() do
+		--payload_writer:write(v.desc, false) --works but w/o newlines
+		payload_writer:write(string.format("%s\n", v.desc), false)
+	end
+
+	payload_writer:write('<End of list>', true)
+	--payload_writer:write(nil, true) -- also works
+end
+
 local httpng_lib = require "httpng"
 local init_func = httpng_lib.init
 
@@ -83,6 +102,7 @@ local sample_site_lib = require "sample_site"
 local lua_sites = {
 	{['path'] = '/lua_large', ['handler'] = large_handler},
 	{['path'] = '/lua_hello', ['handler'] = hello_handler},
+	{['path'] = '/lua_multi', ['handler'] = multi_handler},
 }
 
 init_func(lua_sites, sample_site_lib.get_site_desc, nil)

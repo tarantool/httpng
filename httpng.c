@@ -70,6 +70,7 @@ typedef struct {
 } http_header_entry_t;
 
 typedef struct {
+	h2o_generator_t generator;
 	http_header_entry_t headers[16]; /* FIXME: Dynamic? */
 	char *global_var_name; /* global var with Lua handler */
 	struct fiber *fiber;
@@ -78,6 +79,7 @@ typedef struct {
 	unsigned payload_len;
 	const char *payload;
 	bool fiber_done;
+	bool is_last_send;
 	char embedded_payload[];
 } lua_response_t;
 
@@ -101,6 +103,12 @@ static struct {
 static lua_State *global_L;
 
 __thread thread_ctx_t *curr_thread_ctx;
+
+static inline shuttle_t *get_shuttle_from_generator_lua(h2o_generator_t *generator)
+{
+	lua_response_t *const response = container_of(generator, lua_response_t, generator);
+	return (shuttle_t *)((char *)response - offsetof(shuttle_t, payload));
+}
 
 /* Called when dispatch must not fail */
 void stubborn_dispatch_uni(struct xtm_queue *queue, void *func, void *param)
@@ -141,8 +149,36 @@ static void free_shuttle_lua(shuttle_t *shuttle)
 	}
 }
 
-/* Launched in HTTP server thread to postprocess response */
-static void postprocess_lua_req(shuttle_t *shuttle)
+/* Launched in TX thread */
+static void continue_processing_lua_req_in_tx(shuttle_t *shuttle)
+{
+	lua_response_t *const response = (lua_response_t *)&shuttle->payload;
+
+	assert(response->fiber != NULL);
+	assert(!response->fiber_done);
+	fiber_wakeup(response->fiber);
+}
+
+/* Launched in HTTP server thread when H2O has sent everything and asks for more */
+static void proceed_sending_lua(h2o_generator_t *self, h2o_req_t *req)
+{
+	shuttle_t *const shuttle = get_shuttle_from_generator_lua(self);
+	thread_ctx_t *const thread_ctx = get_curr_thread_ctx();
+	stubborn_dispatch(thread_ctx->queue_to_tx, &continue_processing_lua_req_in_tx, shuttle);
+}
+
+/* Launched in HTTP server thread when connection has been closed */
+static void stop_sending_lua(h2o_generator_t *self, h2o_req_t *req)
+{
+	shuttle_t *const shuttle = get_shuttle_from_generator_lua(self);
+	if (!shuttle->stopped) {
+		shuttle->stopped = true;
+		stubborn_dispatch(get_curr_thread_ctx()->queue_to_tx, &cancel_processing_lua_req_in_tx, shuttle);
+	}
+}
+
+/* Launched in HTTP server thread to postprocess first response (with HTTP headers) */
+static void postprocess_lua_req_first(shuttle_t *shuttle)
 {
 	lua_response_t *const response = (lua_response_t *)(&shuttle->payload);
 	if (shuttle->disposed) {
@@ -166,13 +202,32 @@ static void postprocess_lua_req(shuttle_t *shuttle)
 
 	}
 
-	static h2o_generator_t generator = {NULL, NULL};
-	h2o_start_response(req, &generator);
+	response->generator = (h2o_generator_t){ proceed_sending_lua, stop_sending_lua };
+	h2o_start_response(req, &response->generator);
 
 	h2o_iovec_t buf;
 	buf.base = (void *)response->payload;
 	buf.len = response->payload_len;
-	h2o_send(req, &buf, 1, H2O_SEND_STATE_FINAL); /* FIXME: May not be final */
+	h2o_send(req, &buf, 1, response->is_last_send ? H2O_SEND_STATE_FINAL : H2O_SEND_STATE_IN_PROGRESS);
+}
+
+/* Launched in HTTP server thread to postprocess response (w/o HTTP headers) */
+static void postprocess_lua_req_others(shuttle_t *shuttle)
+{
+	lua_response_t *const response = (lua_response_t *)(&shuttle->payload);
+	if (shuttle->disposed) {
+		if (!shuttle->stopped) {
+			shuttle->stopped = true;
+			stubborn_dispatch(get_curr_thread_ctx()->queue_to_tx, &cancel_processing_lua_req_in_tx, shuttle);
+		}
+		return;
+	}
+	h2o_req_t *const req = shuttle->never_access_this_req_from_tx_thread;
+
+	h2o_iovec_t buf;
+	buf.base = (void *)response->payload;
+	buf.len = response->payload_len;
+	h2o_send(req, &buf, 1, response->is_last_send ? H2O_SEND_STATE_FINAL : H2O_SEND_STATE_IN_PROGRESS);
 }
 
 static void add_http_header_to_shuttle(shuttle_t *shuttle, const char *key, size_t key_len, const char *value, size_t value_len)
@@ -182,6 +237,43 @@ static void add_http_header_to_shuttle(shuttle_t *shuttle, const char *key, size
 		return;
 
 	response->headers[response->num_headers++] = (http_header_entry_t){key, value, key_len, value_len};
+}
+
+/* Launched in TX thread */
+static int payload_writer_write(lua_State *L)
+{
+	/* Lua parameters: self, payload, is_last. */
+	const unsigned num_params = lua_gettop(L);
+	if (num_params < 2)
+		goto Error;
+
+	lua_getfield(L, 1, "shuttle");
+	int is_integer;
+	shuttle_t *const shuttle = (shuttle_t *)lua_tointegerx(L, -1, &is_integer);
+	if (!is_integer)
+		goto Error;
+
+	lua_response_t *const response = (lua_response_t *)&shuttle->payload;
+
+	size_t payload_len;
+	response->payload = lua_tolstring(L, 2, &payload_len);
+	response->payload_len = payload_len;
+
+	bool is_last;
+	if (num_params >= 3)
+		is_last	= lua_toboolean(L, 3);
+	else
+		is_last = false;
+
+	response->is_last_send = is_last;
+	stubborn_dispatch(shuttle->thread_ctx->queue_from_tx, &postprocess_lua_req_others, shuttle);
+
+	/* Must wait for shuttle return. */
+	fiber_yield();
+
+Error: /* FIXME: This is incorrect */
+	/* FIXME: Should return Lua false if connection is already closed */
+	return 0;
 }
 
 /* Launched in TX thread */
@@ -228,17 +320,29 @@ static int header_writer_write_header(lua_State *L)
 		response->payload_len = payload_len;
 	}
 
-	/* FIXME: is_last is ignored for now */
+	bool is_last;
+	if (num_params >= 5)
+		is_last	= lua_toboolean(L, 5);
+	else
+		is_last = false;
 
-	stubborn_dispatch(shuttle->thread_ctx->queue_from_tx, &postprocess_lua_req, shuttle);
+	response->is_last_send = is_last;
+	stubborn_dispatch(shuttle->thread_ctx->queue_from_tx, &postprocess_lua_req_first, shuttle);
 
 	/* Must wait for shuttle return. */
 	fiber_yield();
 
 Error: /* FIXME: This is incorrect */
 
-	/* FIXME: Should return payload_writer object. */
-	lua_pushnil(L);
+	if (is_last) {
+		lua_pushnil(L);
+	} else {
+		lua_createtable(L, 0, 2);
+		lua_pushcfunction(L, payload_writer_write);
+		lua_setfield(L, -2, "write");
+		lua_pushinteger(L, (uintptr_t)shuttle);
+		lua_setfield(L, -2, "shuttle");
+	}
 	return 1;
 }
 
@@ -284,7 +388,7 @@ static void process_lua_req_in_tx(shuttle_t *shuttle)
 		memcpy(&response->embedded_payload, error_str, sizeof(error_str) - 1); \
 		response->payload = response->embedded_payload; \
 		response->payload_len = sizeof(error_str) - 1; \
-		stubborn_dispatch(shuttle->thread_ctx->queue_from_tx, &postprocess_lua_req, shuttle); \
+		stubborn_dispatch(shuttle->thread_ctx->queue_from_tx, &postprocess_lua_req_first, shuttle); \
 		return; \
 	} while (0)
 
@@ -308,6 +412,7 @@ static int lua_req_handler(lua_h2o_handler_t *self, h2o_req_t *req)
 	/* Can fill in shuttle->payload here */
 
 	lua_response_t *const response = (lua_response_t *)&shuttle->payload;
+	response->is_last_send = false;
 	response->global_var_name = self->global_var_name;
 
 	thread_ctx_t *const thread_ctx = get_curr_thread_ctx();
