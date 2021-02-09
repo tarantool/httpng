@@ -60,12 +60,15 @@ local function hello_handler(req, header_writer)
 end
 
 local function large_handler(req, header_writer)
+	local payload = large:get(2).desc
+
 	-- Array of tables because more than one header can have the same field name (key).
 	local headers = {
 		{['content-type'] = 'text/plain; charset=utf-8'},
+		--{['content-length'] = #payload}, -- won't work, must be string
+		{['content-length'] = string.format("%d", #payload)},
 		{['x-custom-header'] = 'foo'},
 	}
-	local payload = large:get(2).desc
 
 	-- Returns nil for now.
 	-- Last parameter MUST be true for now.
