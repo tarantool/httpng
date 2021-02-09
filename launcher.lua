@@ -65,7 +65,7 @@ local function large_handler(req, header_writer)
 		{['content-type'] = 'text/plain; charset=utf-8'},
 		{['x-custom-header'] = 'foo'},
 	}
-	local payload = 'Large hello from lua'
+	local payload = large:get(2).desc
 
 	-- Returns nil for now.
 	-- Last parameter MUST be true for now.
