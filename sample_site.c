@@ -63,9 +63,15 @@ typedef struct {
 static void continue_processing_stats_req_in_tx(shuttle_t *);
 static void cancel_processing_stats_req_in_tx(shuttle_t *);
 
-static inline shuttle_t *get_shuttle_from_generator(h2o_generator_t *generator)
+static inline shuttle_t *get_shuttle_from_generator_stats(h2o_generator_t *generator)
 {
 	response_with_state_t *const response = container_of(generator, response_with_state_t, generator);
+	return (shuttle_t *)((char *)response - offsetof(shuttle_t, payload));
+}
+
+static inline shuttle_t *get_shuttle_from_generator_large(h2o_generator_t *generator)
+{
+	large_response_t *const response = container_of(generator, large_response_t, generator);
 	return (shuttle_t *)((char *)response - offsetof(shuttle_t, payload));
 }
 
@@ -94,7 +100,7 @@ static void postprocess_users_req(shuttle_t *shuttle)
 /* Launched in HTTP server thread when H2O has sent everything and asks for more */
 static void proceed_sending_stats(h2o_generator_t *self, h2o_req_t *req)
 {
-	shuttle_t *const shuttle = get_shuttle_from_generator(self);
+	shuttle_t *const shuttle = get_shuttle_from_generator_stats(self);
 	thread_ctx_t *const thread_ctx = get_curr_thread_ctx();
 	stubborn_dispatch(thread_ctx->queue_to_tx, &continue_processing_stats_req_in_tx, shuttle);
 }
@@ -102,7 +108,7 @@ static void proceed_sending_stats(h2o_generator_t *self, h2o_req_t *req)
 /* Launched in HTTP server thread when connection has been closed */
 static void stop_sending_stats(h2o_generator_t *self, h2o_req_t *req)
 {
-	shuttle_t *const shuttle = get_shuttle_from_generator(self);
+	shuttle_t *const shuttle = get_shuttle_from_generator_stats(self);
 	response_with_state_t *const response = (response_with_state_t *)(&shuttle->payload);
 	if (response->need_more && !shuttle->stopped) {
 		shuttle->stopped = true;
@@ -529,7 +535,7 @@ static void postprocess_large_req(shuttle_t *shuttle)
 /* Launched in HTTP server thread when connection has been closed */
 static void stop_sending_large(h2o_generator_t *self, h2o_req_t *req)
 {
-	shuttle_t *const shuttle = get_shuttle_from_generator(self);
+	shuttle_t *const shuttle = get_shuttle_from_generator_large(self);
 	large_response_t *const response = (large_response_t *)(&shuttle->payload);
 	if (response->tuple != NULL) {
 		release_large_shuttle(shuttle);
