@@ -46,8 +46,40 @@ do
 	s:insert{counter, 'Entry #'..counter}
 end
 
+local function hello_handler(req, header_writer)
+	-- Array of tables because more than one header can have the same field name (key).
+	local headers = {
+		{['content-type'] = 'text/plain; charset=utf-8'},
+		{['x-custom-header'] = 'foo'},
+	}
+	local payload = 'Small hello from lua'
+
+	-- Returns nil for now.
+	-- Last parameter MUST be true for now.
+	local payload_writer = header_writer:write_header(200, headers, payload, true)
+end
+
+local function large_handler(req, header_writer)
+	-- Array of tables because more than one header can have the same field name (key).
+	local headers = {
+		{['content-type'] = 'text/plain; charset=utf-8'},
+		{['x-custom-header'] = 'foo'},
+	}
+	local payload = 'Large hello from lua'
+
+	-- Returns nil for now.
+	-- Last parameter MUST be true for now.
+	local payload_writer = header_writer:write_header(200, headers, payload, true)
+end
+
 local httpng_lib = require "httpng"
 local init_func = httpng_lib.init
 
 local sample_site_lib = require "sample_site"
-init_func(sample_site_lib.get_site_desc, nil)
+
+local lua_sites = {
+	{['path'] = '/lua_large', ['handler'] = large_handler},
+	{['path'] = '/lua_hello', ['handler'] = hello_handler},
+}
+
+init_func(lua_sites, sample_site_lib.get_site_desc, nil)

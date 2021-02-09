@@ -69,21 +69,6 @@ static inline shuttle_t *get_shuttle_from_generator(h2o_generator_t *generator)
 	return (shuttle_t *)((char *)response - offsetof(shuttle_t, payload));
 }
 
-/* Called when dispatch must not fail */
-static void stubborn_dispatch_uni(struct xtm_queue *queue, void *func, void *param)
-{
-	while (xtm_fun_dispatch(queue, func, param, 0)) {
-		/* Error; we must not fail so retry a little later */
-		fiber_sleep(0);
-	}
-}
-
-/* Called when dispatch must not fail */
-static inline void stubborn_dispatch(struct xtm_queue *queue, void (*func)(shuttle_t *), shuttle_t *shuttle)
-{
-	stubborn_dispatch_uni(queue, func, shuttle);
-}
-
 /* Launched in HTTP server thread */
 static void postprocess_users_req(shuttle_t *shuttle)
 {

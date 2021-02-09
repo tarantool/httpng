@@ -13,6 +13,10 @@
 #include <h2o/socket/uv-binding.h>
 #endif /* USE_LIBUV */
 
+#ifndef lengthof
+#define lengthof(array) (sizeof(array) / sizeof((array)[0]))
+#endif
+
 #ifdef TCP_FASTOPEN
 #define H2O_DEFAULT_LENGTH_TCP_FASTOPEN_QUEUE 4096
 #else
@@ -46,6 +50,37 @@ typedef struct {
 	int fd;
 } listener_cfg_t;
 
+typedef struct {
+	char *path;
+	char *global_var_name;
+} lua_site_t;
+
+typedef struct {
+	h2o_handler_t super;
+	char *global_var_name;
+	const char *path;
+	size_t path_len;
+} lua_h2o_handler_t;
+
+typedef struct {
+	const char *name;
+	const char *value;
+	unsigned name_len;
+	unsigned value_len;
+} http_header_entry_t;
+
+typedef struct {
+	http_header_entry_t headers[16]; /* FIXME: Dynamic? */
+	char *global_var_name; /* global var with Lua handler */
+	struct fiber *fiber;
+	unsigned num_headers;
+	unsigned http_code;
+	unsigned payload_len;
+	const char *payload;
+	bool fiber_done;
+	char embedded_payload[];
+} lua_response_t;
+
 static struct {
 	h2o_globalconf_t globalconf;
 	listener_cfg_t *listener_cfgs;
@@ -63,7 +98,231 @@ static struct {
 	.tfo_queues = H2O_DEFAULT_LENGTH_TCP_FASTOPEN_QUEUE,
 };
 
+static lua_State *global_L;
+
 __thread thread_ctx_t *curr_thread_ctx;
+
+/* Called when dispatch must not fail */
+void stubborn_dispatch_uni(struct xtm_queue *queue, void *func, void *param)
+{
+	while (xtm_fun_dispatch(queue, func, param, 0)) {
+		/* Error; we must not fail so retry a little later */
+		fiber_sleep(0);
+	}
+}
+
+/* Launched in HTTP server thread */
+static void cancel_processing_lua_req_in_http_thread(shuttle_t *shuttle)
+{
+	assert(shuttle->disposed);
+	free_shuttle(shuttle);
+}
+
+/* Launched in TX thread */
+static void cancel_processing_lua_req_in_tx(shuttle_t *shuttle)
+{
+	lua_response_t *const response = (lua_response_t *)&shuttle->payload;
+
+	/* FIXME: fiber_wake()? */
+	if (response->fiber != NULL && !response->fiber_done)
+		fiber_cancel(response->fiber);
+
+	/* Can't call free_shuttle() from TX thread because it [potentially] uses per-thread pools */
+	stubborn_dispatch(shuttle->thread_ctx->queue_from_tx, &cancel_processing_lua_req_in_http_thread, shuttle);
+}
+
+/* Launched in HTTP server thread */
+static void free_shuttle_lua(shuttle_t *shuttle)
+{
+	shuttle->disposed = true;
+	if (!shuttle->stopped) {
+		shuttle->stopped = true;
+		stubborn_dispatch(get_curr_thread_ctx()->queue_to_tx, &cancel_processing_lua_req_in_tx, shuttle);
+	}
+}
+
+/* Launched in HTTP server thread to postprocess response */
+static void postprocess_lua_req(shuttle_t *shuttle)
+{
+	lua_response_t *const response = (lua_response_t *)(&shuttle->payload);
+	if (shuttle->disposed) {
+		if (!shuttle->stopped) {
+			shuttle->stopped = true;
+			stubborn_dispatch(get_curr_thread_ctx()->queue_to_tx, &cancel_processing_lua_req_in_tx, shuttle);
+		}
+		return;
+	}
+	h2o_req_t *const req = shuttle->never_access_this_req_from_tx_thread;
+	req->res.status = response->http_code;
+	req->res.reason = "OK"; /* FIXME? */
+	const unsigned num_headers = response->num_headers;
+	unsigned header_idx;
+	for (header_idx = 0; header_idx < num_headers; ++header_idx) {
+		const http_header_entry_t *const header = &response->headers[header_idx];
+		h2o_add_header_by_str(&req->pool, &req->res.headers, header->name, header->name_len,
+				1, /* FIXME: Benchmark whether this faster than 0 */
+				NULL, /* FIXME: Do we need orig_name? */
+				header->value, header->value_len);
+
+	}
+
+	static h2o_generator_t generator = {NULL, NULL};
+	h2o_start_response(req, &generator);
+
+	h2o_iovec_t buf;
+	buf.base = (void *)response->payload;
+	buf.len = response->payload_len;
+	h2o_send(req, &buf, 1, H2O_SEND_STATE_FINAL); /* FIXME: May not be final */
+}
+
+static void add_http_header_to_shuttle(shuttle_t *shuttle, const char *key, size_t key_len, const char *value, size_t value_len)
+{
+	lua_response_t *const response = (lua_response_t *)&shuttle->payload;
+	if (response->num_headers >= lengthof(response->headers))
+		return;
+
+	response->headers[response->num_headers++] = (http_header_entry_t){key, value, key_len, value_len};
+}
+
+/* Launched in TX thread */
+static int header_writer_write_header(lua_State *L)
+{
+	/* Lua parameters: self, code, headers, payload, is_last. */
+	const unsigned num_params = lua_gettop(L);
+	if (num_params < 3)
+		goto Error;
+
+	lua_getfield(L, 1, "shuttle");
+
+	int is_integer;
+	shuttle_t *const shuttle = (shuttle_t *)lua_tointegerx(L, -1, &is_integer);
+	if (!is_integer)
+		goto Error;
+
+	lua_response_t *const response = (lua_response_t *)&shuttle->payload;
+	response->http_code = lua_tointegerx(L, 2, &is_integer);
+	if (!is_integer)
+		goto Error;
+
+	lua_pushnil(L); /* Start of table. */
+	while (lua_next(L, 3)) {
+		lua_pushnil(L); /* Start of table. */
+		while (lua_next(L, -2)) {
+			size_t key_len;
+			size_t value_len;
+			const char *const key = lua_tolstring(L, -2, &key_len);
+			const char *const value = lua_tolstring(L, -1, &value_len);
+
+			add_http_header_to_shuttle(shuttle, key, key_len, value, value_len);
+
+			/* Remove value, keep key for next iteration. */
+			lua_pop(L, 1);
+		}
+		/* Remove value, keep key for next iteration. */
+		lua_pop(L, 1);
+	}
+
+	if (num_params >= 4) {
+		size_t payload_len;
+		response->payload = lua_tolstring(L, 4, &payload_len);
+		response->payload_len = payload_len;
+	}
+
+	/* FIXME: is_last is ignored for now */
+
+	stubborn_dispatch(shuttle->thread_ctx->queue_from_tx, &postprocess_lua_req, shuttle);
+
+	/* Must wait for shuttle return. */
+	fiber_yield();
+
+Error: /* FIXME: This is incorrect */
+
+	/* FIXME: Should return payload_writer object. */
+	lua_pushnil(L);
+	return 1;
+}
+
+/* Launched in TX thread */
+static int
+lua_fiber_func(va_list ap)
+{
+	shuttle_t *const shuttle = va_arg(ap, shuttle_t *);
+	lua_State *const L = va_arg(ap, lua_State *);
+
+	lua_response_t *const response = (lua_response_t *)&shuttle->payload;
+
+	lua_getglobal(L, response->global_var_name); /* User handler function, written in Lua */
+
+	lua_pushnil(L); /* FIXME: request data should go here */
+
+	lua_createtable(L, 0, 2);
+	lua_pushcfunction(L, header_writer_write_header);
+	lua_setfield(L, -2, "write_header");
+
+	lua_pushinteger(L, (uintptr_t)shuttle);
+	lua_setfield(L, -2, "shuttle");
+
+	if (lua_pcall(L, 2, 0, 0) != LUA_OK) {
+		/* Must do something about it */
+		//x x x;
+	}
+
+	response->fiber_done = true;
+	return 0;
+}
+
+/* Launched in TX thread */
+static void process_lua_req_in_tx(shuttle_t *shuttle)
+{
+	lua_response_t *const response = (lua_response_t *)&shuttle->payload;
+	response->num_headers = 0;
+	response->payload_len = 0;
+
+#define RETURN_WITH_ERROR(err) \
+	do { \
+		static const char error_str[] = err; \
+		memcpy(&response->embedded_payload, error_str, sizeof(error_str) - 1); \
+		response->payload = response->embedded_payload; \
+		response->payload_len = sizeof(error_str) - 1; \
+		stubborn_dispatch(shuttle->thread_ctx->queue_from_tx, &postprocess_lua_req, shuttle); \
+		return; \
+	} while (0)
+
+	if ((response->fiber = fiber_new("HTTP Lua fiber", &lua_fiber_func)) == NULL)
+		RETURN_WITH_ERROR("Failed to create fiber");
+	response->fiber_done = false;
+	fiber_start(response->fiber, shuttle, global_L);
+}
+#undef RETURN_WITH_ERROR
+
+/* Launched in HTTP server thread */
+static int lua_req_handler(lua_h2o_handler_t *self, h2o_req_t *req)
+{
+	if (!(h2o_memis(req->method.base, req->method.len, H2O_STRLIT("GET")) &&
+	    h2o_memis(req->path_normalized.base, req->path_normalized.len, self->path, self->path_len))) {
+		/* FIXME: Should handle method/path in Lua handler */
+		return -1;
+	}
+
+	shuttle_t *const shuttle = prepare_shuttle(req);
+	/* Can fill in shuttle->payload here */
+
+	lua_response_t *const response = (lua_response_t *)&shuttle->payload;
+	response->global_var_name = self->global_var_name;
+
+	thread_ctx_t *const thread_ctx = get_curr_thread_ctx();
+	if (xtm_fun_dispatch(thread_ctx->queue_to_tx, (void(*)(void *))&process_lua_req_in_tx, shuttle, 0)) {
+		/* Error */
+		free_shuttle_with_anchor(shuttle);
+		req->res.status = 500;
+		req->res.reason = "Queue overflow";
+		h2o_send_inline(req, H2O_STRLIT("Queue overflow\n"));
+		return 0;
+	}
+	shuttle->anchor->user_free_shuttle = &free_shuttle_lua;
+
+	return 0;
+}
 
 static h2o_pathconf_t *register_handler(h2o_hostconf_t *hostconf, const char *path, int (*on_req)(h2o_handler_t *, h2o_req_t *))
 {
@@ -71,6 +330,19 @@ static h2o_pathconf_t *register_handler(h2o_hostconf_t *hostconf, const char *pa
 	h2o_pathconf_t *pathconf = h2o_config_register_path(hostconf, path, 0);
 	h2o_handler_t *handler = h2o_create_handler(pathconf, sizeof(*handler));
 	handler->on_req = on_req;
+	return pathconf;
+}
+
+/* N. b.: *path and *global_var_name must live until server is shutdown */
+static h2o_pathconf_t *register_lua_handler(h2o_hostconf_t *hostconf, const char *path, size_t path_len, char *global_var_name)
+{
+	/* These functions never return NULL, dying instead */
+	h2o_pathconf_t *pathconf = h2o_config_register_path(hostconf, path, 0);
+	lua_h2o_handler_t *handler = (lua_h2o_handler_t *)h2o_create_handler(pathconf, sizeof(*handler));
+	handler->super.on_req = (int (*)(h2o_handler_t *, h2o_req_t *))lua_req_handler;
+	handler->global_var_name = global_var_name;
+	handler->path = path;
+	handler->path_len = path_len;
 	return pathconf;
 }
 
@@ -428,22 +700,28 @@ tx_fiber_func(va_list ap)
 	return 0;
 }
 
-/* Lua parameters: function_to_call, function_param */
+/* Lua parameters: lua_sites, function_to_call, function_param */
 int init(lua_State *L)
 {
+	enum {
+		LUA_STACK_IDX_LUA_SITES = 1,
+		LUA_STACK_IDX_FUNCTION_TO_CALL = 2,
+		LUA_STACK_IDX_FUNCTION_PARAM = 3,
+	};
+	global_L = L;
 	memset(&conf.globalconf, 0, sizeof(conf.globalconf));
 
-	if (lua_gettop(L) < 2)
+	if (lua_gettop(L) < 3)
 		goto Error;
 
-	if (lua_type(L, 1) != LUA_TFUNCTION)
+	if (lua_type(L, LUA_STACK_IDX_FUNCTION_TO_CALL) != LUA_TFUNCTION)
 		goto Error;
 
 	if (lua_pcall(L, 1, 1, 0) != LUA_OK)
 		goto Error;
 
 	int is_integer;
-	const site_desc_t *const site_desc = (site_desc_t *)lua_tointegerx(L, 1, &is_integer);
+	const site_desc_t *const site_desc = (site_desc_t *)lua_tointegerx(L, -1, &is_integer);
 	if (!is_integer)
 		goto Error;
 	const path_desc_t *const path_descs = site_desc->path_descs;
@@ -472,6 +750,41 @@ int init(lua_State *L)
 		do {
 			register_handler(hostconf, path_desc->path, path_desc->handler);
 		} while ((++path_desc)->path != NULL);
+	}
+	lua_site_t *lua_sites = NULL; /* FIXME: Free allocated memory - including malloc'ed path and global_var_name - when shutting down */
+	unsigned lua_site_idx = 0;
+	lua_pushnil(L); /* Start of table. */
+	while (lua_next(L, LUA_STACK_IDX_LUA_SITES)) {
+		lua_getfield(L, -1, "path");
+		size_t path_len;
+		const char *const path = lua_tolstring(L, -1, &path_len);
+		if (path == NULL)
+			goto Error;
+
+		lua_site_t *const new_lua_sites = realloc(lua_sites, sizeof(lua_site_t) * (lua_site_idx + 1));
+		if (new_lua_sites == NULL)
+			goto Error;
+		lua_sites = new_lua_sites;
+		lua_site_t *const lua_site = &lua_sites[lua_site_idx];
+		if ((lua_site->path = malloc(path_len + 1)) == NULL)
+			goto Error;
+		memcpy(lua_site->path, path, path_len);
+		lua_site->path[path_len] = 0;
+
+		lua_site->global_var_name = malloc(32); /* FIXME */
+		snprintf(lua_site->global_var_name, 32, "httpng_handler_%u", lua_site_idx);
+
+		lua_getfield(L, -2, "handler");
+		if (lua_type(L, -1) != LUA_TFUNCTION)
+			goto Error;
+		lua_setglobal(L, lua_site->global_var_name); /* To access by C fiber */
+
+		register_lua_handler(hostconf, lua_site->path, path_len, lua_site->global_var_name);
+
+		++lua_site_idx;
+
+		/* Remove path string and site array value, keep key for next iteration. */
+		lua_pop(L, 2);
 	}
 
 	SSL_CTX *ssl_ctx;

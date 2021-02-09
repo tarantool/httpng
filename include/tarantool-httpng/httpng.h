@@ -86,6 +86,15 @@ extern void free_shuttle(shuttle_t *);
  * Expected usage: when req handler can't or wouldn't queue request to TX thread. */
 extern void free_shuttle_with_anchor(shuttle_t *);
 
+/* Called when dispatch must not fail */
+extern void stubborn_dispatch_uni(struct xtm_queue *queue, void *func, void *param);
+
+/* Called when dispatch must not fail */
+static inline void stubborn_dispatch(struct xtm_queue *queue, void (*func)(shuttle_t *), shuttle_t *shuttle)
+{
+	stubborn_dispatch_uni(queue, func, shuttle);
+}
+
 #if defined(__cplusplus)
 }
 #endif /* defined(__cplusplus) */
