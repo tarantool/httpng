@@ -73,6 +73,7 @@ typedef struct {
 	h2o_generator_t generator;
 	http_header_entry_t headers[16]; /* FIXME: Dynamic? */
 	char *global_var_name; /* global var with Lua handler */
+	const char *site_path;
 	struct fiber *fiber;
 	unsigned num_headers;
 	unsigned http_code;
@@ -367,8 +368,18 @@ lua_fiber_func(va_list ap)
 	lua_setfield(L, -2, "shuttle");
 
 	if (lua_pcall(L, 2, 0, 0) != LUA_OK) {
-		/* Must do something about it */
-		//x x x;
+		/* FIXME: Should probably log this instead(?) */
+		fprintf(stderr, "User handler for \"\%s\" failed with error \"%s\"\n", response->site_path, lua_tostring(L, -1));
+
+		static const char key[] = "content-type";
+		static const char value[] = "text/plain; charset=utf-8";
+		add_http_header_to_shuttle(shuttle, key, sizeof(key) - 1, value, sizeof(value) - 1);
+		static const char error_str[] = "Path handler execution error";
+		response->is_last_send = true;
+		response->http_code = 500;
+		response->payload = error_str;
+		response->payload_len = sizeof(error_str) - 1;
+		stubborn_dispatch(shuttle->thread_ctx->queue_from_tx, &postprocess_lua_req_first, shuttle);
 	}
 
 	response->fiber_done = true;
@@ -384,9 +395,13 @@ static void process_lua_req_in_tx(shuttle_t *shuttle)
 
 #define RETURN_WITH_ERROR(err) \
 	do { \
+		static const char key[] = "content-type"; \
+		static const char value[] = "text/plain; charset=utf-8"; \
+		add_http_header_to_shuttle(shuttle, key, sizeof(key) - 1, value, sizeof(value) - 1); \
 		static const char error_str[] = err; \
-		memcpy(&response->embedded_payload, error_str, sizeof(error_str) - 1); \
-		response->payload = response->embedded_payload; \
+		response->is_last_send = true; \
+		response->http_code = 500; \
+		response->payload = error_str; \
 		response->payload_len = sizeof(error_str) - 1; \
 		stubborn_dispatch(shuttle->thread_ctx->queue_from_tx, &postprocess_lua_req_first, shuttle); \
 		return; \
@@ -414,6 +429,7 @@ static int lua_req_handler(lua_h2o_handler_t *self, h2o_req_t *req)
 	lua_response_t *const response = (lua_response_t *)&shuttle->payload;
 	response->is_last_send = false;
 	response->global_var_name = self->global_var_name;
+	response->site_path = self->path;
 
 	thread_ctx_t *const thread_ctx = get_curr_thread_ctx();
 	if (xtm_fun_dispatch(thread_ctx->queue_to_tx, (void(*)(void *))&process_lua_req_in_tx, shuttle, 0)) {
