@@ -81,6 +81,7 @@ typedef struct {
 	const char *payload;
 	bool fiber_done;
 	bool is_last_send;
+	bool sent_something;
 	char embedded_payload[];
 } lua_response_t;
 
@@ -204,6 +205,7 @@ static void postprocess_lua_req_first(shuttle_t *shuttle)
 	}
 
 	response->generator = (h2o_generator_t){ proceed_sending_lua, stop_sending_lua };
+	response->sent_something = true;
 	h2o_start_response(req, &response->generator);
 
 	h2o_iovec_t buf;
@@ -371,15 +373,21 @@ lua_fiber_func(va_list ap)
 		/* FIXME: Should probably log this instead(?) */
 		fprintf(stderr, "User handler for \"\%s\" failed with error \"%s\"\n", response->site_path, lua_tostring(L, -1));
 
-		static const char key[] = "content-type";
-		static const char value[] = "text/plain; charset=utf-8";
-		add_http_header_to_shuttle(shuttle, key, sizeof(key) - 1, value, sizeof(value) - 1);
-		static const char error_str[] = "Path handler execution error";
 		response->is_last_send = true;
-		response->http_code = 500;
-		response->payload = error_str;
-		response->payload_len = sizeof(error_str) - 1;
-		stubborn_dispatch(shuttle->thread_ctx->queue_from_tx, &postprocess_lua_req_first, shuttle);
+		if (response->sent_something) {
+			/* Do not add anything to user output to prevent corrupt HTML etc */
+			response->payload_len = 0;
+			stubborn_dispatch(shuttle->thread_ctx->queue_from_tx, &postprocess_lua_req_others, shuttle);
+		} else {
+			static const char key[] = "content-type";
+			static const char value[] = "text/plain; charset=utf-8";
+			add_http_header_to_shuttle(shuttle, key, sizeof(key) - 1, value, sizeof(value) - 1);
+			static const char error_str[] = "Path handler execution error";
+			response->http_code = 500;
+			response->payload = error_str;
+			response->payload_len = sizeof(error_str) - 1;
+			stubborn_dispatch(shuttle->thread_ctx->queue_from_tx, &postprocess_lua_req_first, shuttle);
+		}
 	}
 
 	response->fiber_done = true;
@@ -428,6 +436,7 @@ static int lua_req_handler(lua_h2o_handler_t *self, h2o_req_t *req)
 
 	lua_response_t *const response = (lua_response_t *)&shuttle->payload;
 	response->is_last_send = false;
+	response->sent_something = false;
 	response->global_var_name = self->global_var_name;
 	response->site_path = self->path;
 
