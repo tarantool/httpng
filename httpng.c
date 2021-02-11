@@ -57,12 +57,11 @@ typedef struct {
 
 typedef struct {
 	char *path;
-	char *global_var_name;
 } lua_site_t;
 
 typedef struct {
 	h2o_handler_t super;
-	char *global_var_name;
+	int lua_handler_ref;
 	const char *path;
 	size_t path_len;
 } lua_h2o_handler_t;
@@ -93,7 +92,7 @@ typedef struct {
 } lua_response_struct_t;
 
 typedef struct {
-	char *global_var_name; /* global var with Lua handler */
+	int lua_handler_ref; /* Reference to user Lua handler. */
 	char path[LUA_MAX_PATH_LEN]; /* From h2o_req_t. */
 	unsigned path_len;
 	unsigned query_at;
@@ -423,7 +422,7 @@ lua_fiber_func(va_list ap)
 
 	lua_response_t *const response = (lua_response_t *)&shuttle->payload;
 
-	lua_getglobal(L, response->un.req.global_var_name); /* User handler function, written in Lua */
+	lua_rawgeti(L, LUA_REGISTRYINDEX, response->un.req.lua_handler_ref); /* User handler function, written in Lua. */
 
 	/* First param for Lua handler - query */
 	lua_createtable(L, 0, 1);
@@ -551,7 +550,7 @@ static int lua_req_handler(lua_h2o_handler_t *self, h2o_req_t *req)
 	response->sent_something = false;
 	response->cancelled = false;
 	response->is_waiting = false;
-	response->un.req.global_var_name = self->global_var_name;
+	response->un.req.lua_handler_ref = self->lua_handler_ref;
 	response->site_path = self->path;
 
 	thread_ctx_t *const thread_ctx = get_curr_thread_ctx();
@@ -577,14 +576,14 @@ static h2o_pathconf_t *register_handler(h2o_hostconf_t *hostconf, const char *pa
 	return pathconf;
 }
 
-/* N. b.: *path and *global_var_name must live until server is shutdown */
-static h2o_pathconf_t *register_lua_handler(h2o_hostconf_t *hostconf, const char *path, size_t path_len, char *global_var_name)
+/* N. b.: *path must live until server is shutdown */
+static h2o_pathconf_t *register_lua_handler(h2o_hostconf_t *hostconf, const char *path, size_t path_len, int lua_handler_ref)
 {
 	/* These functions never return NULL, dying instead */
 	h2o_pathconf_t *pathconf = h2o_config_register_path(hostconf, path, 0);
 	lua_h2o_handler_t *handler = (lua_h2o_handler_t *)h2o_create_handler(pathconf, sizeof(*handler));
 	handler->super.on_req = (int (*)(h2o_handler_t *, h2o_req_t *))lua_req_handler;
-	handler->global_var_name = global_var_name;
+	handler->lua_handler_ref = lua_handler_ref;
 	handler->path = path;
 	handler->path_len = path_len;
 	return pathconf;
@@ -994,7 +993,7 @@ int init(lua_State *L)
 			register_handler(hostconf, path_desc->path, path_desc->handler);
 		} while ((++path_desc)->path != NULL);
 	}
-	lua_site_t *lua_sites = NULL; /* FIXME: Free allocated memory - including malloc'ed path and global_var_name - when shutting down */
+	lua_site_t *lua_sites = NULL; /* FIXME: Free allocated memory - including malloc'ed path - when shutting down */
 	unsigned lua_site_idx = 0;
 	lua_pushnil(L); /* Start of table. */
 	while (lua_next(L, LUA_STACK_IDX_LUA_SITES)) {
@@ -1014,15 +1013,11 @@ int init(lua_State *L)
 		memcpy(lua_site->path, path, path_len);
 		lua_site->path[path_len] = 0;
 
-		lua_site->global_var_name = malloc(32); /* FIXME */
-		snprintf(lua_site->global_var_name, 32, "httpng_handler_%u", lua_site_idx);
-
 		lua_getfield(L, -2, "handler");
 		if (lua_type(L, -1) != LUA_TFUNCTION)
 			goto Error;
-		lua_setglobal(L, lua_site->global_var_name); /* To access by C fiber */
 
-		register_lua_handler(hostconf, lua_site->path, path_len, lua_site->global_var_name);
+		register_lua_handler(hostconf, lua_site->path, path_len, luaL_ref(L, LUA_REGISTRYINDEX));
 
 		++lua_site_idx;
 
