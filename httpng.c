@@ -75,6 +75,7 @@ typedef struct {
 	char *global_var_name; /* global var with Lua handler */
 	const char *site_path;
 	struct fiber *fiber;
+	int lua_state_ref;
 	unsigned num_headers;
 	unsigned http_code;
 	unsigned payload_len;
@@ -82,6 +83,8 @@ typedef struct {
 	bool fiber_done;
 	bool is_last_send;
 	bool sent_something;
+	bool cancelled; /* Changed by TX thread. */
+	bool is_waiting; /* Changed by TX thread. */
 	char embedded_payload[];
 } lua_response_t;
 
@@ -101,8 +104,6 @@ static struct {
 } conf = {
 	.tfo_queues = H2O_DEFAULT_LENGTH_TCP_FASTOPEN_QUEUE,
 };
-
-static lua_State *global_L;
 
 __thread thread_ctx_t *curr_thread_ctx;
 
@@ -128,27 +129,42 @@ static void cancel_processing_lua_req_in_http_thread(shuttle_t *shuttle)
 	free_shuttle(shuttle);
 }
 
+/* Launched in TX thread.
+ * It can queue request to HTTP thread or free everything itself. */
+static void free_lua_shuttle_from_tx(shuttle_t *shuttle)
+{
+	/* Can't call free_shuttle() from TX thread because it [potentially] uses per-thread pools. */
+	stubborn_dispatch(shuttle->thread_ctx->queue_from_tx, &cancel_processing_lua_req_in_http_thread, shuttle);
+}
+
 /* Launched in TX thread */
 static void cancel_processing_lua_req_in_tx(shuttle_t *shuttle)
 {
 	lua_response_t *const response = (lua_response_t *)&shuttle->payload;
 
-	/* FIXME: fiber_wake()? */
-	if (response->fiber != NULL && !response->fiber_done)
-		fiber_cancel(response->fiber);
-
-	/* Can't call free_shuttle() from TX thread because it [potentially] uses per-thread pools */
-	stubborn_dispatch(shuttle->thread_ctx->queue_from_tx, &cancel_processing_lua_req_in_http_thread, shuttle);
+	/* We do not use fiber_cancel() because it causes exception
+	 * in Lua code so Lua handler have to use pcall() and even
+	 * that is not 100% guarantee because such exception
+	 * can theoretically happen before pcall().
+	 * Also we have unref Lua state. */
+	if (response->fiber == NULL)
+		free_lua_shuttle_from_tx(shuttle);
+	else if (response->is_waiting) {
+		assert(!response->fiber_done);
+		response->cancelled = true;
+		fiber_wakeup(response->fiber);
+	} else if (response->fiber_done)
+		free_lua_shuttle_from_tx(shuttle);
+	else
+		response->cancelled = true;
+		; /* Fiber would clean up because we have set cancelled=true */
 }
 
 /* Launched in HTTP server thread */
 static void free_shuttle_lua(shuttle_t *shuttle)
 {
 	shuttle->disposed = true;
-	if (!shuttle->stopped) {
-		shuttle->stopped = true;
-		stubborn_dispatch(get_curr_thread_ctx()->queue_to_tx, &cancel_processing_lua_req_in_tx, shuttle);
-	}
+	stubborn_dispatch(get_curr_thread_ctx()->queue_to_tx, &cancel_processing_lua_req_in_tx, shuttle);
 }
 
 /* Launched in TX thread */
@@ -158,6 +174,7 @@ static void continue_processing_lua_req_in_tx(shuttle_t *shuttle)
 
 	assert(response->fiber != NULL);
 	assert(!response->fiber_done);
+	assert(response->is_waiting);
 	fiber_wakeup(response->fiber);
 }
 
@@ -169,27 +186,12 @@ static void proceed_sending_lua(h2o_generator_t *self, h2o_req_t *req)
 	stubborn_dispatch(thread_ctx->queue_to_tx, &continue_processing_lua_req_in_tx, shuttle);
 }
 
-/* Launched in HTTP server thread when connection has been closed */
-static void stop_sending_lua(h2o_generator_t *self, h2o_req_t *req)
-{
-	shuttle_t *const shuttle = get_shuttle_from_generator_lua(self);
-	if (!shuttle->stopped) {
-		shuttle->stopped = true;
-		stubborn_dispatch(get_curr_thread_ctx()->queue_to_tx, &cancel_processing_lua_req_in_tx, shuttle);
-	}
-}
-
 /* Launched in HTTP server thread to postprocess first response (with HTTP headers) */
 static void postprocess_lua_req_first(shuttle_t *shuttle)
 {
 	lua_response_t *const response = (lua_response_t *)(&shuttle->payload);
-	if (shuttle->disposed) {
-		if (!shuttle->stopped) {
-			shuttle->stopped = true;
-			stubborn_dispatch(get_curr_thread_ctx()->queue_to_tx, &cancel_processing_lua_req_in_tx, shuttle);
-		}
+	if (shuttle->disposed)
 		return;
-	}
 	h2o_req_t *const req = shuttle->never_access_this_req_from_tx_thread;
 	req->res.status = response->http_code;
 	req->res.reason = "OK"; /* FIXME? */
@@ -204,7 +206,7 @@ static void postprocess_lua_req_first(shuttle_t *shuttle)
 
 	}
 
-	response->generator = (h2o_generator_t){ proceed_sending_lua, stop_sending_lua };
+	response->generator = (h2o_generator_t){ proceed_sending_lua, NULL }; /* Do not use stop_sending, we handle everything in free_shuttle_lua(). */
 	response->sent_something = true;
 	h2o_start_response(req, &response->generator);
 
@@ -218,13 +220,8 @@ static void postprocess_lua_req_first(shuttle_t *shuttle)
 static void postprocess_lua_req_others(shuttle_t *shuttle)
 {
 	lua_response_t *const response = (lua_response_t *)(&shuttle->payload);
-	if (shuttle->disposed) {
-		if (!shuttle->stopped) {
-			shuttle->stopped = true;
-			stubborn_dispatch(get_curr_thread_ctx()->queue_to_tx, &cancel_processing_lua_req_in_tx, shuttle);
-		}
+	if (shuttle->disposed)
 		return;
-	}
 	h2o_req_t *const req = shuttle->never_access_this_req_from_tx_thread;
 
 	h2o_iovec_t buf;
@@ -242,6 +239,14 @@ static void add_http_header_to_shuttle(shuttle_t *shuttle, const char *key, size
 	response->headers[response->num_headers++] = (http_header_entry_t){key, value, key_len, value_len};
 }
 
+/* Launched in TX thread. */
+static inline void wait_for_lua_shuttle_return(lua_response_t *response)
+{
+	response->is_waiting = true;
+	fiber_yield();
+	response->is_waiting = false;
+}
+
 /* Launched in TX thread */
 static int payload_writer_write(lua_State *L)
 {
@@ -257,6 +262,11 @@ static int payload_writer_write(lua_State *L)
 		goto Error;
 
 	lua_response_t *const response = (lua_response_t *)&shuttle->payload;
+	if (response->cancelled) {
+		/* Returning Lua true because connection has already been closed. */
+		lua_pushboolean(L, true);
+		return 1;
+	}
 
 	size_t payload_len;
 	response->payload = lua_tolstring(L, 2, &payload_len);
@@ -270,13 +280,24 @@ static int payload_writer_write(lua_State *L)
 
 	response->is_last_send = is_last;
 	stubborn_dispatch(shuttle->thread_ctx->queue_from_tx, &postprocess_lua_req_others, shuttle);
+	wait_for_lua_shuttle_return(response);
 
-	/* Must wait for shuttle return. */
-	fiber_yield();
+	/* Returning Lua true if connection has already been closed. */
+	lua_pushboolean(L, response->cancelled);
+	return 1;
 
-Error: /* FIXME: This is incorrect */
-	/* FIXME: Should return Lua false if connection is already closed */
-	return 0;
+Error: /* FIXME: Error message */
+	lua_pushboolean(L, true);
+	return 1;
+}
+
+/* Launched in TX thread. */
+static int payload_writer_write_nop(lua_State *L)
+{
+	/* Lua parameters: self, payload, is_last. */
+	/* Returning Lua true because connection has already been closed. */
+	lua_pushboolean(L, true);
+	return 1;
 }
 
 /* Launched in TX thread */
@@ -294,7 +315,25 @@ static int header_writer_write_header(lua_State *L)
 	if (!is_integer)
 		goto Error;
 
+	bool is_last;
+	if (num_params >= 5)
+		is_last	= lua_toboolean(L, 5);
+	else
+		is_last = false;
+
 	lua_response_t *const response = (lua_response_t *)&shuttle->payload;
+	if (response->cancelled) {
+		/* Can't send anything, connection has been closed. */
+		if (is_last)
+			lua_pushnil(L);
+		else {
+			lua_createtable(L, 0, 2);
+			lua_pushcfunction(L, payload_writer_write_nop);
+			lua_setfield(L, -2, "write");
+		}
+		return 1;
+	}
+
 	response->http_code = lua_tointegerx(L, 2, &is_integer);
 	if (!is_integer)
 		goto Error;
@@ -323,22 +362,16 @@ static int header_writer_write_header(lua_State *L)
 		response->payload_len = payload_len;
 	}
 
-	bool is_last;
-	if (num_params >= 5)
-		is_last	= lua_toboolean(L, 5);
-	else
-		is_last = false;
-
 	response->is_last_send = is_last;
 	stubborn_dispatch(shuttle->thread_ctx->queue_from_tx, &postprocess_lua_req_first, shuttle);
+	wait_for_lua_shuttle_return(response);
 
-	/* Must wait for shuttle return. */
-	fiber_yield();
-
-Error: /* FIXME: This is incorrect */
-
-	if (is_last) {
+	if (is_last)
 		lua_pushnil(L);
+	else if (response->cancelled) {
+		lua_createtable(L, 0, 1);
+		lua_pushcfunction(L, payload_writer_write_nop);
+		lua_setfield(L, -2, "write");
 	} else {
 		lua_createtable(L, 0, 2);
 		lua_pushcfunction(L, payload_writer_write);
@@ -346,6 +379,10 @@ Error: /* FIXME: This is incorrect */
 		lua_pushinteger(L, (uintptr_t)shuttle);
 		lua_setfield(L, -2, "shuttle");
 	}
+	return 1;
+
+Error: /* FIXME: Error message? */
+	lua_pushnil(L);
 	return 1;
 }
 
@@ -369,28 +406,47 @@ lua_fiber_func(va_list ap)
 	lua_pushinteger(L, (uintptr_t)shuttle);
 	lua_setfield(L, -2, "shuttle");
 
+	const int lua_state_ref = response->lua_state_ref;
 	if (lua_pcall(L, 2, 0, 0) != LUA_OK) {
 		/* FIXME: Should probably log this instead(?) */
 		fprintf(stderr, "User handler for \"\%s\" failed with error \"%s\"\n", response->site_path, lua_tostring(L, -1));
 
-		response->is_last_send = true;
-		if (response->sent_something) {
-			/* Do not add anything to user output to prevent corrupt HTML etc */
-			response->payload_len = 0;
-			stubborn_dispatch(shuttle->thread_ctx->queue_from_tx, &postprocess_lua_req_others, shuttle);
+		if (response->cancelled) {
+			/* No point trying to send something, connection has already been closed. */
+			/* There would be no more calls from HTTP thread, must clean up. */
+			free_lua_shuttle_from_tx(shuttle);
 		} else {
-			static const char key[] = "content-type";
-			static const char value[] = "text/plain; charset=utf-8";
-			add_http_header_to_shuttle(shuttle, key, sizeof(key) - 1, value, sizeof(value) - 1);
-			static const char error_str[] = "Path handler execution error";
-			response->http_code = 500;
-			response->payload = error_str;
-			response->payload_len = sizeof(error_str) - 1;
-			stubborn_dispatch(shuttle->thread_ctx->queue_from_tx, &postprocess_lua_req_first, shuttle);
+			response->is_last_send = true;
+			if (response->sent_something) {
+				/* Do not add anything to user output to prevent corrupt HTML etc. */
+				response->payload_len = 0;
+				stubborn_dispatch(shuttle->thread_ctx->queue_from_tx, &postprocess_lua_req_others, shuttle);
+			} else {
+				static const char key[] = "content-type";
+				static const char value[] = "text/plain; charset=utf-8";
+				add_http_header_to_shuttle(shuttle, key, sizeof(key) - 1, value, sizeof(value) - 1);
+				static const char error_str[] = "Path handler execution error";
+				response->http_code = 500;
+				response->payload = error_str;
+				response->payload_len = sizeof(error_str) - 1;
+				stubborn_dispatch(shuttle->thread_ctx->queue_from_tx, &postprocess_lua_req_first, shuttle);
+			}
+			wait_for_lua_shuttle_return(response);
+			if (response->cancelled)
+				/* There would be no more calls from HTTP thread, must clean up. */
+				free_lua_shuttle_from_tx(shuttle);
+			else
+				response->fiber_done = true;
+				/* cancel_processing_lua_req_in_tx() is not yet called, it would clean up because we have set fiber_done=true. */
 		}
-	}
+	} else if (response->cancelled)
+		/* There would be no more calls from HTTP thread, must clean up */
+		free_lua_shuttle_from_tx(shuttle);
+	else
+		response->fiber_done = true;
+		/* cancel_processing_lua_req_in_tx() is not yet called, it would clean up because we have set fiber_done=true */
 
-	response->fiber_done = true;
+	luaL_unref(luaT_state(), LUA_REGISTRYINDEX, lua_state_ref);
 	return 0;
 }
 
@@ -399,10 +455,10 @@ static void process_lua_req_in_tx(shuttle_t *shuttle)
 {
 	lua_response_t *const response = (lua_response_t *)&shuttle->payload;
 	response->num_headers = 0;
-	response->payload_len = 0;
 
 #define RETURN_WITH_ERROR(err) \
 	do { \
+		luaL_unref(L, LUA_REGISTRYINDEX, response->lua_state_ref); \
 		static const char key[] = "content-type"; \
 		static const char value[] = "text/plain; charset=utf-8"; \
 		add_http_header_to_shuttle(shuttle, key, sizeof(key) - 1, value, sizeof(value) - 1); \
@@ -415,10 +471,14 @@ static void process_lua_req_in_tx(shuttle_t *shuttle)
 		return; \
 	} while (0)
 
+	struct lua_State *const L = luaT_state();
+	struct lua_State *const new_L = lua_newthread(L);
+	response->lua_state_ref = luaL_ref(L, LUA_REGISTRYINDEX);
 	if ((response->fiber = fiber_new("HTTP Lua fiber", &lua_fiber_func)) == NULL)
 		RETURN_WITH_ERROR("Failed to create fiber");
+	response->payload_len = 0;
 	response->fiber_done = false;
-	fiber_start(response->fiber, shuttle, global_L);
+	fiber_start(response->fiber, shuttle, new_L);
 }
 #undef RETURN_WITH_ERROR
 
@@ -437,6 +497,8 @@ static int lua_req_handler(lua_h2o_handler_t *self, h2o_req_t *req)
 	lua_response_t *const response = (lua_response_t *)&shuttle->payload;
 	response->is_last_send = false;
 	response->sent_something = false;
+	response->cancelled = false;
+	response->is_waiting = false;
 	response->global_var_name = self->global_var_name;
 	response->site_path = self->path;
 
@@ -838,7 +900,6 @@ int init(lua_State *L)
 		LUA_STACK_IDX_FUNCTION_TO_CALL = 2,
 		LUA_STACK_IDX_FUNCTION_PARAM = 3,
 	};
-	global_L = L;
 	memset(&conf.globalconf, 0, sizeof(conf.globalconf));
 
 	if (lua_gettop(L) < 3)
@@ -856,7 +917,7 @@ int init(lua_State *L)
 		goto Error;
 	const path_desc_t *const path_descs = site_desc->path_descs;
 	conf.tx_fiber_should_work = 1;
-	/* FIXME: Add sanity checks, especially shuttle_size - it must >sizeof(shuttle_t) and aligned */
+	/* FIXME: Add sanity checks, especially shuttle_size - it must >sizeof(shuttle_t) (accounting for Lua payload) and aligned */
 	conf.num_threads = site_desc->num_threads;
 	conf.shuttle_size = site_desc->shuttle_size;
 	conf.max_conn_per_thread = site_desc->max_conn_per_thread;

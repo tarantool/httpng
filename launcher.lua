@@ -1,6 +1,8 @@
 #!/usr/bin/env tarantool
 
 local fio = require('fio')
+local fiber = require('fiber')
+require('strict')
 
 box.cfg{
   listen = 3306,
@@ -84,10 +86,19 @@ local function multi_handler(req, header_writer)
 
 	local payload_writer = header_writer:write_header(200, headers, nil, false)
 
-	local k, v
+	local k, v, counter
+	counter = 0
 	for k, v in s:pairs() do
 		--payload_writer:write(v.desc, false) --works but w/o newlines
-		payload_writer:write(string.format("%s\n", v.desc), false)
+		local closed = payload_writer:write(string.format("%s\n", v.desc), false)
+		if closed then
+			-- Connection has already been closed
+			return
+		end
+		counter = counter + 1
+		if ((counter % 2000) == 0) then
+			fiber.sleep(0.5)
+		end
 	end
 
 	payload_writer:write('<End of list>', true)

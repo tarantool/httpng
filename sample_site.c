@@ -740,7 +740,7 @@ static int fiber_req_handler(h2o_handler_t *self, h2o_req_t *req)
 static const site_desc_t our_site_desc = {
 	.num_threads = 4,
 	.max_conn_per_thread = 64,
-	.shuttle_size = 256,
+	.shuttle_size = 1024,
 	/* All .init_userdata_in_tx() are called, we can use per-path initialization functions
 	 * (this can be more convenient when integrating several modules)
 	 * or put everything into one. */
