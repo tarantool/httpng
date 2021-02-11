@@ -75,25 +75,42 @@ typedef struct {
 } http_header_entry_t;
 
 typedef struct {
-	h2o_generator_t generator;
 	http_header_entry_t headers[16]; /* FIXME: Dynamic? */
+	unsigned num_headers;
+	unsigned http_code;
+} lua_first_response_only_t;
+
+typedef struct {
+	h2o_generator_t generator;
+	unsigned payload_len;
+	const char *payload;
+	bool is_last_send;
+} lua_any_response_t;
+
+typedef struct {
+	lua_any_response_t any;
+	lua_first_response_only_t first;
+} lua_response_struct_t;
+
+typedef struct {
 	char *global_var_name; /* global var with Lua handler */
+	char path[LUA_MAX_PATH_LEN]; /* From h2o_req_t. */
+	unsigned path_len;
+	unsigned query_at;
+} lua_first_request_only_t;
+
+typedef struct {
+	union { /* Can use struct instead when debugging. */
+		lua_first_request_only_t req;
+		lua_response_struct_t resp;
+	} un;
 	const char *site_path;
 	struct fiber *fiber;
 	int lua_state_ref;
-	unsigned num_headers;
-	unsigned http_code;
-	unsigned payload_len;
-	unsigned path_len;
-	unsigned query_at;
-	const char *payload;
 	bool fiber_done;
-	bool is_last_send;
 	bool sent_something;
 	bool cancelled; /* Changed by TX thread. */
 	bool is_waiting; /* Changed by TX thread. */
-	char path[LUA_MAX_PATH_LEN]; /* From h2o_req_t. */
-	char embedded_payload[];
 } lua_response_t;
 
 static struct {
@@ -117,7 +134,7 @@ __thread thread_ctx_t *curr_thread_ctx;
 
 static inline shuttle_t *get_shuttle_from_generator_lua(h2o_generator_t *generator)
 {
-	lua_response_t *const response = container_of(generator, lua_response_t, generator);
+	lua_response_t *const response = container_of(generator, lua_response_t, un.resp.any.generator);
 	return (shuttle_t *)((char *)response - offsetof(shuttle_t, payload));
 }
 
@@ -194,6 +211,14 @@ static void proceed_sending_lua(h2o_generator_t *self, h2o_req_t *req)
 	stubborn_dispatch(thread_ctx->queue_to_tx, &continue_processing_lua_req_in_tx, shuttle);
 }
 
+static inline void send_lua(h2o_req_t *req, lua_response_t *const response)
+{
+	h2o_iovec_t buf;
+	buf.base = (void *)response->un.resp.any.payload;
+	buf.len = response->un.resp.any.payload_len;
+	h2o_send(req, &buf, 1, response->un.resp.any.is_last_send ? H2O_SEND_STATE_FINAL : H2O_SEND_STATE_IN_PROGRESS);
+}
+
 /* Launched in HTTP server thread to postprocess first response (with HTTP headers) */
 static void postprocess_lua_req_first(shuttle_t *shuttle)
 {
@@ -201,12 +226,12 @@ static void postprocess_lua_req_first(shuttle_t *shuttle)
 	if (shuttle->disposed)
 		return;
 	h2o_req_t *const req = shuttle->never_access_this_req_from_tx_thread;
-	req->res.status = response->http_code;
+	req->res.status = response->un.resp.first.http_code;
 	req->res.reason = "OK"; /* FIXME? */
-	const unsigned num_headers = response->num_headers;
+	const unsigned num_headers = response->un.resp.first.num_headers;
 	unsigned header_idx;
 	for (header_idx = 0; header_idx < num_headers; ++header_idx) {
-		const http_header_entry_t *const header = &response->headers[header_idx];
+		const http_header_entry_t *const header = &response->un.resp.first.headers[header_idx];
 		h2o_add_header_by_str(&req->pool, &req->res.headers, header->name, header->name_len,
 				1, /* FIXME: Benchmark whether this faster than 0 */
 				NULL, /* FIXME: Do we need orig_name? */
@@ -214,14 +239,9 @@ static void postprocess_lua_req_first(shuttle_t *shuttle)
 
 	}
 
-	response->generator = (h2o_generator_t){ proceed_sending_lua, NULL }; /* Do not use stop_sending, we handle everything in free_shuttle_lua(). */
-	response->sent_something = true;
-	h2o_start_response(req, &response->generator);
-
-	h2o_iovec_t buf;
-	buf.base = (void *)response->payload;
-	buf.len = response->payload_len;
-	h2o_send(req, &buf, 1, response->is_last_send ? H2O_SEND_STATE_FINAL : H2O_SEND_STATE_IN_PROGRESS);
+	response->un.resp.any.generator = (h2o_generator_t){ proceed_sending_lua, NULL }; /* Do not use stop_sending, we handle everything in free_shuttle_lua(). */
+	h2o_start_response(req, &response->un.resp.any.generator);
+	send_lua(req, response);
 }
 
 /* Launched in HTTP server thread to postprocess response (w/o HTTP headers) */
@@ -231,16 +251,11 @@ static void postprocess_lua_req_others(shuttle_t *shuttle)
 	if (shuttle->disposed)
 		return;
 	h2o_req_t *const req = shuttle->never_access_this_req_from_tx_thread;
-
-	h2o_iovec_t buf;
-	buf.base = (void *)response->payload;
-	buf.len = response->payload_len;
-	h2o_send(req, &buf, 1, response->is_last_send ? H2O_SEND_STATE_FINAL : H2O_SEND_STATE_IN_PROGRESS);
+	send_lua(req, response);
 }
 
-static void add_http_header_to_shuttle(shuttle_t *shuttle, const char *key, size_t key_len, const char *value, size_t value_len)
+static inline void add_http_header_to_lua_response(lua_first_response_only_t *response, const char *key, size_t key_len, const char *value, size_t value_len)
 {
-	lua_response_t *const response = (lua_response_t *)&shuttle->payload;
 	if (response->num_headers >= lengthof(response->headers))
 		return;
 
@@ -277,8 +292,8 @@ static int payload_writer_write(lua_State *L)
 	}
 
 	size_t payload_len;
-	response->payload = lua_tolstring(L, 2, &payload_len);
-	response->payload_len = payload_len;
+	response->un.resp.any.payload = lua_tolstring(L, 2, &payload_len);
+	response->un.resp.any.payload_len = payload_len;
 
 	bool is_last;
 	if (num_params >= 3)
@@ -286,7 +301,7 @@ static int payload_writer_write(lua_State *L)
 	else
 		is_last = false;
 
-	response->is_last_send = is_last;
+	response->un.resp.any.is_last_send = is_last;
 	stubborn_dispatch(shuttle->thread_ctx->queue_from_tx, &postprocess_lua_req_others, shuttle);
 	wait_for_lua_shuttle_return(response);
 
@@ -330,6 +345,8 @@ static int header_writer_write_header(lua_State *L)
 		is_last = false;
 
 	lua_response_t *const response = (lua_response_t *)&shuttle->payload;
+	if (response->sent_something)
+		goto Error;
 	if (response->cancelled) {
 		/* Can't send anything, connection has been closed. */
 		if (is_last)
@@ -342,7 +359,7 @@ static int header_writer_write_header(lua_State *L)
 		return 1;
 	}
 
-	response->http_code = lua_tointegerx(L, 2, &is_integer);
+	response->un.resp.first.http_code = lua_tointegerx(L, 2, &is_integer);
 	if (!is_integer)
 		goto Error;
 
@@ -355,7 +372,7 @@ static int header_writer_write_header(lua_State *L)
 			const char *const key = lua_tolstring(L, -2, &key_len);
 			const char *const value = lua_tolstring(L, -1, &value_len);
 
-			add_http_header_to_shuttle(shuttle, key, key_len, value, value_len);
+			add_http_header_to_lua_response(&response->un.resp.first, key, key_len, value, value_len);
 
 			/* Remove value, keep key for next iteration. */
 			lua_pop(L, 1);
@@ -366,11 +383,14 @@ static int header_writer_write_header(lua_State *L)
 
 	if (num_params >= 4) {
 		size_t payload_len;
-		response->payload = lua_tolstring(L, 4, &payload_len);
-		response->payload_len = payload_len;
+		response->un.resp.any.payload = lua_tolstring(L, 4, &payload_len);
+		response->un.resp.any.payload_len = payload_len;
+	} else {
+		response->un.resp.any.payload_len = 0;
 	}
 
-	response->is_last_send = is_last;
+	response->un.resp.any.is_last_send = is_last;
+	response->sent_something = true;
 	stubborn_dispatch(shuttle->thread_ctx->queue_from_tx, &postprocess_lua_req_first, shuttle);
 	wait_for_lua_shuttle_return(response);
 
@@ -403,16 +423,19 @@ lua_fiber_func(va_list ap)
 
 	lua_response_t *const response = (lua_response_t *)&shuttle->payload;
 
-	lua_getglobal(L, response->global_var_name); /* User handler function, written in Lua */
+	lua_getglobal(L, response->un.req.global_var_name); /* User handler function, written in Lua */
 
 	/* First param for Lua handler - query */
 	lua_createtable(L, 0, 1);
-	if (response->query_at != LUA_QUERY_NONE) {
-		const char *const query = &response->path[response->query_at];
-		const unsigned query_len = response->path_len - response->query_at;
+	if (response->un.req.query_at != LUA_QUERY_NONE) {
+		const char *const query = &response->un.req.path[response->un.req.query_at];
+		const unsigned query_len = response->un.req.path_len - response->un.req.query_at;
 		lua_pushlstring (L, query, query_len);
 		lua_setfield(L, -2, "query");
 	}
+
+	/* We have finished parsing request, now can write to response (it is union). */
+	response->un.resp.first.num_headers = 0;
 
 	/* Second param for Lua handler - header_writer */
 	lua_createtable(L, 0, 2);
@@ -432,19 +455,20 @@ lua_fiber_func(va_list ap)
 			/* There would be no more calls from HTTP thread, must clean up. */
 			free_lua_shuttle_from_tx(shuttle);
 		} else {
-			response->is_last_send = true;
+			response->un.resp.any.is_last_send = true;
 			if (response->sent_something) {
 				/* Do not add anything to user output to prevent corrupt HTML etc. */
-				response->payload_len = 0;
+				response->un.resp.any.payload_len = 0;
 				stubborn_dispatch(shuttle->thread_ctx->queue_from_tx, &postprocess_lua_req_others, shuttle);
 			} else {
 				static const char key[] = "content-type";
 				static const char value[] = "text/plain; charset=utf-8";
-				add_http_header_to_shuttle(shuttle, key, sizeof(key) - 1, value, sizeof(value) - 1);
+				add_http_header_to_lua_response(&response->un.resp.first, key, sizeof(key) - 1, value, sizeof(value) - 1);
 				static const char error_str[] = "Path handler execution error";
-				response->http_code = 500;
-				response->payload = error_str;
-				response->payload_len = sizeof(error_str) - 1;
+				response->un.resp.first.http_code = 500;
+				response->un.resp.any.payload = error_str;
+				response->un.resp.any.payload_len = sizeof(error_str) - 1;
+				/* Not setting sent_something because no one would check it. */
 				stubborn_dispatch(shuttle->thread_ctx->queue_from_tx, &postprocess_lua_req_first, shuttle);
 			}
 			wait_for_lua_shuttle_return(response);
@@ -470,19 +494,20 @@ lua_fiber_func(va_list ap)
 static void process_lua_req_in_tx(shuttle_t *shuttle)
 {
 	lua_response_t *const response = (lua_response_t *)&shuttle->payload;
-	response->num_headers = 0;
 
 #define RETURN_WITH_ERROR(err) \
 	do { \
 		luaL_unref(L, LUA_REGISTRYINDEX, response->lua_state_ref); \
 		static const char key[] = "content-type"; \
 		static const char value[] = "text/plain; charset=utf-8"; \
-		add_http_header_to_shuttle(shuttle, key, sizeof(key) - 1, value, sizeof(value) - 1); \
+		response->un.resp.first.num_headers = 0; \
+		add_http_header_to_lua_response(&response->un.resp.first, key, sizeof(key) - 1, value, sizeof(value) - 1); \
 		static const char error_str[] = err; \
-		response->is_last_send = true; \
-		response->http_code = 500; \
-		response->payload = error_str; \
-		response->payload_len = sizeof(error_str) - 1; \
+		response->un.resp.any.is_last_send = true; \
+		response->un.resp.first.http_code = 500; \
+		response->un.resp.any.payload = error_str; \
+		response->un.resp.any.payload_len = sizeof(error_str) - 1; \
+		/* Not setting sent_something because no one would check it. */ \
 		stubborn_dispatch(shuttle->thread_ctx->queue_from_tx, &postprocess_lua_req_first, shuttle); \
 		return; \
 	} while (0)
@@ -492,7 +517,6 @@ static void process_lua_req_in_tx(shuttle_t *shuttle)
 	response->lua_state_ref = luaL_ref(L, LUA_REGISTRYINDEX);
 	if ((response->fiber = fiber_new("HTTP Lua fiber", &lua_fiber_func)) == NULL)
 		RETURN_WITH_ERROR("Failed to create fiber");
-	response->payload_len = 0;
 	response->fiber_done = false;
 	fiber_start(response->fiber, shuttle, new_L);
 }
@@ -511,7 +535,7 @@ static int lua_req_handler(lua_h2o_handler_t *self, h2o_req_t *req)
 	/* Can fill in shuttle->payload here */
 
 	lua_response_t *const response = (lua_response_t *)&shuttle->payload;
-	if ((response->path_len = req->path.len) > sizeof(response->path)) {
+	if ((response->un.req.path_len = req->path.len) > sizeof(response->un.req.path)) {
 		/* Error */
 		free_shuttle_with_anchor(shuttle);
 		req->res.status = 500;
@@ -519,16 +543,15 @@ static int lua_req_handler(lua_h2o_handler_t *self, h2o_req_t *req)
 		h2o_send_inline(req, H2O_STRLIT("Request is too long\n"));
 		return 0;
 	}
-	memcpy(response->path, req->path.base, response->path_len);
+	memcpy(response->un.req.path, req->path.base, response->un.req.path_len);
 
-	static_assert(LUA_QUERY_NONE < (1ULL << (8 * sizeof(response->query_at))));
-	response->query_at = (req->query_at == SIZE_MAX) ? LUA_QUERY_NONE : req->query_at;
+	static_assert(LUA_QUERY_NONE < (1ULL << (8 * sizeof(response->un.req.query_at))));
+	response->un.req.query_at = (req->query_at == SIZE_MAX) ? LUA_QUERY_NONE : req->query_at;
 
-	response->is_last_send = false;
 	response->sent_something = false;
 	response->cancelled = false;
 	response->is_waiting = false;
-	response->global_var_name = self->global_var_name;
+	response->un.req.global_var_name = self->global_var_name;
 	response->site_path = self->path;
 
 	thread_ctx_t *const thread_ctx = get_curr_thread_ctx();
