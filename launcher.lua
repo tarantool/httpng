@@ -56,8 +56,6 @@ local function hello_handler(req, header_writer)
 	}
 	local payload = 'Small hello from lua'
 
-	-- Returns nil for now.
-	-- Last parameter MUST be true for now.
 	local payload_writer = header_writer:write_header(200, headers, payload, true)
 end
 
@@ -72,8 +70,6 @@ local function large_handler(req, header_writer)
 		{['x-custom-header'] = 'foo'},
 	}
 
-	-- Returns nil for now.
-	-- Last parameter MUST be true for now.
 	local payload_writer = header_writer:write_header(200, headers, payload, true)
 end
 
@@ -105,6 +101,39 @@ local function multi_handler(req, header_writer)
 	--payload_writer:write(nil, true) -- also works
 end
 
+local function req_handler(req, header_writer)
+	-- Array of tables because more than one header can have the same field name (key).
+	local headers = {
+		{['content-type'] = 'text/plain; charset=utf-8'},
+		{['x-custom-header'] = 'foo'},
+	}
+
+	local payload
+	if req.query then
+		local query_str = string.match(req.query, "^?id=%d+")
+		if query_str then
+			local id_str = string.sub(query_str, 5, -1)
+			local id = tonumber(id_str)
+			if id then
+				local tuple = s:get(id)
+				if tuple then
+					payload = tuple.desc
+				else
+					payload = 'Entry was not found'
+				end
+			else
+				payload = 'Invalid id was specified (not a number)'
+			end
+		else
+			payload = 'Unable to parse query (format: "?id=3")'
+		end
+	else
+		payload = 'No query specified'
+	end
+
+	local payload_writer = header_writer:write_header(200, headers, payload, true)
+end
+
 local httpng_lib = require "httpng"
 local init_func = httpng_lib.init
 
@@ -114,6 +143,7 @@ local lua_sites = {
 	{['path'] = '/lua_large', ['handler'] = large_handler},
 	{['path'] = '/lua_hello', ['handler'] = hello_handler},
 	{['path'] = '/lua_multi', ['handler'] = multi_handler},
+	{['path'] = '/lua_req',   ['handler'] = req_handler},
 }
 
 init_func(lua_sites, sample_site_lib.get_site_desc, nil)

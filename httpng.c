@@ -33,6 +33,11 @@
 
 #define H2O_DEFAULT_PORT_FOR_PROTOCOL_USED 65535
 
+#define LUA_QUERY_NONE UINT_MAX
+
+/* FIXME: Make it dynamic to use whole shuttle_size. */
+#define LUA_MAX_PATH_LEN 256
+
 struct thread_ctx;
 typedef struct listener_ctx {
 	h2o_accept_ctx_t accept_ctx;
@@ -79,12 +84,15 @@ typedef struct {
 	unsigned num_headers;
 	unsigned http_code;
 	unsigned payload_len;
+	unsigned path_len;
+	unsigned query_at;
 	const char *payload;
 	bool fiber_done;
 	bool is_last_send;
 	bool sent_something;
 	bool cancelled; /* Changed by TX thread. */
 	bool is_waiting; /* Changed by TX thread. */
+	char path[LUA_MAX_PATH_LEN]; /* From h2o_req_t. */
 	char embedded_payload[];
 } lua_response_t;
 
@@ -397,8 +405,16 @@ lua_fiber_func(va_list ap)
 
 	lua_getglobal(L, response->global_var_name); /* User handler function, written in Lua */
 
-	lua_pushnil(L); /* FIXME: request data should go here */
+	/* First param for Lua handler - query */
+	lua_createtable(L, 0, 1);
+	if (response->query_at != LUA_QUERY_NONE) {
+		const char *const query = &response->path[response->query_at];
+		const unsigned query_len = response->path_len - response->query_at;
+		lua_pushlstring (L, query, query_len);
+		lua_setfield(L, -2, "query");
+	}
 
+	/* Second param for Lua handler - header_writer */
 	lua_createtable(L, 0, 2);
 	lua_pushcfunction(L, header_writer_write_header);
 	lua_setfield(L, -2, "write_header");
@@ -495,6 +511,19 @@ static int lua_req_handler(lua_h2o_handler_t *self, h2o_req_t *req)
 	/* Can fill in shuttle->payload here */
 
 	lua_response_t *const response = (lua_response_t *)&shuttle->payload;
+	if ((response->path_len = req->path.len) > sizeof(response->path)) {
+		/* Error */
+		free_shuttle_with_anchor(shuttle);
+		req->res.status = 500;
+		req->res.reason = "Request is too long";
+		h2o_send_inline(req, H2O_STRLIT("Request is too long\n"));
+		return 0;
+	}
+	memcpy(response->path, req->path.base, response->path_len);
+
+	static_assert(LUA_QUERY_NONE < (1ULL << (8 * sizeof(response->query_at))));
+	response->query_at = (req->query_at == SIZE_MAX) ? LUA_QUERY_NONE : req->query_at;
+
 	response->is_last_send = false;
 	response->sent_something = false;
 	response->cancelled = false;
