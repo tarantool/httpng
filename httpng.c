@@ -430,13 +430,11 @@ lua_fiber_func(va_list ap)
 	lua_rawgeti(L, LUA_REGISTRYINDEX, response->un.req.lua_handler_ref); /* User handler function, written in Lua. */
 
 	/* First param for Lua handler - query */
-	lua_createtable(L, 0, 1);
-	if (response->un.req.query_at != LUA_QUERY_NONE) {
-		const char *const query = &response->un.req.path[response->un.req.query_at];
-		const unsigned query_len = response->un.req.path_len - response->un.req.query_at;
-		lua_pushlstring (L, query, query_len);
-		lua_setfield(L, -2, "query");
-	}
+	lua_createtable(L, 0, 2);
+	lua_pushlstring(L, response->un.req.path, response->un.req.path_len);
+	lua_setfield(L, -2, "path");
+	lua_pushinteger(L, (response->un.req.query_at == LUA_QUERY_NONE) ? -1 : (response->un.req.query_at + 1)); /* Lua indexes start from 1 */
+	lua_setfield(L, -2, "query_at");
 
 	/* We have finished parsing request, now can write to response (it is union). */
 	response->un.resp.first.num_headers = 0;

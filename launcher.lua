@@ -101,6 +101,14 @@ local function multi_handler(req, header_writer)
 	--payload_writer:write(nil, true) -- also works
 end
 
+-- For performance reasons only one string with path/query is passed from C.
+local function get_query(req)
+	if req.query_at == -1 then
+		return nil
+	end
+	return string.sub(req.path, req.query_at, -1)
+end
+
 local function req_handler(req, header_writer)
 	-- Array of tables because more than one header can have the same field name (key).
 	local headers = {
@@ -109,8 +117,9 @@ local function req_handler(req, header_writer)
 	}
 
 	local payload
-	if req.query then
-		local query_str = string.match(req.query, "^?id=%d+")
+	local req_query = get_query(req)
+	if req_query then
+		local query_str = string.match(req_query, "^?id=%d+")
 		if query_str then
 			local id_str = string.sub(query_str, 5, -1)
 			local id = tonumber(id_str)
