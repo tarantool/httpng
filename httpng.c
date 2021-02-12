@@ -147,7 +147,7 @@ void stubborn_dispatch_uni(struct xtm_queue *queue, void *func, void *param)
 }
 
 /* Launched in HTTP server thread */
-static void cancel_processing_lua_req_in_http_thread(shuttle_t *shuttle)
+static void cancel_processing_req_in_http_thread(shuttle_t *shuttle)
 {
 	assert(shuttle->disposed);
 	free_shuttle(shuttle);
@@ -155,10 +155,15 @@ static void cancel_processing_lua_req_in_http_thread(shuttle_t *shuttle)
 
 /* Launched in TX thread.
  * It can queue request to HTTP thread or free everything itself. */
-static void free_lua_shuttle_from_tx(shuttle_t *shuttle)
+void free_shuttle_from_tx(shuttle_t *shuttle)
 {
 	/* Can't call free_shuttle() from TX thread because it [potentially] uses per-thread pools. */
-	stubborn_dispatch(shuttle->thread_ctx->queue_from_tx, &cancel_processing_lua_req_in_http_thread, shuttle);
+	stubborn_dispatch(shuttle->thread_ctx->queue_from_tx, &cancel_processing_req_in_http_thread, shuttle);
+}
+
+static inline void free_lua_shuttle_from_tx(shuttle_t *shuttle)
+{
+	free_shuttle_from_tx(shuttle);
 }
 
 /* Launched in TX thread */

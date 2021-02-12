@@ -95,6 +95,10 @@ static inline void stubborn_dispatch(struct xtm_queue *queue, void (*func)(shutt
 	stubborn_dispatch_uni(queue, func, shuttle);
 }
 
+/* Must be called in TX thread.
+ * It can queue request to HTTP thread or free everything itself. */
+void free_shuttle_from_tx(shuttle_t *);
+
 #if defined(__cplusplus)
 }
 #endif /* defined(__cplusplus) */
