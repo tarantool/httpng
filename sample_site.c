@@ -135,6 +135,7 @@ static void postprocess_stats_req_first(shuttle_t *shuttle)
 	if (response->need_more) {
 		h2o_send(req, &buf, 1, H2O_SEND_STATE_IN_PROGRESS);
 	} else {
+		response->generator.stop = NULL; /* Optimization, it would work anyway. */
 		shuttle->anchor->user_free_shuttle = &free_shuttle;
 		h2o_send(req, &buf, 1, H2O_SEND_STATE_FINAL);
 	}
@@ -162,6 +163,7 @@ static void postprocess_stats_req_others(shuttle_t *shuttle)
 	if (response->need_more) {
 		h2o_send(req, &buf, 1, H2O_SEND_STATE_IN_PROGRESS);
 	} else {
+		response->generator.stop = NULL; /* Optimization, it would work anyway. */
 		shuttle->anchor->user_free_shuttle = &free_shuttle;
 		h2o_send(req, &buf, 1, H2O_SEND_STATE_FINAL);
 	}
