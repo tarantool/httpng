@@ -35,9 +35,6 @@
 
 #define LUA_QUERY_NONE UINT_MAX
 
-/* FIXME: Make it dynamic to use whole shuttle_size. */
-#define LUA_MAX_PATH_LEN 256
-
 struct thread_ctx;
 typedef struct listener_ctx {
 	h2o_accept_ctx_t accept_ctx;
@@ -74,9 +71,9 @@ typedef struct {
 } http_header_entry_t;
 
 typedef struct {
-	http_header_entry_t headers[16]; /* FIXME: Dynamic? */
 	unsigned num_headers;
 	unsigned http_code;
+	http_header_entry_t headers[];
 } lua_first_response_only_t;
 
 typedef struct {
@@ -88,21 +85,17 @@ typedef struct {
 
 typedef struct {
 	lua_any_response_t any;
-	lua_first_response_only_t first;
+	lua_first_response_only_t first; /* Must be last member of struct. */
 } lua_response_struct_t;
 
 typedef struct {
 	int lua_handler_ref; /* Reference to user Lua handler. */
-	char path[LUA_MAX_PATH_LEN]; /* From h2o_req_t. */
 	unsigned path_len;
 	unsigned query_at;
+	char path[]; /* From h2o_req_t. */
 } lua_first_request_only_t;
 
 typedef struct {
-	union { /* Can use struct instead when debugging. */
-		lua_first_request_only_t req;
-		lua_response_struct_t resp;
-	} un;
 	const char *site_path;
 	struct fiber *fiber;
 	int lua_state_ref;
@@ -110,6 +103,10 @@ typedef struct {
 	bool sent_something;
 	bool cancelled; /* Changed by TX thread. */
 	bool is_waiting; /* Changed by TX thread. */
+	union { /* Can use struct instead when debugging. */
+		lua_first_request_only_t req;
+		lua_response_struct_t resp;
+	} un; /* Must be last member of struct. */
 } lua_response_t;
 
 static struct {
@@ -121,8 +118,10 @@ static struct {
 	unsigned shuttle_size;
 	unsigned num_listeners;
 	unsigned num_accepts;
-        unsigned max_conn_per_thread;
+	unsigned max_conn_per_thread;
 	unsigned num_threads;
+	unsigned max_headers_lua;
+	unsigned max_path_len_lua;
 	int tfo_queues;
 	volatile bool tx_fiber_should_work;
 } conf = {
@@ -260,7 +259,8 @@ static void postprocess_lua_req_others(shuttle_t *shuttle)
 
 static inline void add_http_header_to_lua_response(lua_first_response_only_t *response, const char *key, size_t key_len, const char *value, size_t value_len)
 {
-	if (response->num_headers >= lengthof(response->headers))
+	if (response->num_headers >= conf.max_headers_lua)
+		/* FIXME: Misconfiguration, should we log something? */
 		return;
 
 	response->headers[response->num_headers++] = (http_header_entry_t){key, value, key_len, value_len};
@@ -537,7 +537,7 @@ static int lua_req_handler(lua_h2o_handler_t *self, h2o_req_t *req)
 	/* Can fill in shuttle->payload here */
 
 	lua_response_t *const response = (lua_response_t *)&shuttle->payload;
-	if ((response->un.req.path_len = req->path.len) > sizeof(response->un.req.path)) {
+	if ((response->un.req.path_len = req->path.len) > conf.max_path_len_lua) {
 		/* Error */
 		free_shuttle_with_anchor(shuttle);
 		req->res.status = 500;
@@ -974,6 +974,8 @@ int init(lua_State *L)
 	/* FIXME: Add sanity checks, especially shuttle_size - it must >sizeof(shuttle_t) (accounting for Lua payload) and aligned */
 	conf.num_threads = site_desc->num_threads;
 	conf.shuttle_size = site_desc->shuttle_size;
+	conf.max_headers_lua = (conf.shuttle_size - sizeof(shuttle_t) - offsetof(lua_response_t, un.resp.first.headers)) / sizeof(http_header_entry_t);
+	conf.max_path_len_lua = conf.shuttle_size - sizeof(shuttle_t) - offsetof(lua_response_t, un.req.path);
 	conf.max_conn_per_thread = site_desc->max_conn_per_thread;
 	conf.num_accepts = conf.max_conn_per_thread / 16;
 	if (conf.num_accepts < 8)
