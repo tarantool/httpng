@@ -49,6 +49,11 @@ do
 end
 
 local function hello_handler(req, header_writer)
+	if (req.method ~= 'GET') then
+		header_writer:write_header(500, nil, 'Unsupported HTTP method', true)
+		return
+	end
+
 	-- Array of tables because more than one header can have the same field name (key).
 	local headers = {
 		{['content-type'] = 'text/plain; charset=utf-8'},
@@ -60,6 +65,11 @@ local function hello_handler(req, header_writer)
 end
 
 local function large_handler(req, header_writer)
+	if (req.method ~= 'GET') then
+		header_writer:write_header(500, nil, 'Unsupported HTTP method', true)
+		return
+	end
+
 	local payload = large:get(2).desc
 
 	-- Array of tables because more than one header can have the same field name (key).
@@ -74,6 +84,11 @@ local function large_handler(req, header_writer)
 end
 
 local function multi_handler(req, header_writer)
+	if (req.method ~= 'GET') then
+		header_writer:write_header(500, nil, 'Unsupported HTTP method', true)
+		return
+	end
+
 	-- Array of tables because more than one header can have the same field name (key).
 	local headers = {
 		{['content-type'] = 'text/plain; charset=utf-8'},
@@ -110,6 +125,11 @@ local function get_query(req)
 end
 
 local function req_handler(req, header_writer)
+	if (req.method ~= 'GET') then
+		header_writer:write_header(500, nil, 'Unsupported HTTP method', true)
+		return
+	end
+
 	-- Array of tables because more than one header can have the same field name (key).
 	local headers = {
 		{['content-type'] = 'text/plain; charset=utf-8'},

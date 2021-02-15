@@ -92,6 +92,8 @@ typedef struct {
 	int lua_handler_ref; /* Reference to user Lua handler. */
 	unsigned path_len;
 	unsigned query_at;
+	unsigned char method_len;
+	char method[7];
 	char path[]; /* From h2o_req_t. */
 } lua_first_request_only_t;
 
@@ -430,11 +432,13 @@ lua_fiber_func(va_list ap)
 	lua_rawgeti(L, LUA_REGISTRYINDEX, response->un.req.lua_handler_ref); /* User handler function, written in Lua. */
 
 	/* First param for Lua handler - query */
-	lua_createtable(L, 0, 2);
+	lua_createtable(L, 0, 3);
 	lua_pushlstring(L, response->un.req.path, response->un.req.path_len);
 	lua_setfield(L, -2, "path");
 	lua_pushinteger(L, (response->un.req.query_at == LUA_QUERY_NONE) ? -1 : (response->un.req.query_at + 1)); /* Lua indexes start from 1 */
 	lua_setfield(L, -2, "query_at");
+	lua_pushlstring(L, response->un.req.method, response->un.req.method_len);
+	lua_setfield(L, -2, "method");
 
 	/* We have finished parsing request, now can write to response (it is union). */
 	response->un.resp.first.num_headers = 0;
@@ -527,16 +531,16 @@ static void process_lua_req_in_tx(shuttle_t *shuttle)
 /* Launched in HTTP server thread */
 static int lua_req_handler(lua_h2o_handler_t *self, h2o_req_t *req)
 {
-	if (!(h2o_memis(req->method.base, req->method.len, H2O_STRLIT("GET")) &&
-	    h2o_memis(req->path_normalized.base, req->path_normalized.len, self->path, self->path_len))) {
-		/* FIXME: Should handle method/path in Lua handler */
-		return -1;
-	}
-
 	shuttle_t *const shuttle = prepare_shuttle(req);
-	/* Can fill in shuttle->payload here */
-
 	lua_response_t *const response = (lua_response_t *)&shuttle->payload;
+	if ((response->un.req.method_len = req->method.len) > sizeof(response->un.req.method)) {
+		/* Error */
+		free_shuttle_with_anchor(shuttle);
+		req->res.status = 500;
+		req->res.reason = "Method name is too long";
+		h2o_send_inline(req, H2O_STRLIT("Method name is too long\n"));
+		return 0;
+	}
 	if ((response->un.req.path_len = req->path.len) > conf.max_path_len_lua) {
 		/* Error */
 		free_shuttle_with_anchor(shuttle);
@@ -545,6 +549,7 @@ static int lua_req_handler(lua_h2o_handler_t *self, h2o_req_t *req)
 		h2o_send_inline(req, H2O_STRLIT("Request is too long\n"));
 		return 0;
 	}
+	memcpy(response->un.req.method, req->method.base, response->un.req.method_len);
 	memcpy(response->un.req.path, req->path.base, response->un.req.path_len);
 
 	static_assert(LUA_QUERY_NONE < (1ULL << (8 * sizeof(response->un.req.query_at))));
