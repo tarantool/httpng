@@ -218,6 +218,9 @@ local function ws_app_handler(req, header_writer)
 	webSocket.onmessage = function (event) {
 		document.write('Received data: ', event.data, '<br>\n');
 	}
+	webSocket.onclose = function (event) {
+		document.write('Connection has been closed by the server<br>\n');
+	}
 	document.write('Trying to connect to WebSocket server...<br>\n');
 	while (true) {
 		sleep(1);
