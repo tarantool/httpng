@@ -165,7 +165,7 @@ end
 
 local function ws_server_handler(req, header_writer)
 	if (req.is_websocket == false) then
-		header_writer:write_header(500, {}, 'Only WebSocket requests are supported', true)
+		header_writer:write_header(500, nil, 'Only WebSocket requests are supported', true)
 		return
 	end
 
@@ -176,7 +176,7 @@ local function ws_server_handler(req, header_writer)
 	}
 	if (req.version_major >= 2) then
 		-- Currently H2O does not support WebSockets with HTTP/2 (and there is an assert).
-		header_writer:write_header(500, {}, 'Can\'t use WebSockets with HTTP/2 or later', true)
+		header_writer:write_header(500, nil, 'Can\'t use WebSockets with HTTP/2 or later', true)
 		return
 	end
 

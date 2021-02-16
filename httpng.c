@@ -409,22 +409,24 @@ static int header_writer_write_header(lua_State *L)
 	if (!is_integer)
 		goto Error;
 
-	lua_pushnil(L); /* Start of table. */
-	while (lua_next(L, 3)) {
+	if (!lua_isnil(L, 3)) {
 		lua_pushnil(L); /* Start of table. */
-		while (lua_next(L, -2)) {
-			size_t key_len;
-			size_t value_len;
-			const char *const key = lua_tolstring(L, -2, &key_len);
-			const char *const value = lua_tolstring(L, -1, &value_len);
+		while (lua_next(L, 3)) {
+			lua_pushnil(L); /* Start of table. */
+			while (lua_next(L, -2)) {
+				size_t key_len;
+				size_t value_len;
+				const char *const key = lua_tolstring(L, -2, &key_len);
+				const char *const value = lua_tolstring(L, -1, &value_len);
 
-			add_http_header_to_lua_response(&response->un.resp.first, key, key_len, value, value_len);
+				add_http_header_to_lua_response(&response->un.resp.first, key, key_len, value, value_len);
 
+				/* Remove value, keep key for next iteration. */
+				lua_pop(L, 1);
+			}
 			/* Remove value, keep key for next iteration. */
 			lua_pop(L, 1);
 		}
-		/* Remove value, keep key for next iteration. */
-		lua_pop(L, 1);
 	}
 
 	if (num_params >= 4) {
