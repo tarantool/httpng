@@ -186,14 +186,15 @@ local function ws_server_handler(req, header_writer)
 	end
 
 	fiber.sleep(1)
-	local counter = 1
-	while (true) do
-		if (ws:send_text(string.format("%d\n", counter))) then
+	local num_iterations = 3
+	local counter
+	for counter = 1, num_iterations do
+		if (ws:send_text(string.format('%d of %d\n', counter, num_iterations))) then
 			return
 		end
-		counter = counter + 1
 		fiber.sleep(1)
 	end
+	ws:close()
 end
 
 local function ws_app_handler(req, header_writer)

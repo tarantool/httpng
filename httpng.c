@@ -559,6 +559,43 @@ Error: /* FIXME: Error message. */
 	return 1;
 }
 
+/* Launched in HTTP server thread. */
+static void close_websocket(lua_response_t *const response)
+{
+	if (response->ws_conn != NULL) {
+		h2o_websocket_close(response->ws_conn);
+		response->ws_conn = NULL;
+	}
+	stubborn_dispatch_lua(get_curr_thread_ctx()->queue_to_tx, continue_processing_lua_req_in_tx, response);
+}
+
+/* Launched in TX thread. */
+static int close_lua_websocket(lua_State *L)
+{
+	/* Lua parameters: self. */
+	const unsigned num_params = lua_gettop(L);
+	if (num_params < 1)
+		goto Error;
+
+	lua_getfield(L, 1, "shuttle");
+	int is_integer;
+	shuttle_t *const shuttle = (shuttle_t *)lua_tointegerx(L, -1, &is_integer);
+	if (!is_integer)
+		goto Error;
+
+	lua_response_t *const response = (lua_response_t *)&shuttle->payload;
+	if (response->cancelled)
+		return 0;
+
+	response->cancelled = true;
+	stubborn_dispatch_lua(shuttle->thread_ctx->queue_from_tx, &close_websocket, response);
+	wait_for_lua_shuttle_return(response);
+	return 0;
+
+Error: /* FIXME: Error message. */
+	return 0;
+}
+
 /* Launched in TX thread */
 static int header_writer_upgrade_to_websocket(lua_State *L)
 {
@@ -591,9 +628,11 @@ static int header_writer_upgrade_to_websocket(lua_State *L)
 	if (response->cancelled)
 		lua_pushnil(L);
 	else {
-		lua_createtable(L, 0, 2);
+		lua_createtable(L, 0, 3);
 		lua_pushcfunction(L, websocket_send_text);
 		lua_setfield(L, -2, "send_text");
+		lua_pushcfunction(L, close_lua_websocket);
+		lua_setfield(L, -2, "close");
 		lua_pushinteger(L, (uintptr_t)shuttle);
 		lua_setfield(L, -2, "shuttle");
 	}
@@ -602,16 +641,6 @@ static int header_writer_upgrade_to_websocket(lua_State *L)
 Error: /* FIXME: Error message? */
 	lua_pushnil(L);
 	return 1;
-}
-
-/* Launched in HTTP server thread. */
-static void close_websocket(lua_response_t *const response)
-{
-	if (response->ws_conn != NULL) {
-		h2o_websocket_close(response->ws_conn);
-		response->ws_conn = NULL;
-	}
-	stubborn_dispatch_lua(get_curr_thread_ctx()->queue_to_tx, continue_processing_lua_req_in_tx, response);
 }
 
 /* Launched in TX thread */
