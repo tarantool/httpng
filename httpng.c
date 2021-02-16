@@ -101,6 +101,8 @@ typedef struct {
 	unsigned query_at;
 	unsigned char method_len;
 	unsigned char ws_client_key_len;
+	unsigned char version_major;
+	unsigned char version_minor;
 	char method[7];
 	char path[]; /* From h2o_req_t. */
 } lua_first_request_only_t;
@@ -627,7 +629,11 @@ lua_fiber_func(va_list ap)
 	lua_rawgeti(L, LUA_REGISTRYINDEX, response->un.req.lua_handler_ref); /* User handler function, written in Lua. */
 
 	/* First param for Lua handler - query */
-	lua_createtable(L, 0, 4);
+	lua_createtable(L, 0, 6);
+	lua_pushinteger(L, response->un.req.version_major);
+	lua_setfield(L, -2, "version_major");
+	lua_pushinteger(L, response->un.req.version_minor);
+	lua_setfield(L, -2, "version_minor");
 	lua_pushlstring(L, response->un.req.path, response->un.req.path_len);
 	lua_setfield(L, -2, "path");
 	lua_pushinteger(L, (response->un.req.query_at == LUA_QUERY_NONE) ? -1 : (response->un.req.query_at + 1)); /* Lua indexes start from 1 */
@@ -776,6 +782,8 @@ static int lua_req_handler(lua_h2o_handler_t *self, h2o_req_t *req)
 
 	static_assert(LUA_QUERY_NONE < (1ULL << (8 * sizeof(response->un.req.query_at))));
 	response->un.req.query_at = (req->query_at == SIZE_MAX) ? LUA_QUERY_NONE : req->query_at;
+	response->un.req.version_major = req->version >> 8;
+	response->un.req.version_minor = req->version & 0xFF;
 
 	response->sent_something = false;
 	response->cancelled = false;

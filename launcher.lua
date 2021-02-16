@@ -174,6 +174,12 @@ local function ws_server_handler(req, header_writer)
 		{['content-type'] = 'text/plain; charset=utf-8'},
 		{['x-custom-header'] = 'foo'},
 	}
+	if (req.version_major >= 2) then
+		-- Currently H2O does not support WebSockets with HTTP/2 (and there is an assert).
+		header_writer:write_header(500, {}, 'Can\'t use WebSockets with HTTP/2 or later', true)
+		return
+	end
+
 	local ws = header_writer:upgrade_to_websocket(headers)
 	if (ws == nil) then
 		return
