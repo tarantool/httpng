@@ -7,6 +7,7 @@
 #include "../xtm/xtm_api.h"
 
 #include <tarantool-httpng/httpng.h>
+#include <h2o/websocket.h>
 
 #ifdef USE_LIBUV
 #include <uv.h>
@@ -31,9 +32,15 @@
 #define USE_HTTPS 1
 //#define USE_HTTPS 0
 
+/* For debugging. FIXME: Make runtime configurable from Lua. */
+#define DISABLE_HTTP2
+#undef DISABLE_HTTP2
+
 #define H2O_DEFAULT_PORT_FOR_PROTOCOL_USED 65535
 
 #define LUA_QUERY_NONE UINT_MAX
+
+#define WS_CLIENT_KEY_LEN 24 /* Hardcoded in H2O. */
 
 struct thread_ctx;
 typedef struct listener_ctx {
@@ -93,6 +100,7 @@ typedef struct {
 	unsigned path_len;
 	unsigned query_at;
 	unsigned char method_len;
+	unsigned char ws_client_key_len;
 	char method[7];
 	char path[]; /* From h2o_req_t. */
 } lua_first_request_only_t;
@@ -100,11 +108,15 @@ typedef struct {
 typedef struct {
 	const char *site_path;
 	struct fiber *fiber;
+	h2o_websocket_conn_t *ws_conn;
 	int lua_state_ref;
 	bool fiber_done;
 	bool sent_something;
 	bool cancelled; /* Changed by TX thread. */
 	bool is_waiting; /* Changed by TX thread. */
+	bool ws_send_failed;
+	bool upgraded_to_websocket;
+	char ws_client_key[WS_CLIENT_KEY_LEN];
 	union { /* Can use struct instead when debugging. */
 		lua_first_request_only_t req;
 		lua_response_struct_t resp;
@@ -147,10 +159,24 @@ void stubborn_dispatch_uni(struct xtm_queue *queue, void *func, void *param)
 	}
 }
 
+/* Called when dispatch must not fail. */
+static inline void stubborn_dispatch_lua(struct xtm_queue *queue, void (*func)(lua_response_t *), lua_response_t *param)
+{
+	stubborn_dispatch_uni(queue, func, param);
+}
+
 /* Launched in HTTP server thread */
 static void cancel_processing_req_in_http_thread(shuttle_t *shuttle)
 {
 	assert(shuttle->disposed);
+	free_shuttle(shuttle);
+}
+
+/* Launched in HTTP server thread.
+ * FIXME: Only assert is different, can optimize for release build. */
+static void free_lua_websocket_shuttle_in_http_thread(shuttle_t *shuttle)
+{
+	assert(!shuttle->disposed);
 	free_shuttle(shuttle);
 }
 
@@ -162,15 +188,26 @@ void free_shuttle_from_tx(shuttle_t *shuttle)
 	stubborn_dispatch(shuttle->thread_ctx->queue_from_tx, &cancel_processing_req_in_http_thread, shuttle);
 }
 
+/* Launched in TX thread. */
 static inline void free_lua_shuttle_from_tx(shuttle_t *shuttle)
 {
+	assert(!((lua_response_t *)&shuttle->payload)->upgraded_to_websocket);
 	free_shuttle_from_tx(shuttle);
+}
+
+/* Launched in TX thread. */
+static inline void free_lua_websocket_shuttle_from_tx(shuttle_t *shuttle)
+{
+	assert(((lua_response_t *)&shuttle->payload)->upgraded_to_websocket);
+	/* Can't call free_shuttle() from TX thread because it [potentially] uses per-thread pools. */
+	stubborn_dispatch(shuttle->thread_ctx->queue_from_tx, &free_lua_websocket_shuttle_in_http_thread, shuttle);
 }
 
 /* Launched in TX thread */
 static void cancel_processing_lua_req_in_tx(shuttle_t *shuttle)
 {
 	lua_response_t *const response = (lua_response_t *)&shuttle->payload;
+	assert(!response->upgraded_to_websocket);
 
 	/* We do not use fiber_cancel() because it causes exception
 	 * in Lua code so Lua handler have to use pcall() and even
@@ -193,15 +230,16 @@ static void cancel_processing_lua_req_in_tx(shuttle_t *shuttle)
 /* Launched in HTTP server thread */
 static void free_shuttle_lua(shuttle_t *shuttle)
 {
-	shuttle->disposed = true;
-	stubborn_dispatch(get_curr_thread_ctx()->queue_to_tx, &cancel_processing_lua_req_in_tx, shuttle);
+	lua_response_t *const response = (lua_response_t *)(&shuttle->payload);
+	if (!response->upgraded_to_websocket) {
+		shuttle->disposed = true;
+		stubborn_dispatch(get_curr_thread_ctx()->queue_to_tx, &cancel_processing_lua_req_in_tx, shuttle);
+	}
 }
 
 /* Launched in TX thread */
-static void continue_processing_lua_req_in_tx(shuttle_t *shuttle)
+static void continue_processing_lua_req_in_tx(lua_response_t *response)
 {
-	lua_response_t *const response = (lua_response_t *)&shuttle->payload;
-
 	assert(response->fiber != NULL);
 	assert(!response->fiber_done);
 	assert(response->is_waiting);
@@ -213,7 +251,7 @@ static void proceed_sending_lua(h2o_generator_t *self, h2o_req_t *req)
 {
 	shuttle_t *const shuttle = get_shuttle_from_generator_lua(self);
 	thread_ctx_t *const thread_ctx = get_curr_thread_ctx();
-	stubborn_dispatch(thread_ctx->queue_to_tx, &continue_processing_lua_req_in_tx, shuttle);
+	stubborn_dispatch_lua(thread_ctx->queue_to_tx, continue_processing_lua_req_in_tx, (lua_response_t *)&shuttle->payload);
 }
 
 static inline void send_lua(h2o_req_t *req, lua_response_t *const response)
@@ -421,6 +459,163 @@ Error: /* FIXME: Error message? */
 }
 
 /* Launched in TX thread */
+static void cancel_processing_lua_websocket_in_tx(lua_response_t *response)
+{
+	assert(response->fiber != NULL);
+	assert(!response->fiber_done);
+	response->cancelled = true;
+	/* FIXME: Is a race here? */
+	if (response->is_waiting)
+		fiber_wakeup(response->fiber);
+}
+
+/* Launched in HTTP server thread. */
+static void websocket_msg_callback(h2o_websocket_conn_t *conn, const struct wslay_event_on_msg_recv_arg *arg)
+{
+	shuttle_t *const shuttle = conn->data;
+	if (arg == NULL) {
+		lua_response_t *const response = (lua_response_t *)&shuttle->payload;
+		assert(conn == response->ws_conn);
+		h2o_websocket_close(conn);
+		response->ws_conn = NULL;
+		stubborn_dispatch_lua(get_curr_thread_ctx()->queue_to_tx, cancel_processing_lua_websocket_in_tx, response);
+		return;
+	}
+
+	if (wslay_is_ctrl_frame(arg->opcode))
+		return;
+
+	/* FIXME: Should notify Lua handler. */
+}
+
+/* Launched in HTTP server thread to postprocess upgrade to WebSocket. */
+static void postprocess_lua_req_upgrade_to_websocket(shuttle_t *shuttle)
+{
+	lua_response_t *const response = (lua_response_t *)(&shuttle->payload);
+	if (shuttle->disposed)
+		return;
+	h2o_req_t *const req = shuttle->never_access_this_req_from_tx_thread;
+
+	const unsigned num_headers = response->un.resp.first.num_headers;
+	unsigned header_idx;
+	for (header_idx = 0; header_idx < num_headers; ++header_idx) {
+		const http_header_entry_t *const header = &response->un.resp.first.headers[header_idx];
+		h2o_add_header_by_str(&req->pool, &req->res.headers, header->name, header->name_len,
+				1, /* FIXME: Benchmark whether this faster than 0. */
+				NULL, /* FIXME: Do we need orig_name? */
+				header->value, header->value_len);
+
+	}
+	response->upgraded_to_websocket = true;
+	response->ws_conn = h2o_upgrade_to_websocket(req, response->ws_client_key, shuttle, websocket_msg_callback);
+	/* anchor_dispose()/free_shuttle_lua() will be called by h2o. */
+	stubborn_dispatch_lua(get_curr_thread_ctx()->queue_to_tx, continue_processing_lua_req_in_tx, response);
+}
+
+/* Launched in HTTP server thread to postprocess first response (with HTTP headers). */
+static void postprocess_lua_req_websocket_send_text(lua_response_t *response)
+{
+	/* Do not check shuttle->disposed, this is a WebSocket now. */
+
+	struct wslay_event_msg msgarg = { .opcode = WSLAY_TEXT_FRAME, .msg = (unsigned char *)response->un.resp.any.payload, .msg_length = response->un.resp.any.payload_len, };
+	if (wslay_event_queue_msg(response->ws_conn->ws_ctx, &msgarg) || wslay_event_send(response->ws_conn->ws_ctx))
+		response->ws_send_failed = true;
+	stubborn_dispatch_lua(get_curr_thread_ctx()->queue_to_tx, continue_processing_lua_req_in_tx, response);
+}
+
+/* Launched in TX thread */
+static int websocket_send_text(lua_State *L)
+{
+	/* Lua parameters: self, payload. */
+	const unsigned num_params = lua_gettop(L);
+	if (num_params < 2)
+		goto Error;
+
+	lua_getfield(L, 1, "shuttle");
+	int is_integer;
+	shuttle_t *const shuttle = (shuttle_t *)lua_tointegerx(L, -1, &is_integer);
+	if (!is_integer)
+		goto Error;
+
+	lua_response_t *const response = (lua_response_t *)&shuttle->payload;
+	if (response->cancelled || response->ws_send_failed) {
+		/* Returning Lua true because connection has already been closed or previous send failed. */
+		lua_pushboolean(L, true);
+		return 1;
+	}
+
+	size_t payload_len;
+	response->un.resp.any.payload = lua_tolstring(L, 2, &payload_len);
+	response->un.resp.any.payload_len = payload_len;
+
+	stubborn_dispatch_lua(shuttle->thread_ctx->queue_from_tx, &postprocess_lua_req_websocket_send_text, response);
+	wait_for_lua_shuttle_return(response);
+
+	/* Returning Lua true if send failed or connection has already been closed. */
+	lua_pushboolean(L, response->ws_send_failed ? true : response->cancelled);
+	return 1;
+
+Error: /* FIXME: Error message. */
+	lua_pushboolean(L, true);
+	return 1;
+}
+
+/* Launched in TX thread */
+static int header_writer_upgrade_to_websocket(lua_State *L)
+{
+	/* Lua parameters: self, headers. */
+	const unsigned num_params = lua_gettop(L);
+	if (num_params < 2)
+		goto Error;
+
+	lua_getfield(L, 1, "shuttle");
+
+	int is_integer;
+	shuttle_t *const shuttle = (shuttle_t *)lua_tointegerx(L, -1, &is_integer);
+	if (!is_integer)
+		goto Error;
+
+	lua_response_t *const response = (lua_response_t *)&shuttle->payload;
+	if (response->sent_something)
+		goto Error;
+	if (response->cancelled) {
+		/* Can't send anything, connection has been closed. */
+		lua_pushnil(L);
+		return 1;
+	}
+
+	response->sent_something = true;
+	response->ws_send_failed = false;
+	stubborn_dispatch(shuttle->thread_ctx->queue_from_tx, &postprocess_lua_req_upgrade_to_websocket, shuttle);
+	wait_for_lua_shuttle_return(response);
+
+	if (response->cancelled)
+		lua_pushnil(L);
+	else {
+		lua_createtable(L, 0, 2);
+		lua_pushcfunction(L, websocket_send_text);
+		lua_setfield(L, -2, "send_text");
+		lua_pushinteger(L, (uintptr_t)shuttle);
+		lua_setfield(L, -2, "shuttle");
+	}
+	return 1;
+
+Error: /* FIXME: Error message? */
+	lua_pushnil(L);
+	return 1;
+}
+
+/* Launched in HTTP server thread. */
+static void close_websocket(lua_response_t *const response)
+{
+	if (response->ws_conn != NULL) {
+		h2o_websocket_close(response->ws_conn);
+		response->ws_conn = NULL;
+	}
+	stubborn_dispatch_lua(get_curr_thread_ctx()->queue_to_tx, continue_processing_lua_req_in_tx, response);
+}
+
+/* Launched in TX thread */
 static int
 lua_fiber_func(va_list ap)
 {
@@ -432,22 +627,25 @@ lua_fiber_func(va_list ap)
 	lua_rawgeti(L, LUA_REGISTRYINDEX, response->un.req.lua_handler_ref); /* User handler function, written in Lua. */
 
 	/* First param for Lua handler - query */
-	lua_createtable(L, 0, 3);
+	lua_createtable(L, 0, 4);
 	lua_pushlstring(L, response->un.req.path, response->un.req.path_len);
 	lua_setfield(L, -2, "path");
 	lua_pushinteger(L, (response->un.req.query_at == LUA_QUERY_NONE) ? -1 : (response->un.req.query_at + 1)); /* Lua indexes start from 1 */
 	lua_setfield(L, -2, "query_at");
 	lua_pushlstring(L, response->un.req.method, response->un.req.method_len);
 	lua_setfield(L, -2, "method");
+	lua_pushboolean(L, !!response->un.req.ws_client_key_len);
+	lua_setfield(L, -2, "is_websocket");
 
 	/* We have finished parsing request, now can write to response (it is union). */
 	response->un.resp.first.num_headers = 0;
 
 	/* Second param for Lua handler - header_writer */
-	lua_createtable(L, 0, 2);
+	lua_createtable(L, 0, 3);
 	lua_pushcfunction(L, header_writer_write_header);
 	lua_setfield(L, -2, "write_header");
-
+	lua_pushcfunction(L, header_writer_upgrade_to_websocket);
+	lua_setfield(L, -2, "upgrade_to_websocket");
 	lua_pushinteger(L, (uintptr_t)shuttle);
 	lua_setfield(L, -2, "shuttle");
 
@@ -459,7 +657,14 @@ lua_fiber_func(va_list ap)
 		if (response->cancelled) {
 			/* No point trying to send something, connection has already been closed. */
 			/* There would be no more calls from HTTP thread, must clean up. */
-			free_lua_shuttle_from_tx(shuttle);
+			if (response->upgraded_to_websocket)
+				free_lua_websocket_shuttle_from_tx(shuttle);
+			else
+				free_lua_shuttle_from_tx(shuttle);
+		} else if (response->upgraded_to_websocket) {
+			stubborn_dispatch_lua(shuttle->thread_ctx->queue_from_tx, &close_websocket, response);
+			wait_for_lua_shuttle_return(response);
+			free_lua_websocket_shuttle_from_tx(shuttle);
 		} else {
 			response->un.resp.any.is_last_send = true;
 			if (response->sent_something) {
@@ -485,10 +690,17 @@ lua_fiber_func(va_list ap)
 				response->fiber_done = true;
 				/* cancel_processing_lua_req_in_tx() is not yet called, it would clean up because we have set fiber_done=true. */
 		}
-	} else if (response->cancelled)
+	} else if (response->cancelled) {
 		/* There would be no more calls from HTTP thread, must clean up */
-		free_lua_shuttle_from_tx(shuttle);
-	else
+		if (response->upgraded_to_websocket)
+			free_lua_websocket_shuttle_from_tx(shuttle);
+		else
+			free_lua_shuttle_from_tx(shuttle);
+	} else if (response->upgraded_to_websocket) {
+		stubborn_dispatch_lua(shuttle->thread_ctx->queue_from_tx, &close_websocket, response);
+		wait_for_lua_shuttle_return(response);
+		free_lua_websocket_shuttle_from_tx(shuttle);
+	} else
 		response->fiber_done = true;
 		/* cancel_processing_lua_req_in_tx() is not yet called, it would clean up because we have set fiber_done=true */
 
@@ -549,6 +761,16 @@ static int lua_req_handler(lua_h2o_handler_t *self, h2o_req_t *req)
 		h2o_send_inline(req, H2O_STRLIT("Request is too long\n"));
 		return 0;
 	}
+
+	const char *ws_client_key;
+	(void)h2o_is_websocket_handshake(req, &ws_client_key);
+	if (ws_client_key == NULL)
+		response->un.req.ws_client_key_len = 0;
+	else {
+		response->un.req.ws_client_key_len = WS_CLIENT_KEY_LEN;
+		memcpy(response->ws_client_key, ws_client_key, response->un.req.ws_client_key_len);
+	}
+
 	memcpy(response->un.req.method, req->method.base, response->un.req.method_len);
 	memcpy(response->un.req.path, req->path.base, response->un.req.path_len);
 
@@ -571,6 +793,7 @@ static int lua_req_handler(lua_h2o_handler_t *self, h2o_req_t *req)
 		return 0;
 	}
 	shuttle->anchor->user_free_shuttle = &free_shuttle_lua;
+	response->upgraded_to_websocket = false;
 
 	return 0;
 }
@@ -838,7 +1061,14 @@ static SSL_CTX *setup_ssl(const char *cert_file, const char *key_file)
 	h2o_ssl_register_npn_protocols(ssl_ctx, h2o_http2_npn_protocols);
 #endif
 #if H2O_USE_ALPN
+#ifdef DISABLE_HTTP2
+	/* Disable HTTP/2 e. g. to test WebSockets. */
+	static const h2o_iovec_t my_alpn_protocols[] = { {H2O_STRLIT("http/1.1")}, {NULL} } ;
+	h2o_ssl_register_alpn_protocols(ssl_ctx, my_alpn_protocols);
+#else
+
 	h2o_ssl_register_alpn_protocols(ssl_ctx, h2o_http2_alpn_protocols);
+#endif /* DISABLE_HTTP2 */
 #endif
 
 	return ssl_ctx;

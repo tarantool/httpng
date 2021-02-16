@@ -39,7 +39,7 @@ else (HTTPNG_USE_LIBUV)
     target_link_libraries(httpng libh2o-evloop)
 endif (HTTPNG_USE_LIBUV)
 
-target_link_libraries(httpng xtm_api_static)
+target_link_libraries(httpng xtm_api_static ${WSLAY_LIBRARIES})
 
 build_module(sample_site sample_site.c include/tarantool-httpng/httpng.h)
 target_link_libraries(sample_site httpng)

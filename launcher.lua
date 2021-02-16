@@ -163,6 +163,65 @@ local function req_handler(req, header_writer)
 	local payload_writer = header_writer:write_header(200, headers, payload, true)
 end
 
+local function ws_server_handler(req, header_writer)
+	if (req.is_websocket == false) then
+		header_writer:write_header(500, {}, 'Only WebSocket requests are supported', true)
+		return
+	end
+
+	-- Array of tables because more than one header can have the same field name (key).
+	local headers = {
+		{['content-type'] = 'text/plain; charset=utf-8'},
+		{['x-custom-header'] = 'foo'},
+	}
+	local ws = header_writer:upgrade_to_websocket(headers)
+	if (ws == nil) then
+		return
+	end
+
+	fiber.sleep(1)
+	local counter = 1
+	while (true) do
+		if (ws:send_text(string.format("%d\n", counter))) then
+			return
+		end
+		counter = counter + 1
+		fiber.sleep(1)
+	end
+end
+
+local function ws_app_handler(req, header_writer)
+	if (req.method ~= 'GET') then
+		header_writer:write_header(500, nil, 'Unsupported HTTP method', true)
+		return
+	end
+
+	-- Array of tables because more than one header can have the same field name (key).
+	local headers = {
+		{['content-type'] = 'text/html; charset=utf-8'},
+		{['x-custom-header'] = 'foo'},
+	}
+	local payload = [[
+<html><head><title>Example WebSockets Application</title></head><body>
+<script>
+	webSocket = new WebSocket('wss://localhost:7890/lua_ws_server');
+	webSocket.onopen = function (event) {
+		document.write('Connection to WebSocket server established successfully<br>\n');
+	}
+	webSocket.onmessage = function (event) {
+		document.write('Received data: ', event.data, '<br>\n');
+	}
+	document.write('Trying to connect to WebSocket server...<br>\n');
+	while (true) {
+		sleep(1);
+	}
+</script>
+</body></html>
+]]
+
+	local payload_writer = header_writer:write_header(200, headers, payload, true)
+end
+
 local httpng_lib = require "httpng"
 local init_func = httpng_lib.init
 
@@ -173,6 +232,8 @@ local lua_sites = {
 	{['path'] = '/lua_hello', ['handler'] = hello_handler},
 	{['path'] = '/lua_multi', ['handler'] = multi_handler},
 	{['path'] = '/lua_req',   ['handler'] = req_handler},
+	{['path'] = '/lua_ws_server', ['handler'] = ws_server_handler},
+	{['path'] = '/lua_ws_app', ['handler'] = ws_app_handler},
 }
 
 init_func(lua_sites, sample_site_lib.get_site_desc, nil)
