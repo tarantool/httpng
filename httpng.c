@@ -466,9 +466,6 @@ static void cancel_processing_lua_websocket_in_tx(lua_response_t *response)
 	assert(response->fiber != NULL);
 	assert(!response->fiber_done);
 	response->cancelled = true;
-	/* FIXME: Is a race here? */
-	if (response->is_waiting)
-		fiber_wakeup(response->fiber);
 }
 
 /* Launched in HTTP server thread. */
