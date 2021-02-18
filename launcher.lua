@@ -204,11 +204,11 @@ local function ws_server_handler(req, header_writer)
 	ws = header_writer:upgrade_to_websocket(headers, function(data)
 		-- Warning: This function is NOT allowed to yield
 		--[[
-		-- This call yields, causing deadlock.
-		if (ws:send_text('Server received "'..data..'"')) then
-			return
+		-- This call would fail because we are inside WebSocket recv handler.
+		if (ws:send_text('(direct) Server received "'..data..'"')) then
+			--return
 		end
-		]]--
+		--]]--
 		send_from_recv_handler('Server received "'..data..'"')
 		recv_count = recv_count + 1
 		if (recv_count >= recv_limit) then

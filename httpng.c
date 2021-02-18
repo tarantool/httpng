@@ -132,6 +132,7 @@ typedef struct {
 	bool upgraded_to_websocket;
 	bool is_recv_fiber_waiting;
 	bool is_recv_fiber_cancelled;
+	bool in_recv_handler;
 	char ws_client_key[WS_CLIENT_KEY_LEN];
 	union { /* Can use struct instead when debugging. */
 		lua_first_request_only_t req;
@@ -652,6 +653,10 @@ static int websocket_send_text(lua_State *L)
 		goto Error;
 
 	lua_response_t *const response = (lua_response_t *)&shuttle->payload;
+	if (response->in_recv_handler) {
+		fprintf(stderr, "User WebSocket recv handler for \"\%s\" is NOT allowed to call yielding functions\n", response->site_path);
+		goto Error;
+	}
 	take_shuttle_ownership_lua(response);
 	if (response->cancelled || response->ws_send_failed) {
 		/* Returning Lua true because connection has already been closed or previous send failed. */
@@ -700,6 +705,10 @@ static int close_lua_websocket(lua_State *L)
 		goto Error;
 
 	lua_response_t *const response = (lua_response_t *)&shuttle->payload;
+	if (response->in_recv_handler) {
+		fprintf(stderr, "User WebSocket recv handler for \"\%s\" is NOT allowed to call yielding functions\n", response->site_path);
+		goto Error;
+	}
 	take_shuttle_ownership_lua(response);
 	if (response->cancelled)
 		return 0;
@@ -737,10 +746,12 @@ lua_websocket_recv_fiber_func(va_list ap)
 		lua_pushlstring(L, get_websocket_recv_location(recv_shuttle), recv_response->websocket_recv_payload_bytes);
 
 		/* N. b.: WebSocket recv handler is NOT allowed to yield. */
+		parent_response->in_recv_handler = true;
 		if (lua_pcall(L, 1, 0, 0) != LUA_OK)
 			/* FIXME: Should probably log this instead(?).
 			 * Should we stop calling handler? */
 			fprintf(stderr, "User WebSocket recv handler for \"\%s\" failed with error \"%s\"\n", parent_response->site_path, lua_tostring(L, -1));
+		parent_response->in_recv_handler = false;
 		free_lua_websocket_recv_shuttle_from_tx(recv_shuttle);
 		fiber_wakeup(parent_response->tx_fiber);
 	}
@@ -793,6 +804,7 @@ static int header_writer_upgrade_to_websocket(lua_State *L)
 
 	response->sent_something = true;
 	response->ws_send_failed = false;
+	response->in_recv_handler = false;
 	stubborn_dispatch(shuttle->thread_ctx->queue_from_tx, &postprocess_lua_req_upgrade_to_websocket, shuttle);
 	wait_for_lua_shuttle_return(response);
 
