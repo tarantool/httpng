@@ -76,6 +76,12 @@ typedef struct {
 } lua_h2o_handler_t;
 
 typedef struct {
+	shuttle_t *parent_shuttle;
+	unsigned payload_bytes;
+	char payload[];
+} recv_data_t;
+
+typedef struct {
 	const char *name;
 	const char *value;
 	unsigned name_len;
@@ -117,11 +123,9 @@ typedef struct {
 	struct fiber *fiber;
 	struct fiber *recv_fiber; /* Fiber for WebSocket recv handler. */
 	h2o_websocket_conn_t *ws_conn;
-	shuttle_t *parent_shuttle; /* For WebSocket recv. */
-	shuttle_t *recv_shuttle; /* For WebSocket recv. */
+	recv_data_t *recv_data; /* For WebSocket recv. */
 	struct fiber *tx_fiber; /* The one which services requests from "our" HTTP thread. */
 	waiter_t *waiter; /* Changed by TX thread. */
-	unsigned websocket_recv_payload_bytes;
 	int lua_state_ref;
 	int lua_recv_handler_ref;
 	int lua_recv_state_ref;
@@ -147,6 +151,7 @@ static struct {
 	struct fiber **tx_fiber_ptrs;
 	SSL_CTX *ssl_ctx;
 	unsigned shuttle_size;
+	unsigned recv_data_size;
 	unsigned num_listeners;
 	unsigned num_accepts;
 	unsigned max_conn_per_thread;
@@ -161,8 +166,6 @@ static struct {
 };
 
 __thread thread_ctx_t *curr_thread_ctx;
-
-static inline shuttle_t *prepare_websocket_recv_shuttle(shuttle_t *parent);
 
 static inline shuttle_t *get_shuttle_from_generator_lua(h2o_generator_t *generator)
 {
@@ -183,6 +186,31 @@ void stubborn_dispatch_uni(struct xtm_queue *queue, void *func, void *param)
 static inline void stubborn_dispatch_lua(struct xtm_queue *queue, void (*func)(lua_response_t *), lua_response_t *param)
 {
 	stubborn_dispatch_uni(queue, func, param);
+}
+
+/* Called when dispatch must not fail. */
+static inline void stubborn_dispatch_recv(struct xtm_queue *queue, void (*func)(recv_data_t *), recv_data_t *param)
+{
+	stubborn_dispatch_uni(queue, func, param);
+}
+
+/* Launched in HTTP server thread. */
+static inline recv_data_t *alloc_recv_data(void)
+{
+	/* FIXME: Use per-thread pools? */
+	recv_data_t *const recv_data = (recv_data_t *)malloc(conf.recv_data_size);
+	if (recv_data == NULL)
+		h2o_fatal("no memory");
+	return recv_data;
+}
+
+/* Launched in HTTP server thread. */
+static inline recv_data_t *prepare_websocket_recv_data(shuttle_t *parent, unsigned payload_bytes)
+{
+	recv_data_t *const recv_data = alloc_recv_data();
+	recv_data->parent_shuttle = parent;
+	recv_data->payload_bytes = payload_bytes;
+	return recv_data;
 }
 
 /* Launched in HTTP server thread */
@@ -233,12 +261,22 @@ static inline void free_lua_websocket_shuttle_from_tx(shuttle_t *shuttle)
 	stubborn_dispatch(shuttle->thread_ctx->queue_from_tx, &free_lua_websocket_shuttle_in_http_thread, shuttle);
 }
 
-/* Launched in TX thread. */
-static inline void free_lua_websocket_recv_shuttle_from_tx(shuttle_t *recv_shuttle)
+static inline void free_recv_data(recv_data_t *recv_data)
 {
-	lua_response_t *const recv_response = (lua_response_t *)&recv_shuttle->payload;
-	/* Can't call free_shuttle() from TX thread because it [potentially] uses per-thread pools. */
-	stubborn_dispatch(recv_response->parent_shuttle->thread_ctx->queue_from_tx, &free_lua_websocket_shuttle_in_http_thread, recv_shuttle);
+	free(recv_data);
+}
+
+/* Launched in HTTP server thread. */
+static void free_lua_websocket_recv_data_in_http_thread(recv_data_t *recv_data)
+{
+	free_recv_data(recv_data);
+}
+
+/* Launched in TX thread. */
+static inline void free_lua_websocket_recv_data_from_tx(recv_data_t *recv_data)
+{
+	/* Can't call free_recv_data() from TX thread because it [potentially] uses per-thread pools w/o mutexes. */
+	stubborn_dispatch_recv(recv_data->parent_shuttle->thread_ctx->queue_from_tx, &free_lua_websocket_recv_data_in_http_thread, recv_data);
 }
 
 /* Launched in TX thread */
@@ -537,18 +575,15 @@ static void cancel_processing_lua_websocket_in_tx(lua_response_t *response)
 	response->cancelled = true;
 }
 
-static inline char *get_websocket_recv_location(shuttle_t *const shuttle)
+static inline char *get_websocket_recv_location(recv_data_t *const recv_data)
 {
-	lua_response_t *const response = (lua_response_t *)&shuttle->payload;
-	/* We reuse space used to create first response. */
-	return (char *)&response->un.resp.first;
+	return recv_data->payload;
 }
 
 /* Launched in TX thread. */
-static void process_lua_websocket_received_data_in_tx(shuttle_t *recv_shuttle)
+static void process_lua_websocket_received_data_in_tx(recv_data_t *recv_data)
 {
-	lua_response_t *const recv_response = (lua_response_t *)&recv_shuttle->payload;
-	shuttle_t *const parent_shuttle = recv_response->parent_shuttle;
+	shuttle_t *const parent_shuttle = recv_data->parent_shuttle;
 	assert(parent_shuttle != NULL);
 	lua_response_t *const parent_response = (lua_response_t *)&parent_shuttle->payload;
 	assert(parent_response->fiber != NULL);
@@ -557,13 +592,13 @@ static void process_lua_websocket_received_data_in_tx(shuttle_t *recv_shuttle)
 	/* FIXME: Should we do this check in HTTP server thread? */
 	if (parent_response->recv_fiber != NULL) {
 		if (parent_response->is_recv_fiber_waiting) {
-			parent_response->recv_shuttle = recv_shuttle;
+			parent_response->recv_data = recv_data;
 			fiber_wakeup(parent_response->recv_fiber);
 			fiber_yield();
 		} else
 			fprintf(stderr, "User WebSocket recv handler for \"\%s\" is NOT allowed to yield, data has been lost\n", parent_response->site_path);
 	} else
-		free_lua_websocket_recv_shuttle_from_tx(recv_shuttle);
+		free_lua_websocket_recv_data_from_tx(recv_data);
 }
 
 /* Launched in HTTP server thread. */
@@ -587,13 +622,11 @@ static void websocket_msg_callback(h2o_websocket_conn_t *conn, const struct wsla
 	const unsigned char *pos = arg->msg;
 	while (1) {
 		/* FIXME: Need flag about splitting to parts.
-		 * Probably should have upper limit on a number of active recv shuttles. */
+		 * Probably should have upper limit on a number of active recv_data - we can eat A LOT of memory. */
 		const unsigned bytes_to_send = bytes_remain > conf.max_recv_bytes_lua_websocket ? conf.max_recv_bytes_lua_websocket : bytes_remain;
-		shuttle_t *const recv_shuttle = prepare_websocket_recv_shuttle(shuttle);
-		memcpy(get_websocket_recv_location(recv_shuttle), pos, bytes_to_send);
-		lua_response_t *const recv_response = (lua_response_t *)&recv_shuttle->payload;
-		recv_response->websocket_recv_payload_bytes = bytes_to_send;
-		stubborn_dispatch(get_curr_thread_ctx()->queue_to_tx, process_lua_websocket_received_data_in_tx, recv_shuttle);
+		recv_data_t *const recv_data = prepare_websocket_recv_data(shuttle, bytes_to_send);
+		memcpy(get_websocket_recv_location(recv_data), pos, bytes_to_send);
+		stubborn_dispatch_recv(get_curr_thread_ctx()->queue_to_tx, process_lua_websocket_received_data_in_tx, recv_data);
 		if (response->ws_conn == NULL)
 			/* Handler has closed connection already. */
 			break;
@@ -734,16 +767,16 @@ lua_websocket_recv_fiber_func(va_list ap)
 		parent_response->is_recv_fiber_waiting = true;
 		fiber_yield();
 		if (parent_response->is_recv_fiber_cancelled)
+			/* FIXME: Can we leak recv_data? */
 			return 0;
 		parent_response->is_recv_fiber_waiting = false;
 
 		lua_rawgeti(L, LUA_REGISTRYINDEX, parent_response->lua_recv_handler_ref); /* User handler function, written in Lua. */
 
-		shuttle_t *const recv_shuttle = parent_response->recv_shuttle;
-		lua_response_t *const recv_response = (lua_response_t *)&recv_shuttle->payload;
-		assert(recv_response->parent_shuttle == parent_shuttle);
+		recv_data_t *const recv_data = parent_response->recv_data;
+		assert(recv_data->parent_shuttle == parent_shuttle);
 		/* First param for Lua WebSocket recv handler - data. */
-		lua_pushlstring(L, get_websocket_recv_location(recv_shuttle), recv_response->websocket_recv_payload_bytes);
+		lua_pushlstring(L, get_websocket_recv_location(recv_data), recv_data->payload_bytes);
 
 		/* N. b.: WebSocket recv handler is NOT allowed to yield. */
 		parent_response->in_recv_handler = true;
@@ -752,7 +785,7 @@ lua_websocket_recv_fiber_func(va_list ap)
 			 * Should we stop calling handler? */
 			fprintf(stderr, "User WebSocket recv handler for \"\%s\" failed with error \"%s\"\n", parent_response->site_path, lua_tostring(L, -1));
 		parent_response->in_recv_handler = false;
-		free_lua_websocket_recv_shuttle_from_tx(recv_shuttle);
+		free_lua_websocket_recv_data_from_tx(recv_data);
 		fiber_wakeup(parent_response->tx_fiber);
 	}
 
@@ -1098,18 +1131,6 @@ shuttle_t *prepare_shuttle(h2o_req_t *req)
 	return shuttle;
 }
 
-/* Launched in HTTP server thread. */
-static inline shuttle_t *prepare_websocket_recv_shuttle(shuttle_t *parent)
-{
-	thread_ctx_t *const thread_ctx = get_curr_thread_ctx();
-	shuttle_t *const shuttle = alloc_shuttle(thread_ctx);
-	shuttle->disposed = false;
-	lua_response_t *const response = (lua_response_t *)&shuttle->payload;
-	response->parent_shuttle = parent;
-	return shuttle;
-}
-
-
 #ifdef USE_LIBUV
 
 static void on_uv_socket_free(void *data)
@@ -1444,9 +1465,10 @@ int init(lua_State *L)
 	/* FIXME: Add sanity checks, especially shuttle_size - it must >sizeof(shuttle_t) (accounting for Lua payload) and aligned */
 	conf.num_threads = site_desc->num_threads;
 	conf.shuttle_size = site_desc->shuttle_size;
+	conf.recv_data_size = site_desc->shuttle_size; /* FIXME: Can differ from shuttle_size. */
 	conf.max_headers_lua = (conf.shuttle_size - sizeof(shuttle_t) - offsetof(lua_response_t, un.resp.first.headers)) / sizeof(http_header_entry_t);
 	conf.max_path_len_lua = conf.shuttle_size - sizeof(shuttle_t) - offsetof(lua_response_t, un.req.path);
-	conf.max_recv_bytes_lua_websocket = conf.shuttle_size /* - sizeof(shuttle_t) - */ - (uintptr_t)get_websocket_recv_location(NULL);
+	conf.max_recv_bytes_lua_websocket = conf.recv_data_size - (uintptr_t)get_websocket_recv_location(NULL);
 	conf.max_conn_per_thread = site_desc->max_conn_per_thread;
 	conf.num_accepts = conf.max_conn_per_thread / 16;
 	if (conf.num_accepts < 8)
