@@ -29,6 +29,14 @@
 #define QUEUE_TO_TX_ITEMS (1 << 12) /* Must be power of 2 */
 #define QUEUE_FROM_TX_ITEMS (QUEUE_TO_TX_ITEMS << 1) /* Must be power of 2 */
 
+/* We would need this when (if) alloc would be performed from thread pools w/o mutexes. */
+#define SHOULD_FREE_SHUTTLE_IN_HTTP_SERVER_THREAD
+#undef SHOULD_FREE_SHUTTLE_IN_HTTP_SERVER_THREAD
+
+/* We would need this when (if) alloc would be performed from thread pools w/o mutexes. */
+#define SHOULD_FREE_RECV_DATA_IN_HTTP_SERVER_THREAD
+#undef SHOULD_FREE_RECV_DATA_IN_HTTP_SERVER_THREAD
+
 #define USE_HTTPS 1
 //#define USE_HTTPS 0
 
@@ -213,16 +221,16 @@ static inline recv_data_t *prepare_websocket_recv_data(shuttle_t *parent, unsign
 	return recv_data;
 }
 
-/* Launched in HTTP server thread */
-static void cancel_processing_req_in_http_thread(shuttle_t *shuttle)
+/* Launched in HTTP server thread or in TX thread when !SHOULD_FREE_SHUTTLE_IN_HTTP_SERVER_THREAD. */
+static void free_shuttle_internal(shuttle_t *shuttle)
 {
 	assert(shuttle->disposed);
 	free_shuttle(shuttle);
 }
 
-/* Launched in HTTP server thread.
+/* Launched in HTTP server thread or in TX thread when !SHOULD_FREE_SHUTTLE_IN_HTTP_SERVER_THREAD.
  * FIXME: Only assert is different, can optimize for release build. */
-static void free_lua_websocket_shuttle_in_http_thread(shuttle_t *shuttle)
+static void free_lua_websocket_shuttle_internal(shuttle_t *shuttle)
 {
 	assert(!shuttle->disposed);
 	free_shuttle(shuttle);
@@ -232,8 +240,12 @@ static void free_lua_websocket_shuttle_in_http_thread(shuttle_t *shuttle)
  * It can queue request to HTTP thread or free everything itself. */
 void free_shuttle_from_tx(shuttle_t *shuttle)
 {
+#ifdef SHOULD_FREE_SHUTTLE_IN_HTTP_SERVER_THREAD
 	/* Can't call free_shuttle() from TX thread because it [potentially] uses per-thread pools. */
-	stubborn_dispatch(shuttle->thread_ctx->queue_from_tx, &cancel_processing_req_in_http_thread, shuttle);
+	stubborn_dispatch(shuttle->thread_ctx->queue_from_tx, &free_shuttle_internal, shuttle);
+#else /* SHOULD_FREE_SHUTTLE_IN_HTTP_SERVER_THREAD */
+	free_shuttle_internal(shuttle);
+#endif /* SHOULD_FREE_SHUTTLE_IN_HTTP_SERVER_THREAD */
 }
 
 /* Launched in TX thread. */
@@ -257,17 +269,22 @@ static inline void free_lua_websocket_shuttle_from_tx(shuttle_t *shuttle)
 		luaL_unref(L, LUA_REGISTRYINDEX, response->lua_recv_handler_ref);
 		luaL_unref(L, LUA_REGISTRYINDEX, response->lua_recv_state_ref);
 	}
+#ifdef SHOULD_FREE_SHUTTLE_IN_HTTP_SERVER_THREAD
 	/* Can't call free_shuttle() from TX thread because it [potentially] uses per-thread pools. */
-	stubborn_dispatch(shuttle->thread_ctx->queue_from_tx, &free_lua_websocket_shuttle_in_http_thread, shuttle);
+	stubborn_dispatch(shuttle->thread_ctx->queue_from_tx, &free_lua_websocket_shuttle_internal, shuttle);
+#else /* SHOULD_FREE_SHUTTLE_IN_HTTP_SERVER_THREAD */
+	free_lua_websocket_shuttle_internal(shuttle);
+#endif /* SHOULD_FREE_SHUTTLE_IN_HTTP_SERVER_THREAD */
 }
 
+/* Launched in HTTP server thread or in TX thread when !SHOULD_FREE_RECV_DATA_IN_HTTP_SERVER_THREAD. */
 static inline void free_recv_data(recv_data_t *recv_data)
 {
 	free(recv_data);
 }
 
-/* Launched in HTTP server thread. */
-static void free_lua_websocket_recv_data_in_http_thread(recv_data_t *recv_data)
+/* Launched in HTTP server thread or in TX thread when !SHOULD_FREE_RECV_DATA_IN_HTTP_SERVER_THREAD. */
+static void free_lua_websocket_recv_data_internal(recv_data_t *recv_data)
 {
 	free_recv_data(recv_data);
 }
@@ -275,8 +292,12 @@ static void free_lua_websocket_recv_data_in_http_thread(recv_data_t *recv_data)
 /* Launched in TX thread. */
 static inline void free_lua_websocket_recv_data_from_tx(recv_data_t *recv_data)
 {
+#ifdef SHOULD_FREE_RECV_DATA_IN_HTTP_SERVER_THREAD
 	/* Can't call free_recv_data() from TX thread because it [potentially] uses per-thread pools w/o mutexes. */
-	stubborn_dispatch_recv(recv_data->parent_shuttle->thread_ctx->queue_from_tx, &free_lua_websocket_recv_data_in_http_thread, recv_data);
+	stubborn_dispatch_recv(recv_data->parent_shuttle->thread_ctx->queue_from_tx, &free_lua_websocket_recv_data_internal, recv_data);
+#else /* SHOULD_FREE_RECV_DATA_IN_HTTP_SERVER_THREAD */
+	free_lua_websocket_recv_data_internal(recv_data);
+#endif /* SHOULD_FREE_RECV_DATA_IN_HTTP_SERVER_THREAD */
 }
 
 /* Launched in TX thread */
@@ -1085,11 +1106,13 @@ static inline shuttle_t *alloc_shuttle(thread_ctx_t *thread_ctx)
 	return shuttle;
 }
 
+/* Launched in HTTP server thread or in TX thread when !SHOULD_FREE_SHUTTLE_IN_HTTP_SERVER_THREAD. */
 void free_shuttle(shuttle_t *shuttle)
 {
 	free(shuttle);
 }
 
+/* Launched in HTTP server thread. */
 void free_shuttle_with_anchor(shuttle_t *shuttle)
 {
 	assert(!shuttle->disposed);
