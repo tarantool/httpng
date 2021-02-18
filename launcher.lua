@@ -186,8 +186,8 @@ local function ws_server_handler(req, header_writer)
 		-- Creating new fiber every time is a bad idea, this is just a stopgap.
 		fiber.new(function()
 			-- FIXME: Does not work correctly yet in httpng.so
-			--ws:send_text('Server is terminating connection')
-			--ws:close()
+			ws:send_text('Server is terminating connection')
+			ws:close()
 		end)
 	end
 
@@ -195,7 +195,7 @@ local function ws_server_handler(req, header_writer)
 		-- Creating new fiber every time is a bad idea, this is just a stopgap.
 		fiber.new(function()
 			-- FIXME: Does not work correctly yet in httpng.so.
-			--ws:send_text(data)
+			ws:send_text(data)
 		end)
 	end
 
@@ -211,7 +211,7 @@ local function ws_server_handler(req, header_writer)
 		]]--
 		send_from_recv_handler('Server received "'..data..'"')
 		recv_count = recv_count + 1
-		if (recv_count > recv_limit) then
+		if (recv_count >= recv_limit) then
 			initiate_connection_termination()
 		end
 		--fiber.sleep(3) -- This works at the moment but is a bad idea because it stalls TX HTTP processing.

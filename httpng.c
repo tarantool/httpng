@@ -59,6 +59,11 @@ typedef struct {
 	int fd;
 } listener_cfg_t;
 
+typedef struct waiter {
+	struct waiter *next;
+	struct fiber *fiber;
+} waiter_t;
+
 typedef struct {
 	char *path;
 } lua_site_t;
@@ -115,6 +120,7 @@ typedef struct {
 	shuttle_t *parent_shuttle; /* For WebSocket recv. */
 	shuttle_t *recv_shuttle; /* For WebSocket recv. */
 	struct fiber *tx_fiber; /* The one which services requests from "our" HTTP thread. */
+	waiter_t *waiter; /* Changed by TX thread. */
 	unsigned websocket_recv_payload_bytes;
 	int lua_state_ref;
 	int lua_recv_handler_ref;
@@ -122,7 +128,6 @@ typedef struct {
 	bool fiber_done;
 	bool sent_something;
 	bool cancelled; /* Changed by TX thread. */
-	bool is_waiting; /* Changed by TX thread. */
 	bool ws_send_failed;
 	bool upgraded_to_websocket;
 	bool is_recv_fiber_waiting;
@@ -248,10 +253,10 @@ static void cancel_processing_lua_req_in_tx(shuttle_t *shuttle)
 	 * Also we have unref Lua state. */
 	if (response->fiber == NULL)
 		free_lua_shuttle_from_tx(shuttle);
-	else if (response->is_waiting) {
+	else if (response->waiter != NULL) {
 		assert(!response->fiber_done);
 		response->cancelled = true;
-		fiber_wakeup(response->fiber);
+		fiber_wakeup(response->waiter->fiber);
 	} else if (response->fiber_done)
 		free_lua_shuttle_from_tx(shuttle);
 	else
@@ -274,8 +279,9 @@ static void continue_processing_lua_req_in_tx(lua_response_t *response)
 {
 	assert(response->fiber != NULL);
 	assert(!response->fiber_done);
-	assert(response->is_waiting);
-	fiber_wakeup(response->fiber);
+	assert(response->waiter != NULL);
+	assert(response->waiter->fiber != NULL);
+	fiber_wakeup(response->waiter->fiber);
 }
 
 /* Launched in HTTP server thread when H2O has sent everything and asks for more */
@@ -338,13 +344,40 @@ static inline void add_http_header_to_lua_response(lua_first_response_only_t *re
 	response->headers[response->num_headers++] = (http_header_entry_t){key, value, key_len, value_len};
 }
 
-/* Launched in TX thread. */
+/* Launched in TX thread.
+ * Makes sure earlier queued sends to HTTP thread are done. */
+static void take_shuttle_ownership_lua(lua_response_t *response)
+{
+	if (response->waiter == NULL)
+		return;
+
+	/* Other fiber(s) are already waiting for shuttle return or taking ownership,
+	 * add ourself into tail of waiting list. */
+	waiter_t waiter = { .next = NULL, .fiber = fiber_self() };
+	waiter_t *last_waiter = response->waiter;
+	/* FIXME: It may be more efficient to use double-linked list if we expect a lot of competing fibers. */
+	while (last_waiter->next != NULL)
+		last_waiter = last_waiter->next;
+	last_waiter->next = &waiter;
+	fiber_yield();
+}
+
+/* Launched in TX thread.
+ * Caller must call take_shuttle_ownership_lua() before filling in shuttle and calling us.
+ */
 static inline void wait_for_lua_shuttle_return(lua_response_t *response)
 {
-	assert(response->fiber == fiber_self());
-	response->is_waiting = true;
+	/* Add us into head of waiting list. */
+	waiter_t waiter = { .next = response->waiter, .fiber = fiber_self() };
+	response->waiter = &waiter;
 	fiber_yield();
-	response->is_waiting = false;
+	assert(response->waiter == &waiter);
+	response->waiter = waiter.next;
+	if (response->waiter) {
+		struct fiber *fiber = response->waiter->fiber;
+		response->waiter = response->waiter->next;
+		fiber_wakeup(fiber);
+	}
 }
 
 /* Launched in TX thread */
@@ -362,6 +395,7 @@ static int payload_writer_write(lua_State *L)
 		goto Error;
 
 	lua_response_t *const response = (lua_response_t *)&shuttle->payload;
+	take_shuttle_ownership_lua(response);
 	if (response->cancelled) {
 		/* Returning Lua true because connection has already been closed. */
 		lua_pushboolean(L, true);
@@ -422,6 +456,7 @@ static int header_writer_write_header(lua_State *L)
 		is_last = false;
 
 	lua_response_t *const response = (lua_response_t *)&shuttle->payload;
+	take_shuttle_ownership_lua(response);
 	if (response->sent_something)
 		goto Error;
 	if (response->cancelled) {
@@ -617,6 +652,7 @@ static int websocket_send_text(lua_State *L)
 		goto Error;
 
 	lua_response_t *const response = (lua_response_t *)&shuttle->payload;
+	take_shuttle_ownership_lua(response);
 	if (response->cancelled || response->ws_send_failed) {
 		/* Returning Lua true because connection has already been closed or previous send failed. */
 		lua_pushboolean(L, true);
@@ -664,6 +700,7 @@ static int close_lua_websocket(lua_State *L)
 		goto Error;
 
 	lua_response_t *const response = (lua_response_t *)&shuttle->payload;
+	take_shuttle_ownership_lua(response);
 	if (response->cancelled)
 		return 0;
 
@@ -727,6 +764,7 @@ static int header_writer_upgrade_to_websocket(lua_State *L)
 		goto Error;
 
 	lua_response_t *const response = (lua_response_t *)&shuttle->payload;
+	take_shuttle_ownership_lua(response);
 	if (response->sent_something)
 		goto Error;
 	if (response->cancelled) {
@@ -827,10 +865,12 @@ lua_fiber_func(va_list ap)
 			else
 				free_lua_shuttle_from_tx(shuttle);
 		} else if (response->upgraded_to_websocket) {
+			take_shuttle_ownership_lua(response);
 			stubborn_dispatch_lua(shuttle->thread_ctx->queue_from_tx, &close_websocket, response);
 			wait_for_lua_shuttle_return(response);
 			free_lua_websocket_shuttle_from_tx(shuttle);
 		} else {
+			take_shuttle_ownership_lua(response);
 			response->un.resp.any.is_last_send = true;
 			if (response->sent_something) {
 				/* Do not add anything to user output to prevent corrupt HTML etc. */
@@ -862,6 +902,7 @@ lua_fiber_func(va_list ap)
 		else
 			free_lua_shuttle_from_tx(shuttle);
 	} else if (response->upgraded_to_websocket) {
+		take_shuttle_ownership_lua(response);
 		stubborn_dispatch_lua(shuttle->thread_ctx->queue_from_tx, &close_websocket, response);
 		wait_for_lua_shuttle_return(response);
 		free_lua_websocket_shuttle_from_tx(shuttle);
@@ -947,7 +988,7 @@ static int lua_req_handler(lua_h2o_handler_t *self, h2o_req_t *req)
 
 	response->sent_something = false;
 	response->cancelled = false;
-	response->is_waiting = false;
+	response->waiter = NULL;
 	response->un.req.lua_handler_ref = self->lua_handler_ref;
 	response->site_path = self->path;
 
