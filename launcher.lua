@@ -180,7 +180,42 @@ local function ws_server_handler(req, header_writer)
 		return
 	end
 
-	local ws = header_writer:upgrade_to_websocket(headers)
+	local ws
+
+	local function initiate_connection_termination()
+		-- Creating new fiber every time is a bad idea, this is just a stopgap.
+		fiber.new(function()
+			-- FIXME: Does not work correctly yet in httpng.so
+			--ws:send_text('Server is terminating connection')
+			--ws:close()
+		end)
+	end
+
+	local function send_from_recv_handler(data)
+		-- Creating new fiber every time is a bad idea, this is just a stopgap.
+		fiber.new(function()
+			-- FIXME: Does not work correctly yet in httpng.so.
+			--ws:send_text(data)
+		end)
+	end
+
+	local recv_limit = 5
+	local recv_count = 0
+	ws = header_writer:upgrade_to_websocket(headers, function(data)
+		-- Warning: This function is NOT allowed to yield
+		--[[
+		-- This call yields, causing deadlock.
+		if (ws:send_text('Server received "'..data..'"')) then
+			return
+		end
+		]]--
+		send_from_recv_handler('Server received "'..data..'"')
+		recv_count = recv_count + 1
+		if (recv_count > recv_limit) then
+			initiate_connection_termination()
+		end
+		--fiber.sleep(3) -- This works at the moment but is a bad idea because it stalls TX HTTP processing.
+	end)
 	if (ws == nil) then
 		return
 	end
@@ -189,7 +224,18 @@ local function ws_server_handler(req, header_writer)
 	local num_iterations = 3
 	local counter
 	for counter = 1, num_iterations do
-		if (ws:send_text(string.format('%d of %d\n', counter, num_iterations))) then
+		if (ws:send_text(string.format('%d of %d', counter, num_iterations))) then
+			return
+		end
+		fiber.sleep(1)
+	end
+
+	--if (ws:send_text('Server is now waiting for data from app, will stop after '..recv_limit..' receives')) then -- Stopping does not work yet.
+	if (ws:send_text('Server is now waiting for data from app')) then
+		return
+	end
+	while true do
+		if (ws:send_text(string.format('Server receives count: %d', recv_count))) then
 			return
 		end
 		fiber.sleep(1)
@@ -212,19 +258,35 @@ local function ws_app_handler(req, header_writer)
 <html><head><title>Example WebSockets Application</title></head><body>
 <script>
 	webSocket = new WebSocket('wss://localhost:7890/lua_ws_server');
+	sendCounter = 0;
+	sendLimit = 10;
+	function sendOne() {
+		++sendCounter;
+		document.write('App: sending "', sendCounter, '" to server<br>\n');
+		webSocket.send(sendCounter);
+		if (sendCounter >= sendLimit) {
+			clearInterval(periodicSendsTimer);
+			document.write('App: stopped sends<br>\n');
+		}
+	}
+	function startSending() {
+		document.write('App: starting sends, will perform no more than ', sendLimit, ' of them<br>\n');
+		periodicSendsTimer = setInterval(sendOne, 1000);
+	}
 	webSocket.onopen = function (event) {
 		document.write('Connection to WebSocket server established successfully<br>\n');
+		delay = 5000;
+		document.write('App will start sending data to server in ', delay, ' milliseconds<br>\n');
+		window.setTimeout(startSending, delay);
 	}
 	webSocket.onmessage = function (event) {
-		document.write('Received data: ', event.data, '<br>\n');
+		document.write('App has received data: ', event.data, '<br>\n');
 	}
 	webSocket.onclose = function (event) {
+		clearInterval(periodicSendsTimer);
 		document.write('Connection has been closed by the server<br>\n');
 	}
 	document.write('Trying to connect to WebSocket server...<br>\n');
-	while (true) {
-		sleep(1);
-	}
 </script>
 </body></html>
 ]]
