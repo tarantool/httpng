@@ -583,20 +583,20 @@ static inline char *get_websocket_recv_location(recv_data_t *const recv_data)
 /* Launched in TX thread. */
 static void process_lua_websocket_received_data_in_tx(recv_data_t *recv_data)
 {
-	shuttle_t *const parent_shuttle = recv_data->parent_shuttle;
-	assert(parent_shuttle != NULL);
-	lua_response_t *const parent_response = (lua_response_t *)&parent_shuttle->payload;
-	assert(parent_response->fiber != NULL);
-	assert(!parent_response->fiber_done);
+	shuttle_t *const shuttle = recv_data->parent_shuttle;
+	assert(shuttle != NULL);
+	lua_response_t *const response = (lua_response_t *)&shuttle->payload;
+	assert(response->fiber != NULL);
+	assert(!response->fiber_done);
 
 	/* FIXME: Should we do this check in HTTP server thread? */
-	if (parent_response->recv_fiber != NULL) {
-		if (parent_response->is_recv_fiber_waiting) {
-			parent_response->recv_data = recv_data;
-			fiber_wakeup(parent_response->recv_fiber);
+	if (response->recv_fiber != NULL) {
+		if (response->is_recv_fiber_waiting) {
+			response->recv_data = recv_data;
+			fiber_wakeup(response->recv_fiber);
 			fiber_yield();
 		} else
-			fprintf(stderr, "User WebSocket recv handler for \"\%s\" is NOT allowed to yield, data has been lost\n", parent_response->site_path);
+			fprintf(stderr, "User WebSocket recv handler for \"\%s\" is NOT allowed to yield, data has been lost\n", response->site_path);
 	} else
 		free_lua_websocket_recv_data_from_tx(recv_data);
 }
@@ -759,34 +759,34 @@ Error: /* FIXME: Error message. */
 static int
 lua_websocket_recv_fiber_func(va_list ap)
 {
-	shuttle_t *const parent_shuttle = va_arg(ap, shuttle_t *);
+	shuttle_t *const shuttle = va_arg(ap, shuttle_t *);
 	lua_State *const L = va_arg(ap, lua_State *);
-	lua_response_t *const parent_response = (lua_response_t *)&parent_shuttle->payload;
+	lua_response_t *const response = (lua_response_t *)&shuttle->payload;
 
 	while (1) {
-		parent_response->is_recv_fiber_waiting = true;
+		response->is_recv_fiber_waiting = true;
 		fiber_yield();
-		if (parent_response->is_recv_fiber_cancelled)
+		if (response->is_recv_fiber_cancelled)
 			/* FIXME: Can we leak recv_data? */
 			return 0;
-		parent_response->is_recv_fiber_waiting = false;
+		response->is_recv_fiber_waiting = false;
 
-		lua_rawgeti(L, LUA_REGISTRYINDEX, parent_response->lua_recv_handler_ref); /* User handler function, written in Lua. */
+		lua_rawgeti(L, LUA_REGISTRYINDEX, response->lua_recv_handler_ref); /* User handler function, written in Lua. */
 
-		recv_data_t *const recv_data = parent_response->recv_data;
-		assert(recv_data->parent_shuttle == parent_shuttle);
+		recv_data_t *const recv_data = response->recv_data;
+		assert(recv_data->parent_shuttle == shuttle);
 		/* First param for Lua WebSocket recv handler - data. */
 		lua_pushlstring(L, get_websocket_recv_location(recv_data), recv_data->payload_bytes);
 
 		/* N. b.: WebSocket recv handler is NOT allowed to yield. */
-		parent_response->in_recv_handler = true;
+		response->in_recv_handler = true;
 		if (lua_pcall(L, 1, 0, 0) != LUA_OK)
 			/* FIXME: Should probably log this instead(?).
 			 * Should we stop calling handler? */
-			fprintf(stderr, "User WebSocket recv handler for \"\%s\" failed with error \"%s\"\n", parent_response->site_path, lua_tostring(L, -1));
-		parent_response->in_recv_handler = false;
+			fprintf(stderr, "User WebSocket recv handler for \"\%s\" failed with error \"%s\"\n", response->site_path, lua_tostring(L, -1));
+		response->in_recv_handler = false;
 		free_lua_websocket_recv_data_from_tx(recv_data);
-		fiber_wakeup(parent_response->tx_fiber);
+		fiber_wakeup(response->tx_fiber);
 	}
 
 	return 0;
