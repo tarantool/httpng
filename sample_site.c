@@ -174,6 +174,15 @@ static int init_userdata_in_tx(void *param)
 {
 	(void)param;
 
+	const unsigned shuttle_size = get_shuttle_size();
+	users_response_data_size = shuttle_size - sizeof(shuttle_t) - offsetof(simple_response_t, data);
+	stats_response_data_size_minus_1 = shuttle_size - sizeof(shuttle_t) - offsetof(response_with_state_t, data) - 1;
+
+	/* We can use lower value to trigger direct access to tuple */
+	large_response_data_size = shuttle_size - sizeof(shuttle_t) - offsetof(large_response_t, data);
+
+	fiber_response_data_size = shuttle_size - sizeof(shuttle_t) - offsetof(fiber_response_t, data);
+
 	static const char space_name[] = "tester";
 	if ((our_userdata.space_id = box_space_id_by_name(space_name, sizeof(space_name) - 1)) == BOX_ID_NIL)
 		return -1;
@@ -679,50 +688,30 @@ static int fiber_req_handler(h2o_handler_t *self, h2o_req_t *req)
 	return 0;
 }
 
-static const site_desc_t our_site_desc = {
-	.num_threads = 4,
-	.max_conn_per_thread = 64,
-	.shuttle_size = 1024,
-	/* All .init_userdata_in_tx() are called, we can use per-path initialization functions
-	 * (this can be more convenient when integrating several modules)
-	 * or put everything into one. */
-	.path_descs = {
-		{ .path = users_path, .handler = users_req_handler, .init_userdata_in_tx = init_userdata_in_tx, },
-		{ .path = stats_path, .handler = stats_req_handler, },
-		{ .path = large_path, .handler = large_req_handler, },
-		{ .path = fiber_path, .handler = fiber_req_handler, },
-		{ .path = NULL }, /* Terminator */
-	},
+static const path_desc_t our_path_descs[] = {
+	{ .path = users_path, .handler = users_req_handler, .init_userdata_in_tx = init_userdata_in_tx, },
+	{ .path = stats_path, .handler = stats_req_handler, },
+	{ .path = large_path, .handler = large_req_handler, },
+	{ .path = fiber_path, .handler = fiber_req_handler, },
+	{ .path = NULL }, /* Terminator */
 };
 
-static int get_site_desc(lua_State *L)
+static int get_path_descs(lua_State *L)
 {
 	/* We are passed one Lua parameter we can use to configure descs etc */
 	lua_pop(L, 1);
 
-	lua_pushinteger(L, (uintptr_t)&our_site_desc);
+	lua_pushinteger(L, (uintptr_t)&our_path_descs);
 	return 1;
 }
 
-static void init_site(void)
-{
-	users_response_data_size = our_site_desc.shuttle_size - sizeof(shuttle_t) - offsetof(simple_response_t, data);
-	stats_response_data_size_minus_1 = our_site_desc.shuttle_size - sizeof(shuttle_t) - offsetof(response_with_state_t, data) - 1;
-
-	/* We can use lower value to trigger direct access to tuple */
-	large_response_data_size = our_site_desc.shuttle_size - sizeof(shuttle_t) - offsetof(large_response_t, data);
-
-	fiber_response_data_size = our_site_desc.shuttle_size - sizeof(shuttle_t) - offsetof(fiber_response_t, data);
-}
-
 static const struct luaL_Reg mylib[] = {
-	{"get_site_desc", get_site_desc},
+	{"get_path_descs", get_path_descs},
 	{NULL, NULL}
 };
 
 int luaopen_sample_site(lua_State *L)
 {
-	init_site();
 	luaL_newlib(L, mylib);
 	return 1;
 }

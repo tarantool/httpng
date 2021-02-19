@@ -58,13 +58,6 @@ typedef struct {
 	void *init_userdata_in_tx_param;
 } path_desc_t;
 
-typedef struct {
-	unsigned num_threads;
-	unsigned max_conn_per_thread;
-	unsigned shuttle_size;
-	path_desc_t path_descs[];
-} site_desc_t;
-
 extern __thread thread_ctx_t *curr_thread_ctx;
 
 static inline thread_ctx_t *get_curr_thread_ctx(void)
@@ -98,6 +91,8 @@ static inline void stubborn_dispatch(struct xtm_queue *queue, void (*func)(shutt
 /* Must be called in TX thread.
  * It can queue request to HTTP thread or free everything itself. */
 void free_shuttle_from_tx(shuttle_t *);
+
+unsigned get_shuttle_size(void);
 
 #if defined(__cplusplus)
 }

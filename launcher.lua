@@ -308,4 +308,11 @@ local lua_sites = {
 	{['path'] = '/lua_ws_app', ['handler'] = ws_app_handler},
 }
 
-init_func(lua_sites, sample_site_lib.get_site_desc, nil)
+init_func({
+	['num_threads'] = 4,
+	['max_conn_per_thread'] = 64,
+	['shuttle_size'] = 1024,
+	['sites'] = lua_sites,
+	['c_sites_func'] = sample_site_lib.get_path_descs,
+	--['c_sites_func_param'] = nil
+})

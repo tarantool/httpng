@@ -50,6 +50,20 @@
 
 #define WS_CLIENT_KEY_LEN 24 /* Hardcoded in H2O. */
 
+#define DEFAULT_num_threads 4
+#define DEFAULT_max_conn_per_thread 65536
+#define DEFAULT_shuttle_size 65536
+
+/* Limits are quite relaxed for now. */
+#define MIN_num_threads 1
+#define MIN_max_conn_per_thread 1
+#define MIN_shuttle_size (sizeof(shuttle_t) + sizeof(uintptr_t))
+
+/* Limits are quite relaxed for now. */
+#define MAX_num_threads 1024
+#define MAX_max_conn_per_thread (1024 * 1024)
+#define MAX_shuttle_size (16 * 1024 * 1024)
+
 struct thread_ctx;
 typedef struct listener_ctx {
 	h2o_accept_ctx_t accept_ctx;
@@ -1464,35 +1478,65 @@ tx_fiber_func(va_list ap)
 int init(lua_State *L)
 {
 	enum {
-		LUA_STACK_IDX_LUA_SITES = 1,
-		LUA_STACK_IDX_FUNCTION_TO_CALL = 2,
-		LUA_STACK_IDX_FUNCTION_PARAM = 3,
+		LUA_STACK_IDX_TABLE = 1,
+		LUA_STACK_IDX_LUA_SITES = -2,
 	};
 	memset(&conf.globalconf, 0, sizeof(conf.globalconf));
 
-	if (lua_gettop(L) < 3)
+	if (lua_gettop(L) < 1)
 		goto Error;
 
-	if (lua_type(L, LUA_STACK_IDX_FUNCTION_TO_CALL) != LUA_TFUNCTION)
+	lua_getfield(L, LUA_STACK_IDX_TABLE, "c_sites_func");
+	const path_desc_t *path_descs;
+	if (lua_isnil(L, -1)) {
+		path_descs = NULL;
+		goto Skip_c_sites;
+	}
+	if (lua_type(L, -1) != LUA_TFUNCTION)
 		goto Error;
 
+	lua_getfield(L, LUA_STACK_IDX_TABLE, "c_sites_func_param");
 	if (lua_pcall(L, 1, 1, 0) != LUA_OK)
 		goto Error;
 
 	int is_integer;
-	const site_desc_t *const site_desc = (site_desc_t *)lua_tointegerx(L, -1, &is_integer);
+	path_descs = (path_desc_t *)lua_tointegerx(L, -1, &is_integer);
 	if (!is_integer)
 		goto Error;
-	const path_desc_t *const path_descs = site_desc->path_descs;
+Skip_c_sites:
+	lua_getfield(L, LUA_STACK_IDX_TABLE, "c_sites_func");
+
+#define PROCESS_OPTIONAL_PARAM(name) \
+	lua_getfield(L, LUA_STACK_IDX_TABLE, #name); \
+	uint64_t name; \
+	if (lua_isnil(L, -1)) \
+		name = DEFAULT_##name; \
+	else { \
+		name = lua_tointegerx(L, -1, &is_integer); \
+		if (!is_integer) \
+			goto Error; \
+		if (name > MAX_##name) \
+			name = MAX_##name; \
+		else if (name < MIN_##name) \
+			name = MIN_##name; \
+	}
+
+	/* N. b.: These macros can "goto Error". */
+	PROCESS_OPTIONAL_PARAM(num_threads);
+	PROCESS_OPTIONAL_PARAM(max_conn_per_thread);
+	PROCESS_OPTIONAL_PARAM(shuttle_size);
+
+#undef PROCESS_OPTIONAL_PARAM
+
 	conf.tx_fiber_should_work = 1;
 	/* FIXME: Add sanity checks, especially shuttle_size - it must >sizeof(shuttle_t) (accounting for Lua payload) and aligned */
-	conf.num_threads = site_desc->num_threads;
-	conf.shuttle_size = site_desc->shuttle_size;
-	conf.recv_data_size = site_desc->shuttle_size; /* FIXME: Can differ from shuttle_size. */
+	conf.num_threads = num_threads;
+	conf.shuttle_size = shuttle_size;
+	conf.recv_data_size = shuttle_size; /* FIXME: Can differ from shuttle_size. */
 	conf.max_headers_lua = (conf.shuttle_size - sizeof(shuttle_t) - offsetof(lua_response_t, un.resp.first.headers)) / sizeof(http_header_entry_t);
 	conf.max_path_len_lua = conf.shuttle_size - sizeof(shuttle_t) - offsetof(lua_response_t, un.req.path);
 	conf.max_recv_bytes_lua_websocket = conf.recv_data_size - (uintptr_t)get_websocket_recv_location(NULL);
-	conf.max_conn_per_thread = site_desc->max_conn_per_thread;
+	conf.max_conn_per_thread = max_conn_per_thread;
 	conf.num_accepts = conf.max_conn_per_thread / 16;
 	if (conf.num_accepts < 8)
 		conf.num_accepts = 8;
@@ -1505,7 +1549,7 @@ int init(lua_State *L)
 	if (hostconf == NULL)
 		goto Error;
 
-	{
+	if (path_descs != NULL) {
 		const path_desc_t *path_desc = path_descs;
 		if (path_desc->path == NULL)
 			goto Error; /* Need at least one */
@@ -1514,6 +1558,10 @@ int init(lua_State *L)
 			register_handler(hostconf, path_desc->path, path_desc->handler);
 		} while ((++path_desc)->path != NULL);
 	}
+
+	lua_getfield(L, LUA_STACK_IDX_TABLE, "sites");
+	if (lua_isnil(L, -1))
+		goto Skip_lua_sites;
 	lua_site_t *lua_sites = NULL; /* FIXME: Free allocated memory - including malloc'ed path - when shutting down */
 	unsigned lua_site_idx = 0;
 	lua_pushnil(L); /* Start of table. */
@@ -1546,6 +1594,8 @@ int init(lua_State *L)
 		lua_pop(L, 2);
 	}
 
+Skip_lua_sites:
+	;
 	SSL_CTX *ssl_ctx;
 	if (USE_HTTPS && (ssl_ctx = setup_ssl("cert.pem", "key.pem")) == NULL) {//x x x: customizable file names
 		fprintf(stderr, "setup_ssl() failed (cert/key files not found?)\n");
@@ -1591,7 +1641,7 @@ int init(lua_State *L)
 		}
 	}
 
-	{
+	if (path_descs != NULL) {
 		const path_desc_t *path_desc = path_descs;
 		do {
 			if (path_desc->init_userdata_in_tx != NULL && path_desc->init_userdata_in_tx(path_desc->init_userdata_in_tx_param))
@@ -1623,6 +1673,13 @@ int deinit(lua_State *L)
 	free(conf.listener_cfgs);
 	free(conf.thread_ctxs);
 	return 0;
+}
+
+unsigned get_shuttle_size(void)
+{
+	assert(conf.shuttle_size >= MIN_shuttle_size);
+	assert(conf.shuttle_size <= MAX_shuttle_size);
+	return conf.shuttle_size;
 }
 
 static const struct luaL_Reg mylib[] = {
