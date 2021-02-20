@@ -54,10 +54,9 @@ local function hello_handler(req, header_writer)
 		return
 	end
 
-	-- Array of tables because more than one header can have the same field name (key).
 	local headers = {
-		{['content-type'] = 'text/plain; charset=utf-8'},
-		{['x-custom-header'] = 'foo'},
+		['content-type'] = 'text/plain; charset=utf-8',
+		['x-custom-header'] = 'foo',
 	}
 	local payload = 'Small hello from lua'
 
@@ -72,12 +71,11 @@ local function large_handler(req, header_writer)
 
 	local payload = large:get(2).desc
 
-	-- Array of tables because more than one header can have the same field name (key).
 	local headers = {
-		{['content-type'] = 'text/plain; charset=utf-8'},
-		--{['content-length'] = #payload}, -- won't work, must be string
-		{['content-length'] = string.format("%d", #payload)},
-		{['x-custom-header'] = 'foo'},
+		['content-type'] = 'text/plain; charset=utf-8',
+		--['content-length'] = #payload, -- won't work, must be string
+		['content-length'] = string.format("%d", #payload),
+		['x-custom-header'] = 'foo',
 	}
 
 	local payload_writer = header_writer:write_header(200, headers, payload, true)
@@ -89,10 +87,9 @@ local function multi_handler(req, header_writer)
 		return
 	end
 
-	-- Array of tables because more than one header can have the same field name (key).
 	local headers = {
-		{['content-type'] = 'text/plain; charset=utf-8'},
-		{['x-custom-header'] = 'foo'},
+		['content-type'] = 'text/plain; charset=utf-8',
+		['x-custom-header'] = 'foo',
 	}
 
 	local payload_writer = header_writer:write_header(200, headers, nil, false)
@@ -130,10 +127,9 @@ local function req_handler(req, header_writer)
 		return
 	end
 
-	-- Array of tables because more than one header can have the same field name (key).
 	local headers = {
-		{['content-type'] = 'text/plain; charset=utf-8'},
-		{['x-custom-header'] = 'foo'},
+		['content-type'] = 'text/plain; charset=utf-8',
+		['x-custom-header'] = 'foo',
 	}
 
 	local payload
@@ -169,10 +165,9 @@ local function ws_server_handler(req, header_writer)
 		return
 	end
 
-	-- Array of tables because more than one header can have the same field name (key).
 	local headers = {
-		{['content-type'] = 'text/plain; charset=utf-8'},
-		{['x-custom-header'] = 'foo'},
+		['content-type'] = 'text/plain; charset=utf-8',
+		['x-custom-header'] = 'foo',
 	}
 	if (req.version_major >= 2) then
 		-- Currently H2O does not support WebSockets with HTTP/2 (and there is an assert).
@@ -249,10 +244,9 @@ local function ws_app_handler(req, header_writer)
 		return
 	end
 
-	-- Array of tables because more than one header can have the same field name (key).
 	local headers = {
-		{['content-type'] = 'text/html; charset=utf-8'},
-		{['x-custom-header'] = 'foo'},
+		['content-type'] = 'text/html; charset=utf-8',
+		['x-custom-header'] = 'foo',
 	}
 	local payload = [[
 <html><head><title>Example WebSockets Application</title></head><body>

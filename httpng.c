@@ -552,18 +552,13 @@ static int header_writer_write_header(lua_State *L)
 	if (!lua_isnil(L, 3)) {
 		lua_pushnil(L); /* Start of table. */
 		while (lua_next(L, 3)) {
-			lua_pushnil(L); /* Start of table. */
-			while (lua_next(L, -2)) {
-				size_t key_len;
-				size_t value_len;
-				const char *const key = lua_tolstring(L, -2, &key_len);
-				const char *const value = lua_tolstring(L, -1, &value_len);
+			size_t key_len;
+			size_t value_len;
+			const char *const key = lua_tolstring(L, -2, &key_len);
+			const char *const value = lua_tolstring(L, -1, &value_len);
 
-				add_http_header_to_lua_response(&response->un.resp.first, key, key_len, value, value_len);
+			add_http_header_to_lua_response(&response->un.resp.first, key, key_len, value, value_len);
 
-				/* Remove value, keep key for next iteration. */
-				lua_pop(L, 1);
-			}
 			/* Remove value, keep key for next iteration. */
 			lua_pop(L, 1);
 		}
@@ -832,7 +827,7 @@ static int header_writer_upgrade_to_websocket(lua_State *L)
 {
 	/* Lua parameters: self, headers, recv_function. */
 	const unsigned num_params = lua_gettop(L);
-	if (num_params < 2)
+	if (num_params < 1)
 		goto Error;
 
 	lua_getfield(L, 1, "shuttle");
@@ -850,6 +845,21 @@ static int header_writer_upgrade_to_websocket(lua_State *L)
 		/* Can't send anything, connection has been closed. */
 		lua_pushnil(L);
 		return 1;
+	}
+
+	if (num_params >= 2 && !lua_isnil(L, 2)) {
+		lua_pushnil(L); /* Start of table. */
+		while (lua_next(L, 2)) {
+			size_t key_len;
+			size_t value_len;
+			const char *const key = lua_tolstring(L, -2, &key_len);
+			const char *const value = lua_tolstring(L, -1, &value_len);
+
+			add_http_header_to_lua_response(&response->un.resp.first, key, key_len, value, value_len);
+
+			/* Remove value, keep key for next iteration. */
+			lua_pop(L, 1);
+		}
 	}
 
 	if (num_params != 3 || lua_isnil(L, 3) || lua_type(L, 3) != LUA_TFUNCTION)
