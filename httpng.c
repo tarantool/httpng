@@ -454,6 +454,13 @@ static inline void wait_for_lua_shuttle_return(lua_response_t *response)
 	}
 }
 
+/* Launched in TX thread. */
+static inline int get_default_http_code(lua_response_t *response)
+{
+	assert(!response->sent_something);
+	return 200; /* FIXME: Could differ depending on HTTP request type. */
+}
+
 /* Launched in TX thread */
 static int payload_writer_write(lua_State *L)
 {
@@ -508,6 +515,26 @@ static int payload_writer_write_nop(lua_State *L)
 	return 1;
 }
 
+/* Launched in TX thread. */
+static void fill_http_headers(lua_State *L, lua_response_t *response, int param_lua_idx)
+{
+	if (lua_isnil(L, param_lua_idx))
+		return;
+
+	lua_pushnil(L); /* Start of table. */
+	while (lua_next(L, param_lua_idx)) {
+		size_t key_len;
+		size_t value_len;
+		const char *const key = lua_tolstring(L, -2, &key_len);
+		const char *const value = lua_tolstring(L, -1, &value_len);
+
+		add_http_header_to_lua_response(&response->un.resp.first, key, key_len, value, value_len);
+
+		/* Remove value, keep key for next iteration. */
+		lua_pop(L, 1);
+	}
+}
+
 /* Launched in TX thread */
 static int header_writer_write_header(lua_State *L)
 {
@@ -549,20 +576,7 @@ static int header_writer_write_header(lua_State *L)
 	if (!is_integer)
 		goto Error;
 
-	if (!lua_isnil(L, 3)) {
-		lua_pushnil(L); /* Start of table. */
-		while (lua_next(L, 3)) {
-			size_t key_len;
-			size_t value_len;
-			const char *const key = lua_tolstring(L, -2, &key_len);
-			const char *const value = lua_tolstring(L, -1, &value_len);
-
-			add_http_header_to_lua_response(&response->un.resp.first, key, key_len, value, value_len);
-
-			/* Remove value, keep key for next iteration. */
-			lua_pop(L, 1);
-		}
-	}
+	fill_http_headers(L, response, 3);
 
 	if (num_params >= 4) {
 		size_t payload_len;
@@ -916,7 +930,7 @@ lua_fiber_func(va_list ap)
 	lua_rawgeti(L, LUA_REGISTRYINDEX, response->un.req.lua_handler_ref); /* User handler function, written in Lua. */
 
 	/* First param for Lua handler - query */
-	lua_createtable(L, 0, 6);
+	lua_createtable(L, 0, 7);
 	lua_pushinteger(L, response->un.req.version_major);
 	lua_setfield(L, -2, "version_major");
 	lua_pushinteger(L, response->un.req.version_minor);
@@ -929,6 +943,9 @@ lua_fiber_func(va_list ap)
 	lua_setfield(L, -2, "method");
 	lua_pushboolean(L, !!response->un.req.ws_client_key_len);
 	lua_setfield(L, -2, "is_websocket");
+	lua_createtable(L, 0, 1);
+	/* FIXME: Should fill it. */
+	lua_setfield(L, -2, "headers");
 
 	/* We have finished parsing request, now can write to response (it is union). */
 	response->un.resp.first.num_headers = 0;
@@ -943,7 +960,7 @@ lua_fiber_func(va_list ap)
 	lua_setfield(L, -2, "shuttle");
 
 	const int lua_state_ref = response->lua_state_ref;
-	if (lua_pcall(L, 2, 0, 0) != LUA_OK) {
+	if (lua_pcall(L, 2, 1, 0) != LUA_OK) {
 		/* FIXME: Should probably log this instead(?) */
 		fprintf(stderr, "User handler for \"\%s\" failed with error \"%s\"\n", response->site_path, lua_tostring(L, -1));
 
@@ -996,9 +1013,50 @@ lua_fiber_func(va_list ap)
 		stubborn_dispatch_lua(shuttle->thread_ctx->queue_from_tx, &close_websocket, response);
 		wait_for_lua_shuttle_return(response);
 		free_lua_websocket_shuttle_from_tx(shuttle);
-	} else
+	} else if (lua_isnil(L, -1))
 		response->fiber_done = true;
 		/* cancel_processing_lua_req_in_tx() is not yet called, it would clean up because we have set fiber_done=true */
+	else {
+		const bool old_sent_something = response->sent_something;
+		if (!old_sent_something) {
+			lua_getfield(L, -1, "status");
+			if (lua_isnil(L, -1))
+				response->un.resp.first.http_code = get_default_http_code(response);
+			else {
+				int is_integer;
+				response->un.resp.first.http_code = lua_tointegerx(L, -1, &is_integer);
+				if (!is_integer)
+					response->un.resp.first.http_code = get_default_http_code(response);
+			}
+			lua_getfield(L, -2, "headers");
+			fill_http_headers(L, response, -2);
+			lua_pop(L, 2); /* headers, status. */
+			response->sent_something = true;
+		}
+
+		lua_getfield(L, -1, "body");
+		if (!lua_isnil(L, -1)) {
+			size_t payload_len;
+			response->un.resp.any.payload = lua_tolstring(L, -1, &payload_len);
+			response->un.resp.any.payload_len = payload_len;
+		} else
+			response->un.resp.any.payload_len = 0;
+
+		response->un.resp.any.is_last_send = true;
+		take_shuttle_ownership_lua(response);
+		stubborn_dispatch(shuttle->thread_ctx->queue_from_tx, old_sent_something ? postprocess_lua_req_others : postprocess_lua_req_first, shuttle);
+		wait_for_lua_shuttle_return(response);
+
+		if (response->cancelled) {
+			/* There would be no more calls from HTTP thread, must clean up */
+			if (response->upgraded_to_websocket)
+				free_lua_websocket_shuttle_from_tx(shuttle);
+			else
+				free_lua_shuttle_from_tx(shuttle);
+		} else
+			response->fiber_done = true;
+			/* cancel_processing_lua_req_in_tx() is not yet called, it would clean up because we have set fiber_done=true */
+	}
 
 	luaL_unref(luaT_state(), LUA_REGISTRYINDEX, lua_state_ref);
 	return 0;
@@ -1485,7 +1543,7 @@ tx_fiber_func(va_list ap)
 }
 
 /* Lua parameters: lua_sites, function_to_call, function_param */
-int init(lua_State *L)
+int cfg(lua_State *L)
 {
 	enum {
 		LUA_STACK_IDX_TABLE = 1,
@@ -1569,10 +1627,10 @@ Skip_c_sites:
 		} while ((++path_desc)->path != NULL);
 	}
 
+	lua_site_t *lua_sites = NULL; /* FIXME: Free allocated memory - including malloc'ed path - when shutting down. */
 	lua_getfield(L, LUA_STACK_IDX_TABLE, "sites");
 	if (lua_isnil(L, -1))
 		goto Skip_lua_sites;
-	lua_site_t *lua_sites = NULL; /* FIXME: Free allocated memory - including malloc'ed path - when shutting down */
 	unsigned lua_site_idx = 0;
 	lua_pushnil(L); /* Start of table. */
 	while (lua_next(L, LUA_STACK_IDX_LUA_SITES)) {
@@ -1605,6 +1663,25 @@ Skip_c_sites:
 	}
 
 Skip_lua_sites:
+	lua_getfield(L, LUA_STACK_IDX_TABLE, "handler");
+	if (lua_isnil(L, -1))
+		goto Skip_main_lua_handler;
+	if (lua_type(L, -1) != LUA_TFUNCTION)
+		goto Error;
+
+	lua_site_t *const new_lua_sites = realloc(lua_sites, sizeof(lua_site_t) * (lua_site_idx + 1));
+	if (new_lua_sites == NULL)
+		goto Error;
+	lua_sites = new_lua_sites;
+	lua_site_t *const lua_site = &lua_sites[lua_site_idx];
+	if ((lua_site->path = malloc(1 + 1)) == NULL)
+		goto Error;
+	lua_site->path[0] = '/';
+	lua_site->path[1] = 0;
+	register_lua_handler(hostconf, lua_site->path, 2, luaL_ref(L, LUA_REGISTRYINDEX));
+	++lua_site_idx;
+
+Skip_main_lua_handler:
 	;
 	SSL_CTX *ssl_ctx;
 	if (USE_HTTPS && (ssl_ctx = setup_ssl("cert.pem", "key.pem")) == NULL) {//x x x: customizable file names
@@ -1693,7 +1770,7 @@ unsigned get_shuttle_size(void)
 }
 
 static const struct luaL_Reg mylib[] = {
-	{"init", init},
+	{"cfg", cfg},
 	{NULL, NULL}
 };
 

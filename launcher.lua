@@ -289,7 +289,7 @@ local function ws_app_handler(req, header_writer)
 end
 
 local httpng_lib = require "httpng"
-local init_func = httpng_lib.init
+local init_func = httpng_lib.cfg
 
 local sample_site_lib = require "sample_site"
 
