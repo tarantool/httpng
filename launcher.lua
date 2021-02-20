@@ -303,7 +303,7 @@ local lua_sites = {
 }
 
 init_func({
-	['num_threads'] = 4,
+	['threads'] = 4,
 	['max_conn_per_thread'] = 64,
 	['shuttle_size'] = 1024,
 	['sites'] = lua_sites,

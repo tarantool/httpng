@@ -50,17 +50,17 @@
 
 #define WS_CLIENT_KEY_LEN 24 /* Hardcoded in H2O. */
 
-#define DEFAULT_num_threads 4
+#define DEFAULT_threads 4
 #define DEFAULT_max_conn_per_thread 65536
 #define DEFAULT_shuttle_size 65536
 
 /* Limits are quite relaxed for now. */
-#define MIN_num_threads 1
+#define MIN_threads 1
 #define MIN_max_conn_per_thread 1
 #define MIN_shuttle_size (sizeof(shuttle_t) + sizeof(uintptr_t))
 
 /* Limits are quite relaxed for now. */
-#define MAX_num_threads 1024
+#define MAX_threads 1024
 #define MAX_max_conn_per_thread (1024 * 1024)
 #define MAX_shuttle_size (16 * 1024 * 1024)
 
@@ -1532,7 +1532,7 @@ Skip_c_sites:
 	}
 
 	/* N. b.: These macros can "goto Error". */
-	PROCESS_OPTIONAL_PARAM(num_threads);
+	PROCESS_OPTIONAL_PARAM(threads);
 	PROCESS_OPTIONAL_PARAM(max_conn_per_thread);
 	PROCESS_OPTIONAL_PARAM(shuttle_size);
 
@@ -1540,7 +1540,7 @@ Skip_c_sites:
 
 	conf.tx_fiber_should_work = 1;
 	/* FIXME: Add sanity checks, especially shuttle_size - it must >sizeof(shuttle_t) (accounting for Lua payload) and aligned */
-	conf.num_threads = num_threads;
+	conf.num_threads = threads;
 	conf.shuttle_size = shuttle_size;
 	conf.recv_data_size = shuttle_size; /* FIXME: Can differ from shuttle_size. */
 	conf.max_headers_lua = (conf.shuttle_size - sizeof(shuttle_t) - offsetof(lua_response_t, un.resp.first.headers)) / sizeof(http_header_entry_t);
