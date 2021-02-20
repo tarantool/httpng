@@ -128,16 +128,23 @@ typedef struct {
 	lua_first_response_only_t first; /* Must be last member of struct. */
 } lua_response_struct_t;
 
+typedef unsigned header_offset_t; /* FIXME: Make it ushort and add sanity checks. */
+typedef struct {
+	header_offset_t name_size;
+	header_offset_t value_size;
+} received_http_header_handle_t;
+
 typedef struct {
 	int lua_handler_ref; /* Reference to user Lua handler. */
 	unsigned path_len;
 	unsigned query_at;
+	unsigned num_headers;
 	unsigned char method_len;
 	unsigned char ws_client_key_len;
 	unsigned char version_major;
 	unsigned char version_minor;
 	char method[7];
-	char path[]; /* From h2o_req_t. */
+	char buffer[]; /* "path" from h2o_req_t goes first. */
 } lua_first_request_only_t;
 
 typedef struct {
@@ -918,6 +925,23 @@ Error: /* FIXME: Error message? */
 	return 1;
 }
 
+/* Launched in TX thread. */
+static inline void fill_received_headers(lua_State *L, lua_response_t *response)
+{
+	assert(!response->sent_something);
+	const received_http_header_handle_t *const handles = (received_http_header_handle_t *)&response->un.req.buffer[response->un.req.path_len];
+	const unsigned num_headers = response->un.req.num_headers;
+	lua_createtable(L, 0, num_headers);
+	unsigned current_offset = response->un.req.path_len + num_headers * sizeof(received_http_header_handle_t);
+	unsigned header_idx;
+	for (header_idx = 0; header_idx < num_headers; ++header_idx) {
+		const received_http_header_handle_t *const handle = &handles[header_idx];
+		lua_pushlstring(L, &response->un.req.buffer[current_offset + handle->name_size + 1], handle->value_size);
+		lua_setfield(L, -2, &response->un.req.buffer[current_offset]); /* N. b.: it must be NULL-terminated! */
+		current_offset += handle->name_size + 1 + handle->value_size;
+	}
+}
+
 /* Launched in TX thread */
 static int
 lua_fiber_func(va_list ap)
@@ -935,7 +959,7 @@ lua_fiber_func(va_list ap)
 	lua_setfield(L, -2, "version_major");
 	lua_pushinteger(L, response->un.req.version_minor);
 	lua_setfield(L, -2, "version_minor");
-	lua_pushlstring(L, response->un.req.path, response->un.req.path_len);
+	lua_pushlstring(L, response->un.req.buffer, response->un.req.path_len);
 	lua_setfield(L, -2, "path");
 	lua_pushinteger(L, (response->un.req.query_at == LUA_QUERY_NONE) ? -1 : (response->un.req.query_at + 1)); /* Lua indexes start from 1 */
 	lua_setfield(L, -2, "query_at");
@@ -943,8 +967,7 @@ lua_fiber_func(va_list ap)
 	lua_setfield(L, -2, "method");
 	lua_pushboolean(L, !!response->un.req.ws_client_key_len);
 	lua_setfield(L, -2, "is_websocket");
-	lua_createtable(L, 0, 1);
-	/* FIXME: Should fill it. */
+	fill_received_headers(L, response);
 	lua_setfield(L, -2, "headers");
 
 	/* We have finished parsing request, now can write to response (it is union). */
@@ -1127,12 +1150,61 @@ static int lua_req_handler(lua_h2o_handler_t *self, h2o_req_t *req)
 	}
 
 	memcpy(response->un.req.method, req->method.base, response->un.req.method_len);
-	memcpy(response->un.req.path, req->path.base, response->un.req.path_len);
+	memcpy(response->un.req.buffer, req->path.base, response->un.req.path_len);
 
 	static_assert(LUA_QUERY_NONE < (1ULL << (8 * sizeof(response->un.req.query_at))));
 	response->un.req.query_at = (req->query_at == SIZE_MAX) ? LUA_QUERY_NONE : req->query_at;
 	response->un.req.version_major = req->version >> 8;
 	response->un.req.version_minor = req->version & 0xFF;
+
+	const h2o_header_t *const headers = req->headers.entries;
+	const size_t num_headers = req->headers.size;
+	const unsigned bytes_remain_in_buffer = conf.max_path_len_lua - response->un.req.path_len;
+
+	/* response->un.req.buffer[] format:
+	 *
+	 * char path[req->path.len]
+	 * FIXME: Alignment to at least to header_offset_t should be here (compatibility/performance).
+	 * received_http_header_handle_t handles[num_headers]
+	 * {repeat num_headers times} char name[handles[i].name_size], '\0', char value[handles[i].value_size]
+	 *
+	 * '\0' is for lua_setfield().
+	 * */
+	const unsigned max_headers = bytes_remain_in_buffer / sizeof(received_http_header_handle_t);
+	if (num_headers > max_headers) {
+		/* Error. */
+		free_shuttle_with_anchor(shuttle);
+		req->res.status = 500;
+		req->res.reason = "Too many headers";
+		h2o_send_inline(req, H2O_STRLIT("Too many headers\n"));
+		return 0;
+	}
+	unsigned current_offset = response->un.req.path_len;
+	const unsigned max_offset = conf.max_path_len_lua;
+	received_http_header_handle_t *const handles = (received_http_header_handle_t *)&response->un.req.buffer[current_offset];
+	current_offset += num_headers * sizeof(received_http_header_handle_t);
+	unsigned header_idx;
+	for (header_idx = 0; header_idx < num_headers; ++header_idx) {
+		const h2o_header_t *const header = &headers[header_idx];
+		if (current_offset + header->name->len + 1 + header->value.len > max_offset) {
+			/* Error. */
+			free_shuttle_with_anchor(shuttle);
+			req->res.status = 500;
+			req->res.reason = "Too large headers";
+			h2o_send_inline(req, H2O_STRLIT("Too large headers\n"));
+			return 0;
+		}
+		received_http_header_handle_t *const handle = &handles[header_idx];
+		handle->name_size = header->name->len;
+		handle->value_size = header->value.len;
+		memcpy(&response->un.req.buffer[current_offset], header->name->base, handle->name_size);
+		current_offset += handle->name_size;
+		response->un.req.buffer[current_offset] = 0;
+		++current_offset;
+		memcpy(&response->un.req.buffer[current_offset], header->value.base, handle->value_size);
+		current_offset += handle->value_size;
+	}
+	response->un.req.num_headers = num_headers;
 
 	response->sent_something = false;
 	response->cancelled = false;
@@ -1602,7 +1674,7 @@ Skip_c_sites:
 	conf.shuttle_size = shuttle_size;
 	conf.recv_data_size = shuttle_size; /* FIXME: Can differ from shuttle_size. */
 	conf.max_headers_lua = (conf.shuttle_size - sizeof(shuttle_t) - offsetof(lua_response_t, un.resp.first.headers)) / sizeof(http_header_entry_t);
-	conf.max_path_len_lua = conf.shuttle_size - sizeof(shuttle_t) - offsetof(lua_response_t, un.req.path);
+	conf.max_path_len_lua = conf.shuttle_size - sizeof(shuttle_t) - offsetof(lua_response_t, un.req.buffer);
 	conf.max_recv_bytes_lua_websocket = conf.recv_data_size - (uintptr_t)get_websocket_recv_location(NULL);
 	conf.max_conn_per_thread = max_conn_per_thread;
 	conf.num_accepts = conf.max_conn_per_thread / 16;
