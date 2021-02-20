@@ -50,7 +50,7 @@
 
 #define WS_CLIENT_KEY_LEN 24 /* Hardcoded in H2O. */
 
-#define DEFAULT_threads 4
+#define DEFAULT_threads 1
 #define DEFAULT_max_conn_per_thread 65536
 #define DEFAULT_shuttle_size 65536
 
