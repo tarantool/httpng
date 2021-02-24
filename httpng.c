@@ -477,10 +477,9 @@ static int payload_writer_write(lua_State *L)
 		goto Error;
 
 	lua_getfield(L, 1, "shuttle");
-	int is_integer;
-	shuttle_t *const shuttle = (shuttle_t *)lua_tointegerx(L, -1, &is_integer);
-	if (!is_integer)
+	if (!lua_islightuserdata(L, -1))
 		goto Error;
+	shuttle_t *const shuttle = (shuttle_t *)lua_touserdata(L, -1);
 
 	lua_response_t *const response = (lua_response_t *)&shuttle->payload;
 	take_shuttle_ownership_lua(response);
@@ -552,10 +551,9 @@ static int header_writer_write_header(lua_State *L)
 
 	lua_getfield(L, 1, "shuttle");
 
-	int is_integer;
-	shuttle_t *const shuttle = (shuttle_t *)lua_tointegerx(L, -1, &is_integer);
-	if (!is_integer)
+	if (!lua_islightuserdata(L, -1))
 		goto Error;
+	shuttle_t *const shuttle = (shuttle_t *)lua_touserdata(L, -1);
 
 	bool is_last;
 	if (num_params >= 5)
@@ -579,6 +577,7 @@ static int header_writer_write_header(lua_State *L)
 		return 1;
 	}
 
+	int is_integer;
 	response->un.resp.first.http_code = lua_tointegerx(L, 2, &is_integer);
 	if (!is_integer)
 		goto Error;
@@ -608,7 +607,7 @@ static int header_writer_write_header(lua_State *L)
 		lua_createtable(L, 0, 2);
 		lua_pushcfunction(L, payload_writer_write);
 		lua_setfield(L, -2, "write");
-		lua_pushinteger(L, (uintptr_t)shuttle);
+		lua_pushlightuserdata(L, shuttle);
 		lua_setfield(L, -2, "shuttle");
 	}
 	return 1;
@@ -731,10 +730,9 @@ static int websocket_send_text(lua_State *L)
 		goto Error;
 
 	lua_getfield(L, 1, "shuttle");
-	int is_integer;
-	shuttle_t *const shuttle = (shuttle_t *)lua_tointegerx(L, -1, &is_integer);
-	if (!is_integer)
+	if (!lua_islightuserdata(L, -1))
 		goto Error;
+	shuttle_t *const shuttle = (shuttle_t *)lua_touserdata(L, -1);
 
 	lua_response_t *const response = (lua_response_t *)&shuttle->payload;
 	if (response->in_recv_handler) {
@@ -783,10 +781,9 @@ static int close_lua_websocket(lua_State *L)
 		goto Error;
 
 	lua_getfield(L, 1, "shuttle");
-	int is_integer;
-	shuttle_t *const shuttle = (shuttle_t *)lua_tointegerx(L, -1, &is_integer);
-	if (!is_integer)
+	if (!lua_islightuserdata(L, -1))
 		goto Error;
+	shuttle_t *const shuttle = (shuttle_t *)lua_touserdata(L, -1);
 
 	lua_response_t *const response = (lua_response_t *)&shuttle->payload;
 	if (response->in_recv_handler) {
@@ -852,11 +849,9 @@ static int header_writer_upgrade_to_websocket(lua_State *L)
 		goto Error;
 
 	lua_getfield(L, 1, "shuttle");
-
-	int is_integer;
-	shuttle_t *const shuttle = (shuttle_t *)lua_tointegerx(L, -1, &is_integer);
-	if (!is_integer)
+	if (!lua_islightuserdata(L, -1))
 		goto Error;
+	shuttle_t *const shuttle = (shuttle_t *)lua_touserdata(L, -1);
 
 	lua_response_t *const response = (lua_response_t *)&shuttle->payload;
 	take_shuttle_ownership_lua(response);
@@ -915,7 +910,7 @@ static int header_writer_upgrade_to_websocket(lua_State *L)
 		lua_setfield(L, -2, "send_text");
 		lua_pushcfunction(L, close_lua_websocket);
 		lua_setfield(L, -2, "close");
-		lua_pushinteger(L, (uintptr_t)shuttle);
+		lua_pushlightuserdata(L, shuttle);
 		lua_setfield(L, -2, "shuttle");
 	}
 	return 1;
@@ -979,7 +974,7 @@ lua_fiber_func(va_list ap)
 	lua_setfield(L, -2, "write_header");
 	lua_pushcfunction(L, header_writer_upgrade_to_websocket);
 	lua_setfield(L, -2, "upgrade_to_websocket");
-	lua_pushinteger(L, (uintptr_t)shuttle);
+	lua_pushlightuserdata(L, shuttle);
 	lua_setfield(L, -2, "shuttle");
 
 	const int lua_state_ref = response->lua_state_ref;
