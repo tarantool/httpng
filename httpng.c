@@ -196,6 +196,9 @@ static struct {
 
 __thread thread_ctx_t *curr_thread_ctx;
 
+static void fill_http_headers(lua_State *L, lua_response_t *response, int param_lua_idx);
+static int payload_writer_write_nop(lua_State *L);
+
 static inline shuttle_t *get_shuttle_from_generator_lua(h2o_generator_t *generator)
 {
 	lua_response_t *const response = container_of(generator, lua_response_t, un.resp.any.generator);
@@ -499,6 +502,34 @@ static int payload_writer_write(lua_State *L)
 	else
 		is_last = false;
 
+	if (!response->sent_something) {
+		response->un.resp.first.http_code = get_default_http_code(response);
+
+		lua_getfield(L, 1, "headers");
+		const unsigned headers_lua_index = num_params + 1 + 1;
+		fill_http_headers(L, response, headers_lua_index);
+
+		response->un.resp.any.is_last_send = is_last;
+		response->sent_something = true;
+		stubborn_dispatch(shuttle->thread_ctx->queue_from_tx, &postprocess_lua_req_first, shuttle);
+		wait_for_lua_shuttle_return(response);
+
+		if (is_last)
+			lua_pushnil(L);
+		else if (response->cancelled) {
+			lua_createtable(L, 0, 1);
+			lua_pushcfunction(L, payload_writer_write_nop);
+			lua_setfield(L, -2, "write");
+		} else {
+			lua_createtable(L, 0, 2);
+			lua_pushcfunction(L, payload_writer_write);
+			lua_setfield(L, -2, "write");
+			lua_pushlightuserdata(L, shuttle);
+			lua_setfield(L, -2, "shuttle");
+		}
+		return 1;
+	}
+
 	response->un.resp.any.is_last_send = is_last;
 	stubborn_dispatch(shuttle->thread_ctx->queue_from_tx, &postprocess_lua_req_others, shuttle);
 	wait_for_lua_shuttle_return(response);
@@ -546,7 +577,7 @@ static int header_writer_write_header(lua_State *L)
 {
 	/* Lua parameters: self, code, headers, payload, is_last. */
 	const unsigned num_params = lua_gettop(L);
-	if (num_params < 3)
+	if (num_params < 2)
 		goto Error;
 
 	lua_getfield(L, 1, "shuttle");
@@ -582,7 +613,14 @@ static int header_writer_write_header(lua_State *L)
 	if (!is_integer)
 		goto Error;
 
-	fill_http_headers(L, response, 3);
+	unsigned headers_lua_index;
+	if (num_params >= 3)
+		headers_lua_index = 3;
+	else {
+		lua_getfield(L, 1, "headers");
+		headers_lua_index = num_params + 1 + 1;
+	}
+	fill_http_headers(L, response, headers_lua_index);
 
 	if (num_params >= 4) {
 		size_t payload_len;
@@ -938,6 +976,39 @@ static inline void fill_received_headers(lua_State *L, lua_response_t *response)
 }
 
 /* Launched in TX thread */
+static int close_lua_req(lua_State *L)
+{
+	/* Lua parameters: self. */
+	const unsigned num_params = lua_gettop(L);
+	if (num_params < 1)
+		goto Error;
+
+	lua_getfield(L, 1, "shuttle");
+	if (!lua_islightuserdata(L, -1))
+		goto Error;
+	shuttle_t *const shuttle = (shuttle_t *)lua_touserdata(L, -1);
+	lua_response_t *const response = (lua_response_t *)&shuttle->payload;
+	take_shuttle_ownership_lua(response);
+	if (response->cancelled)
+		return 0;
+
+	response->un.resp.any.payload_len = 0;
+	response->un.resp.any.is_last_send = true;
+	if (response->sent_something)
+		stubborn_dispatch(shuttle->thread_ctx->queue_from_tx, &postprocess_lua_req_others, shuttle);
+	else {
+		response->un.resp.first.http_code = get_default_http_code(response);
+		response->sent_something = true;
+		stubborn_dispatch(shuttle->thread_ctx->queue_from_tx, &postprocess_lua_req_first, shuttle);
+	}
+	wait_for_lua_shuttle_return(response);
+	return 0;
+
+Error: /* FIXME: Error message */
+	return 0;
+}
+
+/* Launched in TX thread */
 static int
 lua_fiber_func(va_list ap)
 {
@@ -969,13 +1040,19 @@ lua_fiber_func(va_list ap)
 	response->un.resp.first.num_headers = 0;
 
 	/* Second param for Lua handler - header_writer */
-	lua_createtable(L, 0, 3);
+	lua_createtable(L, 0, 6);
 	lua_pushcfunction(L, header_writer_write_header);
 	lua_setfield(L, -2, "write_header");
+	lua_pushcfunction(L, payload_writer_write);
+	lua_setfield(L, -2, "write");
 	lua_pushcfunction(L, header_writer_upgrade_to_websocket);
 	lua_setfield(L, -2, "upgrade_to_websocket");
+	lua_pushcfunction(L, close_lua_req);
+	lua_setfield(L, -2, "close");
 	lua_pushlightuserdata(L, shuttle);
 	lua_setfield(L, -2, "shuttle");
+	lua_createtable(L, 0, 2);
+	lua_setfield(L, -2, "headers");
 
 	const int lua_state_ref = response->lua_state_ref;
 	if (lua_pcall(L, 2, 1, 0) != LUA_OK) {
