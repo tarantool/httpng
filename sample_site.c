@@ -697,7 +697,7 @@ static int get_path_descs(lua_State *L)
 	/* We are passed one Lua parameter we can use to configure descs etc */
 	lua_pop(L, 1);
 
-	lua_pushinteger(L, (uintptr_t)&our_path_descs);
+	lua_pushlightuserdata(L, (void *)&our_path_descs);
 	return 1;
 }
 

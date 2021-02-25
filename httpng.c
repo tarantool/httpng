@@ -1752,11 +1752,10 @@ int cfg(lua_State *L)
 		goto Error;
 
 	int is_integer;
-	path_descs = (path_desc_t *)lua_tointegerx(L, -1, &is_integer);
-	if (!is_integer)
+	if (!lua_islightuserdata(L, -1))
 		goto Error;
+	path_descs = (path_desc_t *)lua_touserdata(L, -1);
 Skip_c_sites:
-	lua_getfield(L, LUA_STACK_IDX_TABLE, "c_sites_func");
 
 #define PROCESS_OPTIONAL_PARAM(name) \
 	lua_getfield(L, LUA_STACK_IDX_TABLE, #name); \
