@@ -45,6 +45,7 @@
 #undef DISABLE_HTTP2
 
 #define H2O_DEFAULT_PORT_FOR_PROTOCOL_USED 65535
+#define H2O_CONTENT_LENGTH_UNSPECIFIED SIZE_MAX
 
 #define LUA_QUERY_NONE UINT_MAX
 
@@ -113,6 +114,7 @@ typedef struct {
 } http_header_entry_t;
 
 typedef struct {
+	size_t content_length;
 	unsigned num_headers;
 	unsigned http_code;
 	http_header_entry_t headers[];
@@ -407,6 +409,7 @@ static void postprocess_lua_req_first(shuttle_t *shuttle)
 	}
 
 	response->un.resp.any.generator = (h2o_generator_t){ proceed_sending_lua, NULL }; /* Do not use stop_sending, we handle everything in free_shuttle_lua(). */
+	req->res.content_length = response->un.resp.first.content_length;
 	h2o_start_response(req, &response->un.resp.any.generator);
 	send_lua(req, response);
 }
@@ -557,6 +560,7 @@ static int payload_writer_write_nop(lua_State *L)
 /* Launched in TX thread. */
 static void fill_http_headers(lua_State *L, lua_response_t *response, int param_lua_idx)
 {
+	response->un.resp.first.content_length = H2O_CONTENT_LENGTH_UNSPECIFIED;
 	if (lua_isnil(L, param_lua_idx))
 		return;
 
@@ -567,7 +571,20 @@ static void fill_http_headers(lua_State *L, lua_response_t *response, int param_
 		const char *const key = lua_tolstring(L, -2, &key_len);
 		const char *const value = lua_tolstring(L, -1, &value_len);
 
-		add_http_header_to_lua_response(&response->un.resp.first, key, key_len, value, value_len);
+		static const char content_length_str[] = "content-length";
+		char temp[32];
+		if (key_len == sizeof(content_length_str) - 1 && !strncasecmp(key, content_length_str, key_len) && value_len < sizeof(temp)) {
+			memcpy(temp, value, value_len);
+			temp[value_len] = 0;
+			errno = 0;
+			const long long candidate = strtoll(temp, NULL, 10);
+			if (errno)
+				add_http_header_to_lua_response(&response->un.resp.first, key, key_len, value, value_len);
+			else
+				/* h2o would add this header and disable chunked. */
+				response->un.resp.first.content_length = candidate;
+		} else
+			add_http_header_to_lua_response(&response->un.resp.first, key, key_len, value, value_len);
 
 		/* Remove value, keep key for next iteration. */
 		lua_pop(L, 1);
@@ -1001,6 +1018,7 @@ static int close_lua_req(lua_State *L)
 	else {
 		response->un.resp.first.http_code = get_default_http_code(response);
 		response->sent_something = true;
+		response->un.resp.first.content_length = H2O_CONTENT_LENGTH_UNSPECIFIED;
 		stubborn_dispatch(shuttle->thread_ctx->queue_from_tx, &postprocess_lua_req_first, shuttle);
 	}
 	wait_for_lua_shuttle_return(response);
@@ -1075,29 +1093,35 @@ lua_fiber_func(va_list ap)
 			free_lua_websocket_shuttle_from_tx(shuttle);
 		} else {
 			take_shuttle_ownership_lua(response);
-			response->un.resp.any.is_last_send = true;
-			if (response->sent_something) {
-				/* Do not add anything to user output to prevent corrupt HTML etc. */
-				response->un.resp.any.payload_len = 0;
-				stubborn_dispatch(shuttle->thread_ctx->queue_from_tx, &postprocess_lua_req_others, shuttle);
-			} else {
-				static const char key[] = "content-type";
-				static const char value[] = "text/plain; charset=utf-8";
-				add_http_header_to_lua_response(&response->un.resp.first, key, sizeof(key) - 1, value, sizeof(value) - 1);
-				static const char error_str[] = "Path handler execution error";
-				response->un.resp.first.http_code = 500;
-				response->un.resp.any.payload = error_str;
-				response->un.resp.any.payload_len = sizeof(error_str) - 1;
-				/* Not setting sent_something because no one would check it. */
-				stubborn_dispatch(shuttle->thread_ctx->queue_from_tx, &postprocess_lua_req_first, shuttle);
-			}
-			wait_for_lua_shuttle_return(response);
 			if (response->cancelled)
 				/* There would be no more calls from HTTP thread, must clean up. */
 				free_lua_shuttle_from_tx(shuttle);
-			else
-				response->fiber_done = true;
-				/* cancel_processing_lua_req_in_tx() is not yet called, it would clean up because we have set fiber_done=true. */
+			else {
+				response->un.resp.any.is_last_send = true;
+				if (response->sent_something) {
+					/* Do not add anything to user output to prevent corrupt HTML etc. */
+					response->un.resp.any.payload_len = 0;
+					stubborn_dispatch(shuttle->thread_ctx->queue_from_tx, &postprocess_lua_req_others, shuttle);
+				} else {
+					static const char key[] = "content-type";
+					static const char value[] = "text/plain; charset=utf-8";
+					add_http_header_to_lua_response(&response->un.resp.first, key, sizeof(key) - 1, value, sizeof(value) - 1);
+					static const char error_str[] = "Path handler execution error";
+					response->un.resp.first.http_code = 500;
+					response->un.resp.any.payload = error_str;
+					response->un.resp.any.payload_len = sizeof(error_str) - 1;
+					response->un.resp.first.content_length = sizeof(error_str) - 1;
+					/* Not setting sent_something because no one would check it. */
+					stubborn_dispatch(shuttle->thread_ctx->queue_from_tx, &postprocess_lua_req_first, shuttle);
+				}
+				wait_for_lua_shuttle_return(response);
+				if (response->cancelled)
+					/* There would be no more calls from HTTP thread, must clean up. */
+					free_lua_shuttle_from_tx(shuttle);
+				else
+					response->fiber_done = true;
+					/* cancel_processing_lua_req_in_tx() is not yet called, it would clean up because we have set fiber_done=true. */
+			}
 		}
 	} else if (response->cancelled) {
 		/* There would be no more calls from HTTP thread, must clean up */
@@ -1107,6 +1131,7 @@ lua_fiber_func(va_list ap)
 			free_lua_shuttle_from_tx(shuttle);
 	} else if (response->upgraded_to_websocket) {
 		take_shuttle_ownership_lua(response);
+		assert(!response->cancelled);
 		stubborn_dispatch_lua(shuttle->thread_ctx->queue_from_tx, &close_websocket, response);
 		wait_for_lua_shuttle_return(response);
 		free_lua_websocket_shuttle_from_tx(shuttle);
@@ -1141,18 +1166,30 @@ lua_fiber_func(va_list ap)
 
 		response->un.resp.any.is_last_send = true;
 		take_shuttle_ownership_lua(response);
-		stubborn_dispatch(shuttle->thread_ctx->queue_from_tx, old_sent_something ? postprocess_lua_req_others : postprocess_lua_req_first, shuttle);
-		wait_for_lua_shuttle_return(response);
-
 		if (response->cancelled) {
 			/* There would be no more calls from HTTP thread, must clean up */
 			if (response->upgraded_to_websocket)
 				free_lua_websocket_shuttle_from_tx(shuttle);
 			else
 				free_lua_shuttle_from_tx(shuttle);
-		} else
-			response->fiber_done = true;
-			/* cancel_processing_lua_req_in_tx() is not yet called, it would clean up because we have set fiber_done=true */
+		} else {
+			if (old_sent_something)
+				stubborn_dispatch(shuttle->thread_ctx->queue_from_tx, postprocess_lua_req_others, shuttle);
+			else {
+				response->un.resp.first.content_length = response->un.resp.any.payload_len;
+				stubborn_dispatch(shuttle->thread_ctx->queue_from_tx, postprocess_lua_req_first, shuttle);
+			}
+			wait_for_lua_shuttle_return(response);
+			if (response->cancelled) {
+				/* There would be no more calls from HTTP thread, must clean up */
+				if (response->upgraded_to_websocket)
+					free_lua_websocket_shuttle_from_tx(shuttle);
+				else
+					free_lua_shuttle_from_tx(shuttle);
+			} else
+				response->fiber_done = true;
+				/* cancel_processing_lua_req_in_tx() is not yet called, it would clean up because we have set fiber_done=true */
+		}
 	}
 
 	luaL_unref(luaT_state(), LUA_REGISTRYINDEX, lua_state_ref);
@@ -1177,6 +1214,7 @@ static void process_lua_req_in_tx(shuttle_t *shuttle)
 		response->un.resp.any.payload = error_str; \
 		response->un.resp.any.payload_len = sizeof(error_str) - 1; \
 		/* Not setting sent_something because no one would check it. */ \
+		response->un.resp.first.content_length = sizeof(error_str) - 1; \
 		stubborn_dispatch(shuttle->thread_ctx->queue_from_tx, &postprocess_lua_req_first, shuttle); \
 		return; \
 	} while (0)

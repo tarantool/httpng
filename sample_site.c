@@ -492,9 +492,7 @@ static void postprocess_large_req(shuttle_t *shuttle)
 	req->res.status = 200;
 	req->res.reason = "OK";
 	h2o_add_header(&req->pool, &req->res.headers, H2O_TOKEN_CONTENT_TYPE, NULL, H2O_STRLIT("text/plain; charset=utf-8"));
-	char content_length_str[32];
-	const size_t content_length_str_len = snprintf(content_length_str, sizeof(content_length_str), "%llu", (unsigned long long)response->len);
-	h2o_add_header(&req->pool, &req->res.headers, H2O_TOKEN_CONTENT_LENGTH, NULL, content_length_str, content_length_str_len);
+	req->res.content_length = response->len;
 	static h2o_generator_t generator = {NULL, NULL};
 	h2o_start_response(req, &generator);
 
@@ -602,9 +600,7 @@ static void postprocess_fiber_req(shuttle_t *shuttle)
 	req->res.status = 200;
 	req->res.reason = "OK";
 	h2o_add_header(&req->pool, &req->res.headers, H2O_TOKEN_CONTENT_TYPE, NULL, H2O_STRLIT("text/plain; charset=utf-8"));
-	char content_length_str[32];
-	const size_t content_length_str_len = snprintf(content_length_str, sizeof(content_length_str), "%llu", (unsigned long long)response->len);
-	h2o_add_header(&req->pool, &req->res.headers, H2O_TOKEN_CONTENT_LENGTH, NULL, content_length_str, content_length_str_len);
+	req->res.content_length = response->len;
 	static h2o_generator_t generator = {NULL, NULL};
 	h2o_start_response(req, &generator);
 
