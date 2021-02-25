@@ -203,6 +203,12 @@ __thread thread_ctx_t *curr_thread_ctx;
 static void fill_http_headers(lua_State *L, lua_response_t *response, int param_lua_idx);
 static int payload_writer_write_nop(lua_State *L);
 
+/* FIXME: Use lua_tointegerx() when we would not care about older Tarantool versions. */
+lua_Integer my_lua_tointegerx(lua_State *L, int idx, int *ok)
+{
+	return (*ok = lua_isnumber(L, idx)) ? lua_tointeger(L, idx) : 0;
+}
+
 static inline shuttle_t *get_shuttle_from_generator_lua(h2o_generator_t *generator)
 {
 	lua_response_t *const response = container_of(generator, lua_response_t, un.resp.any.generator);
@@ -628,7 +634,7 @@ static int header_writer_write_header(lua_State *L)
 	}
 
 	int is_integer;
-	response->un.resp.first.http_code = lua_tointegerx(L, 2, &is_integer);
+	response->un.resp.first.http_code = my_lua_tointegerx(L, 2, &is_integer);
 	if (!is_integer)
 		goto Error;
 
@@ -1146,7 +1152,7 @@ lua_fiber_func(va_list ap)
 				response->un.resp.first.http_code = get_default_http_code(response);
 			else {
 				int is_integer;
-				response->un.resp.first.http_code = lua_tointegerx(L, -1, &is_integer);
+				response->un.resp.first.http_code = my_lua_tointegerx(L, -1, &is_integer);
 				if (!is_integer)
 					response->un.resp.first.http_code = get_default_http_code(response);
 			}
@@ -1763,7 +1769,7 @@ Skip_c_sites:
 	if (lua_isnil(L, -1)) \
 		name = DEFAULT_##name; \
 	else { \
-		name = lua_tointegerx(L, -1, &is_integer); \
+		name = my_lua_tointegerx(L, -1, &is_integer); \
 		if (!is_integer) \
 			goto Error; \
 		if (name > MAX_##name) \
@@ -1877,7 +1883,7 @@ Skip_main_lua_handler:
 	while (lua_next(L, -2)) {
 		lua_getfield(L, -1, "port");
 		int is_integer;
-		const uint64_t candidate = lua_tointegerx(L, -1, &is_integer);
+		const uint64_t candidate = my_lua_tointegerx(L, -1, &is_integer);
 		if (!is_integer || !candidate || candidate >= 65535)
 			goto Error;
 		port = candidate; /* Silently overwrite for now (FIXME: Multilisten). */

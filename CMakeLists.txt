@@ -21,6 +21,7 @@ endfunction()
 
 add_subdirectory(third_party/h2o)
 add_subdirectory(third_party/xtm)
+add_subdirectory(third_party/msgpuck)
 
 #set(HTTPNG_USE_LIBUV ON)
 
@@ -42,5 +43,5 @@ endif (HTTPNG_USE_LIBUV)
 target_link_libraries(httpng xtm_api_static)
 
 build_module(sample_site sample_site.c include/tarantool-httpng/httpng.h)
-target_link_libraries(sample_site httpng)
+target_link_libraries(sample_site httpng msgpuck)
 
