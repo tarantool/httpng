@@ -64,6 +64,8 @@
 #define MAX_max_conn_per_thread (1024 * 1024)
 #define MAX_shuttle_size (16 * 1024 * 1024)
 
+#define DEFAULT_LISTEN_PORT 7890
+
 struct thread_ctx;
 typedef struct listener_ctx {
 	h2o_accept_ctx_t accept_ctx;
@@ -1773,9 +1775,9 @@ Skip_c_sites:
 
 	lua_site_t *lua_sites = NULL; /* FIXME: Free allocated memory - including malloc'ed path - when shutting down. */
 	lua_getfield(L, LUA_STACK_IDX_TABLE, "sites");
+	unsigned lua_site_idx = 0;
 	if (lua_isnil(L, -1))
 		goto Skip_lua_sites;
-	unsigned lua_site_idx = 0;
 	lua_pushnil(L); /* Start of table. */
 	while (lua_next(L, LUA_STACK_IDX_LUA_SITES)) {
 		lua_getfield(L, -1, "path");
@@ -1827,6 +1829,27 @@ Skip_lua_sites:
 
 Skip_main_lua_handler:
 	;
+	unsigned short port = DEFAULT_LISTEN_PORT;
+	lua_getfield(L, LUA_STACK_IDX_TABLE, "listen");
+	if (lua_isnil(L, -1))
+		goto Skip_listen;
+	if (lua_type(L, -1) != LUA_TTABLE)
+		goto Error;
+
+	lua_pushnil(L); /* Start of table. */
+	while (lua_next(L, -2)) {
+		lua_getfield(L, -1, "port");
+		int is_integer;
+		const uint64_t candidate = lua_tointegerx(L, -1, &is_integer);
+		if (!is_integer || !candidate || candidate >= 65535)
+			goto Error;
+		port = candidate; /* Silently overwrite for now (FIXME: Multilisten). */
+		/* Remove port and value, keep key for next iteration. */
+		lua_pop(L, 2);
+	}
+
+Skip_listen:
+	;
 	SSL_CTX *ssl_ctx;
 	if (USE_HTTPS && (ssl_ctx = setup_ssl("cert.pem", "key.pem")) == NULL) {//x x x: customizable file names
 		fprintf(stderr, "setup_ssl() failed (cert/key files not found?)\n");
@@ -1849,7 +1872,7 @@ Skip_main_lua_handler:
 		unsigned listener_idx;
 
 		for (listener_idx = 0; listener_idx < conf.num_listeners; ++listener_idx)
-			if ((conf.listener_cfgs[listener_idx].fd = open_listener_ipv4("127.0.0.1", 7890)) == -1) //x x x //customizable
+			if ((conf.listener_cfgs[listener_idx].fd = open_listener_ipv4("127.0.0.1", port)) == -1) /* FIXME: customizable. */
 				goto Error;
 	}
 

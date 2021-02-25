@@ -8,6 +8,9 @@ http.cfg{
         { addr = '0.0.0.0', port = 8443, tls = true, backlog = 4096, cert = ... },
     },
     --]]--
+    listen = {
+        { port = 8080 },
+    },
     threads = 4,
     handler = function(req, io)
 
