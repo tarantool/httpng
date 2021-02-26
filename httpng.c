@@ -1600,7 +1600,9 @@ static SSL_CTX *setup_ssl(const char *cert_file, const char *key_file)
 	SSL_CTX *ssl_ctx = SSL_CTX_new(SSLv23_server_method());
 	if (ssl_ctx == NULL)
 		return NULL;
-	SSL_CTX_set_options(ssl_ctx, SSL_OP_NO_SSLv2);//x x x: //make configurable;
+
+	/* FIXME: Make configurable. */
+	SSL_CTX_set_options(ssl_ctx, SSL_OP_NO_SSLv2);
 
 	if (SSL_CTX_use_certificate_file(ssl_ctx, cert_file, SSL_FILETYPE_PEM) != 1)
 		return NULL;
@@ -1651,8 +1653,10 @@ static void *worker_func(void *param)
 	h2o_context_init(&thread_ctx->ctx, h2o_evloop_create(), &conf.globalconf);
 #endif /* USE_LIBUV */
 
-	listener_ctx_t *listener_ctx = &thread_ctx->listener_ctxs[0];//x x x: More than one
-	listener_cfg_t *listener_cfg = &conf.listener_cfgs[0];//x x x: More than one
+	/* FIXME: Need more than one. */
+	listener_ctx_t *listener_ctx = &thread_ctx->listener_ctxs[0];
+	listener_cfg_t *listener_cfg = &conf.listener_cfgs[0];
+
 	memset(listener_ctx, 0, sizeof(*listener_ctx));
 	listener_ctx->thread_ctx = thread_ctx;
 	listener_ctx->accept_ctx.ssl_ctx = conf.ssl_ctx;
@@ -1660,7 +1664,7 @@ static void *worker_func(void *param)
 	listener_ctx->accept_ctx.hosts = conf.globalconf.hosts;
 	if (thread_idx) {
 		if ((listener_ctx->fd = dup(listener_cfg->fd)) == -1) {
-			//TODO: Report
+			/* FIXME: Should report. */
 			free(thread_ctx->listener_ctxs);
 			xtm_delete(thread_ctx->queue_from_tx);
 			return NULL;
@@ -1695,7 +1699,7 @@ static void *worker_func(void *param)
 
 	__sync_synchronize(); /* For the fiber in TX thread to see everything we have initialized */
 
-	//x x x;//SIGTERM should terminate loop
+	/* FIXME: SIGTERM should terminate loop. */
 #ifdef USE_LIBUV
 	uv_run(&thread_ctx->loop, UV_RUN_DEFAULT);
 Error:
@@ -1706,8 +1710,8 @@ Error:
 		;
 #endif /* USE_LIBUV */
 
-	//void h2o_socket_read_stop(h2o_socket_t *sock);//x x x;
-	//x x x;//should flush these queues first
+	/* FIXME: Should use h2o_socket_read_stop(). */
+	/* FIXME: Should flush these queues first. */
 	xtm_delete(thread_ctx->queue_from_tx);
 	free(thread_ctx->listener_ctxs);
 	return NULL;
@@ -1802,7 +1806,11 @@ Skip_c_sites:
 		goto Error;
 
 	h2o_config_init(&conf.globalconf);
-	h2o_hostconf_t *hostconf = h2o_config_register_host(&conf.globalconf, h2o_iovec_init(H2O_STRLIT("default")), H2O_DEFAULT_PORT_FOR_PROTOCOL_USED); //x x x: customizable
+
+	/* FIXME: Should make customizable. */
+	h2o_hostconf_t *hostconf = h2o_config_register_host(&conf.globalconf,
+		h2o_iovec_init(H2O_STRLIT("default")),
+		H2O_DEFAULT_PORT_FOR_PROTOCOL_USED);
 	if (hostconf == NULL)
 		goto Error;
 
@@ -1894,20 +1902,23 @@ Skip_main_lua_handler:
 Skip_listen:
 	;
 	SSL_CTX *ssl_ctx;
-	if (USE_HTTPS && (ssl_ctx = setup_ssl("cert.pem", "key.pem")) == NULL) {//x x x: customizable file names
+	/* FIXME: Should use customizable file names. */
+	if (USE_HTTPS && (ssl_ctx = setup_ssl("cert.pem", "key.pem")) == NULL) {
 		fprintf(stderr, "setup_ssl() failed (cert/key files not found?)\n");
 		goto Error;
 	}
 
 #if 0
-	/* Never returns NULL */
-	h2o_logger_t *logger = h2o_access_log_register(&config.default_host, "/dev/stdout", NULL); //x x x: customizable
+	/* FIXME: Should make customizable. */
+	/* Never returns NULL. */
+	h2o_logger_t *logger = h2o_access_log_register(&config.default_host,
+		"/dev/stdout", NULL);
 #endif
 
 	conf.ssl_ctx = ssl_ctx;
 
 	/* TODO: Implement more than one listener (HTTP/HTTPS, IPv4/IPv6, several IPs etc) */
-	conf.num_listeners = 1; //x x x: customizable
+	conf.num_listeners = 1; /* FIXME: Make customizable. */
 	if ((conf.listener_cfgs = (listener_cfg_t *)malloc(conf.num_listeners * sizeof(listener_cfg_t))) == NULL)
 		goto Error;
 
@@ -1959,14 +1970,14 @@ Skip_listen:
 	return 0;
 
 Error:
-	//FIXME: Release resources, report errors details
-	return 0;//x x x;
+	/* FIXME: Release resources, report errors details. */
+	return 0;
 }
 
 int deinit(lua_State *L)
 {
 	(void)L;
-	//x x x; //terminate workers
+	/* FIXME: Finish requests processing, terminate workers. */
 	free(conf.listener_cfgs);
 	free(conf.thread_ctxs);
 	return 0;
