@@ -35,7 +35,9 @@ if (HTTPNG_USE_LIBUV)
     add_definitions(-DUSE_LIBUV)
 endif (HTTPNG_USE_LIBUV)
 
-build_module(httpng httpng.c include/tarantool-httpng/httpng.h)
+set(HEADERS include/tarantool-httpng/httpng.h)
+
+build_module(httpng httpng/httpng.c ${HEADERS})
 
 if (HTTPNG_USE_LIBUV)
     target_link_libraries(httpng libh2o)
@@ -45,6 +47,7 @@ endif (HTTPNG_USE_LIBUV)
 
 target_link_libraries(httpng xtm_api_static)
 
-build_module(sample_site sample_site.c include/tarantool-httpng/httpng.h)
+build_module(sample_site examples/sample_site.c
+	${HEADERS})
 target_link_libraries(sample_site httpng msgpuck)
 

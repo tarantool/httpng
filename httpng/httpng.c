@@ -2150,8 +2150,8 @@ Skip_listen:
 	;
 	SSL_CTX *ssl_ctx;
 	/* FIXME: Should use customizable file names. */
-	if (USE_HTTPS && (ssl_ctx = setup_ssl("cert.pem", "key.pem")) ==
-	    NULL) {
+	if (USE_HTTPS && (ssl_ctx = setup_ssl("examples/cert.pem",
+	    "examples/key.pem")) == NULL) {
 		fprintf(stderr,
 			"setup_ssl() failed (cert/key files not found?)\n");
 		goto Error;
