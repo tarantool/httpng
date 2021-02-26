@@ -3,19 +3,22 @@ cmake_minimum_required(VERSION 2.8)
 project(httpng C CXX)
 
 set(CMAKE_MODULE_PATH "${CMAKE_CURRENT_SOURCE_DIR}/cmake" ${CMAKE_MODULE_PATH})
-set(CMAKE_INCLUDE_PATH "${CMAKE_CURRENT_SOURCE_DIR}/cmake" ${CMAKE_INCLUDE_PATH})
+set(CMAKE_INCLUDE_PATH "${CMAKE_CURRENT_SOURCE_DIR}/cmake"
+    ${CMAKE_INCLUDE_PATH})
 
 # Find Tarantool and Lua dependecies
 set(TARANTOOL_FIND_REQUIRED ON)
 find_package(Tarantool REQUIRED)
-include_directories(${TARANTOOL_INCLUDE_DIRS} third_party/h2o/include third_party include)
+include_directories(${TARANTOOL_INCLUDE_DIRS} third_party/h2o/include
+    third_party include)
 
 function(build_module module files)
     add_library(${module} SHARED ${files})
     set_target_properties(${module} PROPERTIES PREFIX "")
     #    add_dependencies(${module} api)
     if(TARGET_OS_DARWIN)
-        set_target_properties(${module} PROPERTIES LINK_FLAGS "-undefined dynamic_lookup")
+        set_target_properties(${module} PROPERTIES LINK_FLAGS
+            "-undefined dynamic_lookup")
     endif(TARGET_OS_DARWIN)
 endfunction()
 
