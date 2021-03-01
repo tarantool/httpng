@@ -147,6 +147,7 @@ typedef struct {
 	unsigned path_len;
 	unsigned query_at;
 	unsigned num_headers;
+	unsigned body_len;
 	unsigned char method_len;
 	unsigned char ws_client_key_len;
 	unsigned char version_major;
@@ -1092,7 +1093,7 @@ Error: /* FIXME: Error message? */
 }
 
 /* Launched in TX thread. */
-static inline void fill_received_headers(lua_State *L,
+static inline void fill_received_headers_and_body(lua_State *L,
 	lua_response_t *response)
 {
 	assert(!response->sent_something);
@@ -1115,6 +1116,9 @@ static inline void fill_received_headers(lua_State *L,
 
 		current_offset += handle->name_size + 1 + handle->value_size;
 	}
+	lua_setfield(L, -2, "headers");
+	lua_pushlstring(L, &response->un.req.buffer[current_offset], response->un.req.body_len);
+	lua_setfield(L, -2, "body");
 }
 
 /* Launched in TX thread. */
@@ -1301,8 +1305,7 @@ lua_fiber_func(va_list ap)
 	lua_setfield(L, -2, "method");
 	lua_pushboolean(L, !!response->un.req.ws_client_key_len);
 	lua_setfield(L, -2, "is_websocket");
-	fill_received_headers(L, response);
-	lua_setfield(L, -2, "headers");
+	fill_received_headers_and_body(L, response);
 
 	/* We have finished parsing request, now can write to response
 	 * (it is union). */
@@ -1470,6 +1473,7 @@ static int lua_req_handler(lua_h2o_handler_t *self, h2o_req_t *req)
 	 * received_http_header_handle_t handles[num_headers]
 	 * {repeat num_headers times} char name[handles[i].name_size], '\0',
 	 *   char value[handles[i].value_size]
+	 * char body[]
 	 *
 	 * '\0' is for lua_setfield().
 	 * */
@@ -1485,6 +1489,15 @@ static int lua_req_handler(lua_h2o_handler_t *self, h2o_req_t *req)
 	}
 	unsigned current_offset = response->un.req.path_len;
 	const unsigned max_offset = conf.max_path_len_lua;
+	if (current_offset + num_headers * sizeof(received_http_header_handle_t) +
+	    req->entity.len > max_offset) {
+		/* Error. */
+		free_shuttle_with_anchor(shuttle);
+		req->res.status = 500;
+		req->res.reason = "Too large body";
+		h2o_send_inline(req, H2O_STRLIT("Too large body\n"));
+		return 0;
+	}
 	received_http_header_handle_t *const handles =
 		(received_http_header_handle_t *)&response->un.req.buffer[
 			current_offset];
@@ -1516,6 +1529,9 @@ static int lua_req_handler(lua_h2o_handler_t *self, h2o_req_t *req)
 		current_offset += handle->value_size;
 	}
 	response->un.req.num_headers = num_headers;
+	response->un.req.body_len = req->entity.len;
+	memcpy(&response->un.req.buffer[current_offset],
+		req->entity.base, response->un.req.body_len);
 
 	response->sent_something = false;
 	response->cancelled = false;

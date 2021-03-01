@@ -314,6 +314,49 @@ local function ws_app_handler(req, header_writer)
 		payload, true)
 end
 
+local function post_helper_handler(req, io)
+	if (req.method ~= 'GET') then
+		io:write_header(500, nil, 'Unsupported HTTP method',
+			true)
+		return
+	end
+
+	local headers = {
+		['content-type'] = 'text/html; charset=utf-8',
+	}
+	local payload = [[
+<html><head><title>POST helper</title></head><body>
+<form action="/post_test" method="post">
+  <label for="fname">First name:</label>
+  <input type="text" id="fname" name="fname"><br><br>
+  <label for="lname">Last name:</label>
+  <input type="text" id="lname" name="lname"><br><br>
+  <input type="submit" value="Submit">
+</form>
+</body></html>
+]]
+	io:write_header(200, headers, payload, true)
+end
+
+local function post_test_handler(req, io)
+	if (req.method ~= 'POST') then
+		io:write_header(500, nil, 'Unsupported HTTP method',
+			true)
+		return
+	end
+
+	local headers = {
+		['content-type'] = 'text/html; charset=utf-8',
+	}
+	local payload
+	if req.body == nil then
+		payload = 'Empty body'
+	else
+		payload = 'body="'..req.body..'"'
+	end
+	io:write_header(200, headers, payload, true)
+end
+
 local httpng_lib = require "httpng"
 local init_func = httpng_lib.cfg
 
@@ -326,6 +369,8 @@ local lua_sites = {
 	{['path'] = '/lua_req',   ['handler'] = req_handler},
 	{['path'] = '/lua_ws_server', ['handler'] = ws_server_handler},
 	{['path'] = '/lua_ws_app', ['handler'] = ws_app_handler},
+	{['path'] = '/post_helper', ['handler'] = post_helper_handler},
+	{['path'] = '/post_test', ['handler'] = post_test_handler},
 }
 
 print '\n\n\nFilling in test spaces completed, launching HTTP server...\n\n'
