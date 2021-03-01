@@ -22,6 +22,10 @@ function(build_module module files)
     endif(TARGET_OS_DARWIN)
 endfunction()
 
+add_subdirectory(third_party/wslay)
+
+set(USE_STATIC_WSLAY ON)
+
 add_subdirectory(third_party/h2o)
 add_subdirectory(third_party/xtm)
 add_subdirectory(third_party/msgpuck)
@@ -40,9 +44,9 @@ set(HEADERS include/tarantool-httpng/httpng.h)
 build_module(httpng httpng/httpng.c ${HEADERS})
 
 if (HTTPNG_USE_LIBUV)
-    target_link_libraries(httpng libh2o)
+    target_link_libraries(httpng wslay libh2o)
 else (HTTPNG_USE_LIBUV)
-    target_link_libraries(httpng libh2o-evloop)
+    target_link_libraries(httpng wslay libh2o-evloop)
 endif (HTTPNG_USE_LIBUV)
 
 target_link_libraries(httpng xtm_api_static)
