@@ -39,6 +39,11 @@
 #define SHOULD_FREE_RECV_DATA_IN_HTTP_SERVER_THREAD
 #undef SHOULD_FREE_RECV_DATA_IN_HTTP_SERVER_THREAD
 
+/* When disabled, HTTP requests with body not fitting into shuttle are failed.
+ * N. b.: h2o allocates memory for the WHOLE body in any case. */
+#define SPLIT_LARGE_BODY
+//#undef SPLIT_LARGE_BODY
+
 #define USE_HTTPS 1
 //#define USE_HTTPS 0
 
@@ -143,6 +148,9 @@ typedef struct {
 } received_http_header_handle_t;
 
 typedef struct {
+#ifdef SPLIT_LARGE_BODY
+	size_t offset_within_body; /* For use by HTTP server thread. */
+#endif /* SPLIT_LARGE_BODY */
 	int lua_handler_ref; /* Reference to user Lua handler. */
 	unsigned path_len;
 	unsigned query_at;
@@ -152,6 +160,9 @@ typedef struct {
 	unsigned char ws_client_key_len;
 	unsigned char version_major;
 	unsigned char version_minor;
+#ifdef SPLIT_LARGE_BODY
+	bool is_body_incomplete;
+#endif /* SPLIT_LARGE_BODY */
 	char method[7];
 	char buffer[]; /* "path" from h2o_req_t goes first. */
 } lua_first_request_only_t;
@@ -1092,10 +1103,43 @@ Error: /* FIXME: Error message? */
 	return 1;
 }
 
-/* Launched in TX thread. */
-static inline void fill_received_headers_and_body(lua_State *L,
-	lua_response_t *response)
+#ifdef SPLIT_LARGE_BODY
+/* Launched in HTTP server thread. */
+static void retrieve_more_body(shuttle_t *const shuttle)
 {
+	if (shuttle->disposed)
+		return;
+	lua_response_t *const response = (lua_response_t *)&shuttle->payload;
+	assert(response->un.req.is_body_incomplete);
+	const h2o_req_t *const req =
+		shuttle->never_access_this_req_from_tx_thread;
+	assert(response->un.req.offset_within_body < req->entity.len);
+	const size_t bytes_still_in_req =
+		req->entity.len - response->un.req.offset_within_body;
+	unsigned bytes_to_copy;
+	const unsigned offset = response->un.req.offset_within_body;
+	if (bytes_still_in_req > conf.max_path_len_lua) {
+		bytes_to_copy = conf.max_path_len_lua;
+		response->un.req.offset_within_body += bytes_to_copy;
+	} else {
+		bytes_to_copy = bytes_still_in_req;
+		response->un.req.is_body_incomplete = false;
+	}
+	response->un.req.body_len = bytes_to_copy;
+	memcpy(&response->un.req.buffer, &req->entity.base[offset],
+		bytes_to_copy);
+
+	stubborn_dispatch_lua(get_curr_thread_ctx()->queue_to_tx,
+		continue_processing_lua_req_in_tx, response);
+}
+#endif /* SPLIT_LARGE_BODY */
+
+/* Launched in TX thread.
+ * Returns !0 in case of error. */
+static inline int fill_received_headers_and_body(lua_State *L,
+	shuttle_t *shuttle)
+{
+	lua_response_t *const response = (lua_response_t *)&shuttle->payload;
 	assert(!response->sent_something);
 	const received_http_header_handle_t *const handles =
 		(received_http_header_handle_t *)&response->un.req.buffer[
@@ -1117,8 +1161,63 @@ static inline void fill_received_headers_and_body(lua_State *L,
 		current_offset += handle->name_size + 1 + handle->value_size;
 	}
 	lua_setfield(L, -2, "headers");
-	lua_pushlstring(L, &response->un.req.buffer[current_offset], response->un.req.body_len);
+#ifdef SPLIT_LARGE_BODY
+	if (!response->un.req.is_body_incomplete)
+#endif /* SPLIT_LARGE_BODY */
+	{
+		lua_pushlstring(L, &response->un.req.buffer[current_offset],
+			response->un.req.body_len);
+		lua_setfield(L, -2, "body");
+		return 0;
+	}
+
+#ifdef SPLIT_LARGE_BODY
+	/* FIXME: Should use content-length to preallocate enough memory and
+	 * avoid allocations and copying. Or we can just allocate in
+	 * HTTP server thread and pass pointer. */
+	char *body_buf = malloc(response->un.req.body_len);
+	if (body_buf == NULL)
+		/* There was memory allocation failure.
+		 * FIXME: Should log this. */
+		return 1;
+
+	memcpy(body_buf, &response->un.req.buffer[current_offset],
+		response->un.req.body_len);
+
+	size_t body_offset = response->un.req.body_len;
+	do {
+		/* FIXME: Not needed on first iteration. */
+		take_shuttle_ownership_lua(response);
+
+		stubborn_dispatch(shuttle->thread_ctx
+			->queue_from_tx, &retrieve_more_body, shuttle);
+		wait_for_lua_shuttle_return(response);
+		if (response->cancelled) {
+			free(body_buf);
+			return 1;
+		}
+
+		{
+			char *const new_body_buf = realloc(body_buf,
+				body_offset + response->un.req.body_len);
+			if (new_body_buf == NULL) {
+				free(body_buf);
+				/* There was memory allocation failure.
+				 * FIXME: Should log this. */
+				return 1;
+			}
+			body_buf = new_body_buf;
+		}
+		memcpy(&body_buf[body_offset], &response->un.req.buffer,
+			response->un.req.body_len);
+		body_offset += response->un.req.body_len;
+	} while (response->un.req.is_body_incomplete);
+
+	lua_pushlstring(L, body_buf, body_offset);
+	free(body_buf);
 	lua_setfield(L, -2, "body");
+	return 0;
+#endif /* SPLIT_LARGE_BODY */
 }
 
 /* Launched in TX thread. */
@@ -1305,7 +1404,10 @@ lua_fiber_func(va_list ap)
 	lua_setfield(L, -2, "method");
 	lua_pushboolean(L, !!response->un.req.ws_client_key_len);
 	lua_setfield(L, -2, "is_websocket");
-	fill_received_headers_and_body(L, response);
+	if (fill_received_headers_and_body(L, shuttle)) {
+		free_lua_shuttle_from_tx(shuttle);
+		goto Done;
+	}
 
 	/* We have finished parsing request, now can write to response
 	 * (it is union). */
@@ -1371,6 +1473,7 @@ lua_fiber_func(va_list ap)
 	else
 		process_handler_success_not_ws_with_send(L, shuttle);
 
+Done:
 	luaL_unref(luaT_state(), LUA_REGISTRYINDEX, lua_state_ref);
 	return 0;
 }
@@ -1462,8 +1565,7 @@ static int lua_req_handler(lua_h2o_handler_t *self, h2o_req_t *req)
 
 	const h2o_header_t *const headers = req->headers.entries;
 	const size_t num_headers = req->headers.size;
-	const unsigned bytes_remain_in_buffer =
-		conf.max_path_len_lua - response->un.req.path_len;
+	unsigned current_offset = response->un.req.path_len;
 
 	/* response->un.req.buffer[] format:
 	 *
@@ -1477,25 +1579,16 @@ static int lua_req_handler(lua_h2o_handler_t *self, h2o_req_t *req)
 	 *
 	 * '\0' is for lua_setfield().
 	 * */
-	const unsigned max_headers =
-		bytes_remain_in_buffer / sizeof(received_http_header_handle_t);
-	if (num_headers > max_headers) {
+	const unsigned max_offset = conf.max_path_len_lua;
+	const size_t headers_size = num_headers *
+		sizeof(received_http_header_handle_t);
+	const unsigned headers_payload_offset = current_offset + headers_size;
+	if (headers_payload_offset > max_offset) {
 		/* Error. */
 		free_shuttle_with_anchor(shuttle);
 		req->res.status = 500;
 		req->res.reason = "Too many headers";
 		h2o_send_inline(req, H2O_STRLIT("Too many headers\n"));
-		return 0;
-	}
-	unsigned current_offset = response->un.req.path_len;
-	const unsigned max_offset = conf.max_path_len_lua;
-	if (current_offset + num_headers * sizeof(received_http_header_handle_t) +
-	    req->entity.len > max_offset) {
-		/* Error. */
-		free_shuttle_with_anchor(shuttle);
-		req->res.status = 500;
-		req->res.reason = "Too large body";
-		h2o_send_inline(req, H2O_STRLIT("Too large body\n"));
 		return 0;
 	}
 	received_http_header_handle_t *const handles =
@@ -1528,10 +1621,32 @@ static int lua_req_handler(lua_h2o_handler_t *self, h2o_req_t *req)
 			header->value.base, handle->value_size);
 		current_offset += handle->value_size;
 	}
+
+	unsigned body_bytes_to_copy;
+	if (current_offset + req->entity.len > max_offset) {
+#ifdef SPLIT_LARGE_BODY
+		response->un.req.is_body_incomplete = true;
+		body_bytes_to_copy = max_offset - current_offset;
+		response->un.req.offset_within_body = body_bytes_to_copy;
+#else /* SPLIT_LARGE_BODY */
+		/* Error. */
+		free_shuttle_with_anchor(shuttle);
+		req->res.status = 500;
+		req->res.reason = "Too large body";
+		h2o_send_inline(req, H2O_STRLIT("Too large body\n"));
+		return 0;
+#endif /* SPLIT_LARGE_BODY */
+	} else {
+#ifdef SPLIT_LARGE_BODY
+		response->un.req.is_body_incomplete = false;
+#endif /* SPLIT_LARGE_BODY */
+		body_bytes_to_copy = req->entity.len;
+	}
+
 	response->un.req.num_headers = num_headers;
-	response->un.req.body_len = req->entity.len;
+	response->un.req.body_len = body_bytes_to_copy;
 	memcpy(&response->un.req.buffer[current_offset],
-		req->entity.base, response->un.req.body_len);
+		req->entity.base, body_bytes_to_copy);
 
 	response->sent_something = false;
 	response->cancelled = false;

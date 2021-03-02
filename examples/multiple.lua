@@ -357,6 +357,29 @@ local function post_test_handler(req, io)
 	io:write_header(200, headers, payload, true)
 end
 
+local function put_handler(req, io)
+	if (req.method ~= 'PUT') then
+		io:write_header(500, nil, 'Unsupported HTTP method',
+			true)
+		return
+	end
+
+	local headers
+	local payload
+	if req.body == nil then
+		headers = {
+			['content-type'] = 'text/html; charset=utf-8',
+		}
+		payload = 'Error: empty body'
+	else
+		headers = {
+			['content-type'] = 'application/octet-stream',
+		}
+		payload = req.body
+	end
+	io:write_header(200, headers, payload, true)
+end
+
 local httpng_lib = require "httpng"
 local init_func = httpng_lib.cfg
 
@@ -371,6 +394,7 @@ local lua_sites = {
 	{['path'] = '/lua_ws_app', ['handler'] = ws_app_handler},
 	{['path'] = '/post_helper', ['handler'] = post_helper_handler},
 	{['path'] = '/post_test', ['handler'] = post_test_handler},
+	{['path'] = '/put',       ['handler'] = put_handler},
 }
 
 print '\n\n\nFilling in test spaces completed, launching HTTP server...\n\n'
