@@ -383,8 +383,6 @@ end
 local httpng_lib = require "httpng"
 local init_func = httpng_lib.cfg
 
-local sample_site_lib = require "sample_site"
-
 local lua_sites = {
 	{['path'] = '/lua_large', ['handler'] = large_handler},
 	{['path'] = '/lua_hello', ['handler'] = hello_handler},
@@ -405,6 +403,4 @@ init_func({
 	['max_body_len'] = 16 * 1024 * 1024,
 	['use_body_split'] = true,
 	['sites'] = lua_sites,
-	['c_sites_func'] = sample_site_lib.get_path_descs,
-	--['c_sites_func_param'] = nil
 })

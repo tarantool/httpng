@@ -50,8 +50,3 @@ else (HTTPNG_USE_LIBUV)
 endif (HTTPNG_USE_LIBUV)
 
 target_link_libraries(httpng xtm_api_static)
-
-build_module(sample_site examples/sample_site.c
-	${HEADERS})
-target_link_libraries(sample_site httpng msgpuck)
-
