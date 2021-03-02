@@ -402,6 +402,8 @@ init_func({
 	['threads'] = 4,
 	['max_conn_per_thread'] = 64,
 	['shuttle_size'] = 1024,
+	['max_body_len'] = 16 * 1024 * 1024,
+	['use_body_split'] = true,
 	['sites'] = lua_sites,
 	['c_sites_func'] = sample_site_lib.get_path_descs,
 	--['c_sites_func_param'] = nil

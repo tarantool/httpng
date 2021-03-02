@@ -61,16 +61,19 @@
 #define DEFAULT_threads 1
 #define DEFAULT_max_conn_per_thread 65536
 #define DEFAULT_shuttle_size 65536
+#define DEFAULT_max_body_len (1024 * 1024)
 
 /* Limits are quite relaxed for now. */
 #define MIN_threads 1
 #define MIN_max_conn_per_thread 1
 #define MIN_shuttle_size (sizeof(shuttle_t) + sizeof(uintptr_t))
+#define MIN_max_body_len 0
 
 /* Limits are quite relaxed for now. */
 #define MAX_threads 1024
 #define MAX_max_conn_per_thread (1024 * 1024)
 #define MAX_shuttle_size (16 * 1024 * 1024)
+#define MAX_max_body_len (64ULL * 1024 * 1024 * 1024)
 
 #define DEFAULT_LISTEN_PORT 7890
 
@@ -210,6 +213,9 @@ static struct {
 	unsigned max_path_len_lua;
 	unsigned max_recv_bytes_lua_websocket;
 	int tfo_queues;
+#ifdef SPLIT_LARGE_BODY
+	bool use_body_split;
+#endif /* SPLIT_LARGE_BODY */
 	volatile bool tx_fiber_should_work;
 } conf = {
 	.tfo_queues = H2O_DEFAULT_LENGTH_TCP_FASTOPEN_QUEUE,
@@ -1584,11 +1590,13 @@ static int lua_req_handler(lua_h2o_handler_t *self, h2o_req_t *req)
 		sizeof(received_http_header_handle_t);
 	const unsigned headers_payload_offset = current_offset + headers_size;
 	if (headers_payload_offset > max_offset) {
+	TooLargeHeaders:
 		/* Error. */
 		free_shuttle_with_anchor(shuttle);
-		req->res.status = 500;
-		req->res.reason = "Too many headers";
-		h2o_send_inline(req, H2O_STRLIT("Too many headers\n"));
+		req->res.status = 431;
+		req->res.reason = "Request Header Fields Too Large";
+		h2o_send_inline(req,
+			H2O_STRLIT("Request Header Fields Too Large\n"));
 		return 0;
 	}
 	received_http_header_handle_t *const handles =
@@ -1599,15 +1607,8 @@ static int lua_req_handler(lua_h2o_handler_t *self, h2o_req_t *req)
 	for (header_idx = 0; header_idx < num_headers; ++header_idx) {
 		const h2o_header_t *const header = &headers[header_idx];
 		if (current_offset + header->name->len + 1 +
-		    header->value.len > max_offset) {
-			/* Error. */
-			free_shuttle_with_anchor(shuttle);
-			req->res.status = 500;
-			req->res.reason = "Too large headers";
-			h2o_send_inline(req,
-				H2O_STRLIT("Too large headers\n"));
-			return 0;
-		}
+		    header->value.len > max_offset)
+			goto TooLargeHeaders;
 		received_http_header_handle_t *const handle =
 			&handles[header_idx];
 		handle->name_size = header->name->len;
@@ -1625,17 +1626,22 @@ static int lua_req_handler(lua_h2o_handler_t *self, h2o_req_t *req)
 	unsigned body_bytes_to_copy;
 	if (current_offset + req->entity.len > max_offset) {
 #ifdef SPLIT_LARGE_BODY
-		response->un.req.is_body_incomplete = true;
-		body_bytes_to_copy = max_offset - current_offset;
-		response->un.req.offset_within_body = body_bytes_to_copy;
-#else /* SPLIT_LARGE_BODY */
-		/* Error. */
-		free_shuttle_with_anchor(shuttle);
-		req->res.status = 500;
-		req->res.reason = "Too large body";
-		h2o_send_inline(req, H2O_STRLIT("Too large body\n"));
-		return 0;
+		if (conf.use_body_split) {
+			response->un.req.is_body_incomplete = true;
+			body_bytes_to_copy = max_offset - current_offset;
+			response->un.req.offset_within_body =
+				body_bytes_to_copy;
+		} else
 #endif /* SPLIT_LARGE_BODY */
+		{
+			/* Error. */
+			free_shuttle_with_anchor(shuttle);
+			req->res.status = 413;
+			req->res.reason = "Payload Too Large";
+			h2o_send_inline(req,
+				H2O_STRLIT("Payload Too Large\n"));
+			return 0;
+		}
 	} else {
 #ifdef SPLIT_LARGE_BODY
 		response->un.req.is_body_incomplete = false;
@@ -2143,8 +2149,14 @@ Skip_c_sites:
 	PROCESS_OPTIONAL_PARAM(threads);
 	PROCESS_OPTIONAL_PARAM(max_conn_per_thread);
 	PROCESS_OPTIONAL_PARAM(shuttle_size);
+	PROCESS_OPTIONAL_PARAM(max_body_len);
 
 #undef PROCESS_OPTIONAL_PARAM
+
+#ifdef SPLIT_LARGE_BODY
+	lua_getfield(L, LUA_STACK_IDX_TABLE, "use_body_split");
+	conf.use_body_split = lua_isnil(L, -1) ? false : lua_toboolean(L, -1);
+#endif /* SPLIT_LARGE_BODY */
 
 	conf.tx_fiber_should_work = 1;
 	/* FIXME: Add sanity checks, especially shuttle_size -
@@ -2173,6 +2185,7 @@ Skip_c_sites:
 		goto Error;
 
 	h2o_config_init(&conf.globalconf);
+	conf.globalconf.max_request_entity_size = max_body_len;
 
 	/* FIXME: Should make customizable. */
 	h2o_hostconf_t *hostconf = h2o_config_register_host(&conf.globalconf,
