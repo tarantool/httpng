@@ -50,9 +50,9 @@ do
 	s:insert{counter, 'Entry #'..counter}
 end
 
-local function hello_handler(req, header_writer)
+local function hello_handler(req, io)
 	if (req.method ~= 'GET') then
-		header_writer:write_header(500, nil,
+		io:write_header(500, nil,
 			'Unsupported HTTP method', true)
 		return
 	end
@@ -63,13 +63,12 @@ local function hello_handler(req, header_writer)
 	}
 	local payload = 'Small hello from lua'
 
-	local payload_writer = header_writer:write_header(200, headers,
-		payload, true)
+	io:write_header(200, headers, payload, true)
 end
 
-local function large_handler(req, header_writer)
+local function large_handler(req, io)
 	if (req.method ~= 'GET') then
-		header_writer:write_header(500, nil, 'Unsupported HTTP method',
+		io:write_header(500, nil, 'Unsupported HTTP method',
 			true)
 		return
 	end
@@ -83,13 +82,12 @@ local function large_handler(req, header_writer)
 		['x-custom-header'] = 'foo',
 	}
 
-	local payload_writer = header_writer:write_header(200, headers,
-		payload, true)
+	io:write_header(200, headers, payload, true)
 end
 
-local function multi_handler(req, header_writer)
+local function multi_handler(req, io)
 	if (req.method ~= 'GET') then
-		header_writer:write_header(500, nil,
+		io:write_header(500, nil,
 			'Unsupported HTTP method', true)
 		return
 	end
@@ -99,14 +97,13 @@ local function multi_handler(req, header_writer)
 		['x-custom-header'] = 'foo',
 	}
 
-	local payload_writer = header_writer:write_header(200, headers, nil,
-		false)
+	io:write_header(200, headers)
 
 	local k, v, counter
 	counter = 0
 	for k, v in s:pairs() do
-		--payload_writer:write(v.desc, false) --works but w/o newlines
-		local closed = payload_writer:write(string.format("%s\n",
+		--io:write(v.desc, false) --works but w/o newlines
+		local closed = io:write(string.format("%s\n",
 			v.desc), false)
 		if closed then
 			-- Connection has already been closed
@@ -118,8 +115,8 @@ local function multi_handler(req, header_writer)
 		end
 	end
 
-	payload_writer:write('<End of list>', true)
-	--payload_writer:write(nil, true) -- also works
+	io:write('<End of list>', true)
+	--io:write(nil, true) -- also works
 end
 
 -- For performance reasons only one string with path/query is passed from C.
@@ -130,9 +127,9 @@ local function get_query(req)
 	return string.sub(req.path, req.query_at, -1)
 end
 
-local function req_handler(req, header_writer)
+local function req_handler(req, io)
 	if (req.method ~= 'GET') then
-		header_writer:write_header(500, nil,
+		io:write_header(500, nil,
 			'Unsupported HTTP method', true)
 		return
 	end
@@ -167,13 +164,12 @@ local function req_handler(req, header_writer)
 		payload = 'No query specified'
 	end
 
-	local payload_writer = header_writer:write_header(200, headers,
-		payload, true)
+	io:write_header(200, headers, payload, true)
 end
 
-local function ws_server_handler(req, header_writer)
+local function ws_server_handler(req, io)
 	if (req.is_websocket == false) then
-		header_writer:write_header(500, nil,
+		io:write_header(500, nil,
 			'Only WebSocket requests are supported', true)
 		return
 	end
@@ -185,7 +181,7 @@ local function ws_server_handler(req, header_writer)
 	if (req.version_major >= 2) then
 		-- Currently H2O does not support WebSockets with HTTP/2
 		-- (and there is an assert).
-		header_writer:write_header(500, nil,
+		io:write_header(500, nil,
 			'Can\'t use WebSockets with HTTP/2 or later', true)
 		return
 	end
@@ -211,7 +207,7 @@ local function ws_server_handler(req, header_writer)
 
 	local recv_limit = 5
 	local recv_count = 0
-	ws = header_writer:upgrade_to_websocket(headers, function(data)
+	ws = io:upgrade_to_websocket(headers, function(data)
 		-- Warning: This function is NOT allowed to yield
 		--[[
 		-- This call would fail because we are inside
@@ -256,9 +252,9 @@ local function ws_server_handler(req, header_writer)
 	ws:close()
 end
 
-local function ws_app_handler(req, header_writer)
+local function ws_app_handler(req, io)
 	if (req.method ~= 'GET') then
-		header_writer:write_header(500, nil, 'Unsupported HTTP method',
+		io:write_header(500, nil, 'Unsupported HTTP method',
 			true)
 		return
 	end
@@ -310,8 +306,7 @@ local function ws_app_handler(req, header_writer)
 </body></html>
 ]]
 
-	local payload_writer = header_writer:write_header(200, headers,
-		payload, true)
+	io:write_header(200, headers, payload, true)
 end
 
 local function post_helper_handler(req, io)

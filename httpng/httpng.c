@@ -296,7 +296,6 @@ extern void free_shuttle_with_anchor(shuttle_t *);
 extern shuttle_t *prepare_shuttle(h2o_req_t *);
 static void fill_http_headers(lua_State *L, lua_response_t *response,
 	int param_lua_idx);
-static int payload_writer_write_nop(lua_State *L);
 
 /* Called when dispatch must not fail */
 extern void stubborn_dispatch_uni(struct xtm_queue *queue, void *func,
@@ -634,7 +633,7 @@ static inline int get_default_http_code(lua_response_t *response)
 	return 200; /* FIXME: Could differ depending on HTTP request type. */
 }
 
-/* Launched in TX thread */
+/* Launched in TX thread. */
 static int payload_writer_write(lua_State *L)
 {
 	/* Lua parameters: self, payload, is_last. */
@@ -666,6 +665,7 @@ static int payload_writer_write(lua_State *L)
 	else
 		is_last = false;
 
+	response->un.resp.any.is_last_send = is_last;
 	if (!response->sent_something) {
 		response->un.resp.first.http_code =
 			get_default_http_code(response);
@@ -674,31 +674,12 @@ static int payload_writer_write(lua_State *L)
 		const unsigned headers_lua_index = num_params + 1 + 1;
 		fill_http_headers(L, response, headers_lua_index);
 
-		response->un.resp.any.is_last_send = is_last;
 		response->sent_something = true;
 		stubborn_dispatch(shuttle->thread_ctx->queue_from_tx,
 			&postprocess_lua_req_first, shuttle);
-		wait_for_lua_shuttle_return(response);
-
-		if (is_last)
-			lua_pushnil(L);
-		else if (response->cancelled) {
-			lua_createtable(L, 0, 1);
-			lua_pushcfunction(L, payload_writer_write_nop);
-			lua_setfield(L, -2, "write");
-		} else {
-			lua_createtable(L, 0, 2);
-			lua_pushcfunction(L, payload_writer_write);
-			lua_setfield(L, -2, "write");
-			lua_pushlightuserdata(L, shuttle);
-			lua_setfield(L, -2, "shuttle");
-		}
-		return 1;
-	}
-
-	response->un.resp.any.is_last_send = is_last;
-	stubborn_dispatch(shuttle->thread_ctx->queue_from_tx,
-		&postprocess_lua_req_others, shuttle);
+	} else
+		stubborn_dispatch(shuttle->thread_ctx->queue_from_tx,
+			&postprocess_lua_req_others, shuttle);
 	wait_for_lua_shuttle_return(response);
 
 	/* Returning Lua true if connection has already been closed. */
@@ -706,15 +687,6 @@ static int payload_writer_write(lua_State *L)
 	return 1;
 
 Error: /* FIXME: Error message */
-	lua_pushboolean(L, true);
-	return 1;
-}
-
-/* Launched in TX thread. */
-static int payload_writer_write_nop(lua_State *L)
-{
-	/* Lua parameters: self, payload, is_last. */
-	/* Returning Lua true because connection has already been closed. */
 	lua_pushboolean(L, true);
 	return 1;
 }
@@ -788,14 +760,9 @@ static int header_writer_write_header(lua_State *L)
 	if (response->sent_something)
 		goto Error;
 	if (response->cancelled) {
-		/* Can't send anything, connection has been closed. */
-		if (is_last)
-			lua_pushnil(L);
-		else {
-			lua_createtable(L, 0, 2);
-			lua_pushcfunction(L, payload_writer_write_nop);
-			lua_setfield(L, -2, "write");
-		}
+		/* Can't send anything, connection has been closed.
+		 * Returning Lua true because connection has already been closed. */
+		lua_pushboolean(L, true);
 		return 1;
 	}
 
@@ -819,9 +786,8 @@ static int header_writer_write_header(lua_State *L)
 		response->un.resp.any.payload =
 			lua_tolstring(L, 4, &payload_len);
 		response->un.resp.any.payload_len = payload_len;
-	} else {
+	} else
 		response->un.resp.any.payload_len = 0;
-	}
 
 	response->un.resp.any.is_last_send = is_last;
 	response->sent_something = true;
@@ -829,23 +795,12 @@ static int header_writer_write_header(lua_State *L)
 		&postprocess_lua_req_first, shuttle);
 	wait_for_lua_shuttle_return(response);
 
-	if (is_last)
-		lua_pushnil(L);
-	else if (response->cancelled) {
-		lua_createtable(L, 0, 1);
-		lua_pushcfunction(L, payload_writer_write_nop);
-		lua_setfield(L, -2, "write");
-	} else {
-		lua_createtable(L, 0, 2);
-		lua_pushcfunction(L, payload_writer_write);
-		lua_setfield(L, -2, "write");
-		lua_pushlightuserdata(L, shuttle);
-		lua_setfield(L, -2, "shuttle");
-	}
+	/* Returning Lua true if connection has already been closed. */
+	lua_pushboolean(L, response->cancelled);
 	return 1;
 
 Error: /* FIXME: Error message? */
-	lua_pushnil(L);
+	lua_pushboolean(L, true);
 	return 1;
 }
 
