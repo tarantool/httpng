@@ -266,7 +266,7 @@ local function ws_app_handler(req, io)
 	local payload = [[
 <html><head><title>Example WebSockets Application</title></head><body>
 <script>
-	webSocket = new WebSocket('wss://localhost:7890/lua_ws_server');
+	webSocket = new WebSocket('wss://localhost:7890/ws_server');
 	sendCounter = 0;
 	sendLimit = 10;
 	function sendOne() {
@@ -379,12 +379,12 @@ local httpng_lib = require "httpng"
 local init_func = httpng_lib.cfg
 
 local lua_sites = {
-	{['path'] = '/lua_large', ['handler'] = large_handler},
-	{['path'] = '/lua_hello', ['handler'] = hello_handler},
-	{['path'] = '/lua_multi', ['handler'] = multi_handler},
-	{['path'] = '/lua_req',   ['handler'] = req_handler},
-	{['path'] = '/lua_ws_server', ['handler'] = ws_server_handler},
-	{['path'] = '/lua_ws_app', ['handler'] = ws_app_handler},
+	{['path'] = '/hello',     ['handler'] = hello_handler},
+	{['path'] = '/large',     ['handler'] = large_handler},
+	{['path'] = '/multi',     ['handler'] = multi_handler},
+	{['path'] = '/req',       ['handler'] = req_handler},
+	{['path'] = '/ws_server', ['handler'] = ws_server_handler},
+	{['path'] = '/ws_app',    ['handler'] = ws_app_handler},
 	{['path'] = '/post_helper', ['handler'] = post_helper_handler},
 	{['path'] = '/post_test', ['handler'] = post_test_handler},
 	{['path'] = '/put',       ['handler'] = put_handler},
