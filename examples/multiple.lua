@@ -78,7 +78,7 @@ local function large_handler(req, io)
 	local headers = {
 		['content-type'] = 'text/plain; charset=utf-8',
 		--['content-length'] = #payload, -- won't work, must be string
-		['content-length'] = string.format("%d", #payload),
+		['content-length'] = string.format('%d', #payload),
 		['x-custom-header'] = 'foo',
 	}
 
@@ -103,7 +103,7 @@ local function multi_handler(req, io)
 	counter = 0
 	for k, v in s:pairs() do
 		--io:write(v.desc, false) --works but w/o newlines
-		local closed = io:write(string.format("%s\n",
+		local closed = io:write(string.format('%s\n',
 			v.desc), false)
 		if closed then
 			-- Connection has already been closed
@@ -142,7 +142,7 @@ local function req_handler(req, io)
 	local payload
 	local req_query = get_query(req)
 	if req_query then
-		local query_str = string.match(req_query, "^?id=%d+")
+		local query_str = string.match(req_query, '^?id=%d+')
 		if query_str then
 			local id_str = string.sub(query_str, 5, -1)
 			local id = tonumber(id_str)
@@ -375,27 +375,30 @@ local function put_handler(req, io)
 	io:write_header(200, headers, payload, true)
 end
 
-local httpng_lib = require "httpng"
+local httpng_lib = require 'httpng'
 local init_func = httpng_lib.cfg
 
 local lua_sites = {
-	{['path'] = '/hello',     ['handler'] = hello_handler},
-	{['path'] = '/large',     ['handler'] = large_handler},
-	{['path'] = '/multi',     ['handler'] = multi_handler},
-	{['path'] = '/req',       ['handler'] = req_handler},
-	{['path'] = '/ws_server', ['handler'] = ws_server_handler},
-	{['path'] = '/ws_app',    ['handler'] = ws_app_handler},
-	{['path'] = '/post_helper', ['handler'] = post_helper_handler},
-	{['path'] = '/post_test', ['handler'] = post_test_handler},
-	{['path'] = '/put',       ['handler'] = put_handler},
+	{path = '/hello',       handler = hello_handler},
+	{path = '/large',       handler = large_handler},
+	{path = '/multi',       handler = multi_handler},
+	{path = '/req',         handler = req_handler},
+	{path = '/ws_server',   handler = ws_server_handler},
+	{path = '/ws_app',      handler = ws_app_handler},
+	{path = '/post_helper', handler = post_helper_handler},
+	{path = '/post_test',   handler = post_test_handler},
+	{path = '/put',         handler = put_handler},
 }
 
 print '\n\n\nFilling in test spaces completed, launching HTTP server...\n\n'
 init_func({
-	['threads'] = 4,
-	['max_conn_per_thread'] = 64,
-	['shuttle_size'] = 1024,
-	['max_body_len'] = 16 * 1024 * 1024,
-	['use_body_split'] = true,
-	['sites'] = lua_sites,
+	threads = 4,
+	max_conn_per_thread = 64,
+	shuttle_size = 1024,
+	max_body_len = 16 * 1024 * 1024,
+	use_body_split = true,
+	listen = {
+		{ port = 7890 },
+	},
+	sites = lua_sites,
 })
