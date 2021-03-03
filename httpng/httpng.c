@@ -80,7 +80,7 @@
 #define MAX_shuttle_size (16 * 1024 * 1024)
 #define MAX_max_body_len (64ULL * 1024 * 1024 * 1024)
 
-#define DEFAULT_LISTEN_PORT 7890
+#define DEFAULT_LISTEN_PORT 8080
 
 struct listener_ctx;
 
