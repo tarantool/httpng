@@ -23,7 +23,8 @@ function(build_module module files)
 endfunction()
 
 add_subdirectory(third_party/wslay)
-set(WSLAY_INCLUDE_DIRS "${CMAKE_CURRENT_SOURCE_DIR}/third_party/wslay/lib/includes")
+set(WSLAY_INCLUDE_DIRS "${CMAKE_CURRENT_SOURCE_DIR}/third_party/wslay/lib/includes"
+                       "${CMAKE_CURRENT_BINARY_DIR}/third_party/wslay/lib/includes")
 
 set(USE_STATIC_WSLAY ON)
 
