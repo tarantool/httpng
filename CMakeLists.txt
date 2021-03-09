@@ -16,10 +16,10 @@ function(build_module module files)
     add_library(${module} SHARED ${files})
     set_target_properties(${module} PROPERTIES PREFIX "")
     #    add_dependencies(${module} api)
-    if(TARGET_OS_DARWIN)
+    if(${CMAKE_SYSTEM_NAME} STREQUAL "Darwin")
         set_target_properties(${module} PROPERTIES LINK_FLAGS
             "-undefined dynamic_lookup")
-    endif(TARGET_OS_DARWIN)
+    endif()
 endfunction()
 
 add_subdirectory(third_party/wslay)
