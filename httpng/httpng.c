@@ -1563,7 +1563,8 @@ static int lua_req_handler(lua_h2o_handler_t *self, h2o_req_t *req)
 		response->un.req.path_len);
 
 	static_assert(LUA_QUERY_NONE <
-		(1ULL << (8 * sizeof(response->un.req.query_at))));
+		(1ULL << (8 * sizeof(response->un.req.query_at))),
+		".query_at field is not large enough to store LUA_QUERY_NONE");
 	response->un.req.query_at = (req->query_at == SIZE_MAX)
 		? LUA_QUERY_NONE : req->query_at;
 	response->un.req.version_major = req->version >> 8;
@@ -1886,10 +1887,19 @@ static int open_listener_ipv4(const char *addr_str, uint16_t port)
 	}
 	addr.sin_port = htons(port);
 
-	/* FIXME: Do all OSes we care about support SOCK_CLOEXEC? */
-	if ((fd = socket(AF_INET, SOCK_STREAM | SOCK_CLOEXEC, 0)) == -1) {
+	int flags = SOCK_STREAM;
+#ifdef SOCK_CLOEXEC
+	flags |= SOCK_CLOEXEC;
+#endif /* SOCK_CLOEXEC */
+	if ((fd = socket(AF_INET, flags, 0)) == -1) {
 		return -1;
 	}
+#ifndef SOCK_CLOEXEC
+	if (fcntl(fd, F_SETFD, FD_CLOEXEC) < 0) {
+		close(fd);
+		return -1;
+	}
+#endif /* SOCK_CLOEXEC */
 
 	int reuseaddr_flag = 1;
 	if (setsockopt(fd, SOL_SOCKET, SO_REUSEADDR, &reuseaddr_flag,
