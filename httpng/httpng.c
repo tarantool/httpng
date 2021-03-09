@@ -1410,6 +1410,7 @@ lua_fiber_func(va_list ap)
 	lua_setfield(L, -2, "method");
 	lua_pushboolean(L, !!response->un.req.ws_client_key_len);
 	lua_setfield(L, -2, "is_websocket");
+	const int lua_state_ref = response->lua_state_ref;
 	if (fill_received_headers_and_body(L, shuttle)) {
 		free_lua_shuttle_from_tx(shuttle);
 		goto Done;
@@ -1434,7 +1435,6 @@ lua_fiber_func(va_list ap)
 	lua_createtable(L, 0, 2);
 	lua_setfield(L, -2, "headers");
 
-	const int lua_state_ref = response->lua_state_ref;
 	if (lua_pcall(L, 2, 1, 0) != LUA_OK) {
 		/* FIXME: Should probably log this instead(?) */
 		fprintf(stderr, "User handler for \"\%s\" failed with error "
