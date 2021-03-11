@@ -1656,6 +1656,7 @@ static int lua_req_handler(lua_h2o_handler_t *self, h2o_req_t *req)
 
 	response->sent_something = false;
 	response->cancelled = false;
+	response->upgraded_to_websocket = false;
 	response->waiter = NULL;
 	response->un.req.lua_handler_ref = self->lua_handler_ref;
 	response->site_path = self->path;
@@ -1671,7 +1672,6 @@ static int lua_req_handler(lua_h2o_handler_t *self, h2o_req_t *req)
 		return 0;
 	}
 	shuttle->anchor->user_free_shuttle = &free_shuttle_lua;
-	response->upgraded_to_websocket = false;
 
 	return 0;
 }
