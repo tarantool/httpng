@@ -1373,7 +1373,7 @@ static inline void process_handler_success_not_ws_with_send(lua_State *L,
 					get_default_http_code(response);
 		}
 		lua_getfield(L, -2, "headers");
-		fill_http_headers(L, response, -2);
+		fill_http_headers(L, response, lua_gettop(L));
 		lua_pop(L, 2); /* headers, status. */
 		response->sent_something = true;
 	}
