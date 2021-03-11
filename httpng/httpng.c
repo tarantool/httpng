@@ -1870,6 +1870,7 @@ static inline void set_cloexec(int fd)
 	 * child processes ? */
 	int result = fcntl(fd, F_SETFD, FD_CLOEXEC);
 	assert(result != -1);
+	(void)result; /* To build w/disabled assert(). */
 }
 
 /* Returns file descriptor or -1 on error. */
@@ -2325,7 +2326,7 @@ Skip_listen:
 			if ((conf.listener_cfgs[listener_idx].fd =
 
 			    /* FIXME: Make customizable. */
-			    open_listener_ipv4("127.0.0.1", port)) == -1)
+			    open_listener_ipv4("0.0.0.0", port)) == -1)
 				goto Error;
 	}
 
