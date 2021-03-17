@@ -57,3 +57,5 @@ build_module(sample_site examples/sample_site.c
 	${HEADERS})
 target_link_libraries(sample_site httpng msgpuck)
 
+# Install library
+install(TARGETS httpng LIBRARY DESTINATION ${TARANTOOL_INSTALL_LIBDIR})
