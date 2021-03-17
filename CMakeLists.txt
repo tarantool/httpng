@@ -52,3 +52,6 @@ else (HTTPNG_USE_LIBUV)
 endif (HTTPNG_USE_LIBUV)
 
 target_link_libraries(httpng xtm_api_static)
+
+# Install library
+install(TARGETS httpng LIBRARY DESTINATION ${TARANTOOL_INSTALL_LIBDIR})
