@@ -227,6 +227,14 @@ static void fill_http_headers(lua_State *L, lua_response_t *response,
 	int param_lua_idx);
 static int payload_writer_write_nop(lua_State *L);
 
+static inline void
+xtm_fun_invoke_all(struct xtm_queue *queue)
+{
+	int rc = xtm_fun_invoke(queue, 1);
+	while (rc >= 0 && xtm_msg_count(queue) > 0)
+		rc = xtm_fun_invoke(queue, 0);
+}
+
 /* FIXME: Use lua_tointegerx() when we would no longer care about
  * older Tarantool versions. */
 static inline lua_Integer my_lua_tointegerx(lua_State *L, int idx, int *ok)
