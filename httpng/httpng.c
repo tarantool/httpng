@@ -301,6 +301,14 @@ static void fill_http_headers(lua_State *L, lua_response_t *response,
 extern void stubborn_dispatch_uni(struct xtm_queue *queue, void *func,
 	void *param);
 
+static inline void
+xtm_fun_invoke_all(struct xtm_queue *queue)
+{
+	int rc = xtm_fun_invoke(queue, 1);
+	while (rc >= 0 && xtm_msg_count(queue) > 0)
+		rc = xtm_fun_invoke(queue, 0);
+}
+
 /* Launched in HTTP server thread. */
 static inline thread_ctx_t *get_curr_thread_ctx(void)
 {
