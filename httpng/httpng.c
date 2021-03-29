@@ -1430,6 +1430,42 @@ static inline void process_handler_success_not_ws_with_send(lua_State *L,
 		 * it would clean up because we have set fiber_done=true */
 }
 
+
+/* Launched in TX thread. */
+static int get_query(lua_State *L)
+{
+	/* Lua parameters: self. */
+	const unsigned num_params = lua_gettop(L);
+	if (num_params < 1)
+		goto Error;
+
+	/* Do not extract data from shuttle -
+	 * they may have already been overwritten. */
+
+	lua_getfield(L, -1, "query_at");
+	if (!lua_isnumber(L, -1))
+		goto Error;
+	const int64_t query_at = lua_tointeger(L, -1);
+	if (-1 == query_at) {
+		lua_pushnil(L);
+		return 1;
+	}
+	lua_getfield(L, -2, "path");
+	if (!lua_isstring(L, -1))
+		goto Error;
+
+	size_t len;
+	const char *path = lua_tolstring(L, -1, &len);
+
+	/* N.b.: query_at is 1-based; we also skip '?'. */
+	lua_pushlstring(L, path + query_at, len - query_at);
+	return 1;
+
+Error: /* FIXME: Error message */
+	lua_pushnil(L);
+	return 1;
+}
+
 /* Launched in TX thread. */
 static int
 lua_fiber_func(va_list ap)
@@ -1456,6 +1492,9 @@ lua_fiber_func(va_list ap)
 		? -1 : (response->un.req.query_at + 1));
 
 	lua_setfield(L, -2, "query_at");
+	lua_pushcfunction(L, get_query);
+	lua_setfield(L, -2, "query");
+
 	lua_pushlstring(L, response->un.req.method,
 		response->un.req.method_len);
 	lua_setfield(L, -2, "method");

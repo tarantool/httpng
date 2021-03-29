@@ -113,14 +113,6 @@ local function multi_handler(req, io)
     --io:write(nil, true) -- also works
 end
 
--- For performance reasons only one string with path/query is passed from C.
-local function get_query(req)
-    if req.query_at == -1 then
-        return nil
-    end
-    return string.sub(req.path, req.query_at, -1)
-end
-
 local function req_handler(req, io)
     if (req.method ~= 'GET') then
         io:write_header(500, nil, 'Unsupported HTTP method', true)
@@ -133,11 +125,11 @@ local function req_handler(req, io)
     }
 
     local payload
-    local req_query = get_query(req)
+    local req_query = req:query()
     if req_query then
-        local query_str = string.match(req_query, '^?id=%d+')
+        local query_str = string.match(req_query, '^id=%d+')
         if query_str then
-            local id_str = string.sub(query_str, 5, -1)
+            local id_str = string.sub(query_str, 4, -1)
             local id = tonumber(id_str)
             if id then
                 local tuple = s:get(id)
