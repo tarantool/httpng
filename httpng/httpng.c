@@ -89,9 +89,12 @@ typedef struct {
 	struct listener_ctx *listener_ctxs;
 	struct xtm_queue *queue_to_tx;
 	struct xtm_queue *queue_from_tx;
+#ifndef USE_LIBUV
 	h2o_socket_t *sock_from_tx;
+#endif /* USE_LIBUV */
 #ifdef USE_LIBUV
 	uv_loop_t loop;
+	uv_poll_t uv_poll_from_tx;
 #endif /* USE_LIBUV */
 	unsigned num_connections;
 	unsigned idx;
@@ -139,7 +142,6 @@ typedef struct listener_ctx {
 	h2o_accept_ctx_t accept_ctx;
 #ifdef USE_LIBUV
 	uv_tcp_t uv_tcp_listener;
-	uv_poll_t uv_poll_from_tx;
 #else /* USE_LIBUV */
 	h2o_socket_t *sock;
 #endif /* USE_LIBUV */
@@ -158,6 +160,7 @@ typedef struct waiter {
 
 typedef struct {
 	char *path;
+	int lua_handler_ref;
 } lua_site_t;
 
 typedef struct {
@@ -300,6 +303,11 @@ static void fill_http_headers(lua_State *L, lua_response_t *response,
 /* Called when dispatch must not fail */
 extern void stubborn_dispatch_uni(struct xtm_queue *queue, void *func,
 	void *param);
+
+static inline bool lua_isstring_strict(lua_State *L, int idx)
+{
+	return lua_type(L, idx) == LUA_TSTRING;
+}
 
 static inline void
 xtm_fun_invoke_all(struct xtm_queue *queue)
@@ -1451,7 +1459,7 @@ static int get_query(lua_State *L)
 		return 1;
 	}
 	lua_getfield(L, -2, "path");
-	if (!lua_isstring(L, -1))
+	if (!lua_isstring_strict(L, -1))
 		goto Error;
 
 	size_t len;
@@ -2054,11 +2062,15 @@ static SSL_CTX *setup_ssl(const char *cert_file, const char *key_file)
 	SSL_CTX_set_options(ssl_ctx, SSL_OP_NO_SSLv2);
 
 	if (SSL_CTX_use_certificate_file(ssl_ctx, cert_file,
-	    SSL_FILETYPE_PEM) != 1)
+	    SSL_FILETYPE_PEM) != 1) {
+		SSL_CTX_free(ssl_ctx);
 		return NULL;
+	}
 	if (SSL_CTX_use_PrivateKey_file(ssl_ctx, key_file,
-	    SSL_FILETYPE_PEM) != 1)
+	    SSL_FILETYPE_PEM) != 1) {
+		SSL_CTX_free(ssl_ctx);
 		return NULL;
+	}
 
 /* Setup protocol negotiation methods. */
 #if H2O_USE_NPN
@@ -2080,24 +2092,20 @@ static SSL_CTX *setup_ssl(const char *cert_file, const char *key_file)
 	return ssl_ctx;
 }
 
-static void *worker_func(void *param)
+/* Returns false in case of error. */
+static bool init_worker_thread(unsigned thread_idx)
 {
-	const unsigned thread_idx = (unsigned)(uintptr_t)param;
 	thread_ctx_t *const thread_ctx = &conf.thread_ctxs[thread_idx];
-	curr_thread_ctx = thread_ctx;
 	thread_ctx->idx = thread_idx;
-	thread_ctx->tid = pthread_self();
 	if ((thread_ctx->queue_from_tx = xtm_create(QUEUE_FROM_TX_ITEMS))
 	    == NULL)
 		/* FIXME: Report. */
-		return NULL;
+		goto alloc_xtm_failed;
 
 	if ((thread_ctx->listener_ctxs = (listener_ctx_t *)
-	    malloc(conf.num_listeners * sizeof(listener_ctx_t))) == NULL) {
+	    malloc(conf.num_listeners * sizeof(listener_ctx_t))) == NULL)
 		/* FIXME: Report. */
-		xtm_delete(thread_ctx->queue_from_tx);
-		return NULL;
-	}
+		goto alloc_ctxs_failed;
 
 	memset(&thread_ctx->ctx, 0, sizeof(thread_ctx->ctx));
 #ifdef USE_LIBUV
@@ -2119,12 +2127,9 @@ static void *worker_func(void *param)
 	listener_ctx->accept_ctx.ctx = &thread_ctx->ctx;
 	listener_ctx->accept_ctx.hosts = conf.globalconf.hosts;
 	if (thread_idx) {
-		if ((listener_ctx->fd = dup(listener_cfg->fd)) == -1) {
+		if ((listener_ctx->fd = dup(listener_cfg->fd)) == -1)
 			/* FIXME: Should report. */
-			free(thread_ctx->listener_ctxs);
-			xtm_delete(thread_ctx->queue_from_tx);
-			return NULL;
-		}
+			goto dup_failed;
 		set_cloexec(listener_ctx->fd);
 	} else {
 		listener_ctx->fd = listener_cfg->fd;
@@ -2132,20 +2137,24 @@ static void *worker_func(void *param)
 
 #ifdef USE_LIBUV
 	if (uv_tcp_init(thread_ctx->ctx.loop, &listener_ctx->uv_tcp_listener))
-		goto Error;
+		/* FIXME: Should report. */
+		goto uv_tcp_init_failed;
 	if (uv_tcp_open(&listener_ctx->uv_tcp_listener, listener_ctx->fd))
-		goto Error;
+		/* FIXME: Should report. */
+		goto uv_tcp_open_failed;
 	listener_ctx->uv_tcp_listener.data = listener_ctx;
 	if (uv_listen((uv_stream_t *)&listener_ctx->uv_tcp_listener,
 	    SOMAXCONN, on_accept))
-		goto Error;
+		/* FIXME: Should report. */
+		goto uv_listen_failed;
 
-	if (uv_poll_init(thread_ctx->ctx.loop, &listener_ctx->uv_poll_from_tx,
+	if (uv_poll_init(thread_ctx->ctx.loop, &thread_ctx->uv_poll_from_tx,
 	    xtm_fd(thread_ctx->queue_from_tx)))
-		goto Error;
-	if (uv_poll_start(&listener_ctx->uv_poll_from_tx, UV_READABLE,
+		/* FIXME: Should report. */
+		goto uv_poll_init_failed;
+	if (uv_poll_start(&thread_ctx->uv_poll_from_tx, UV_READABLE,
 	    on_call_from_tx))
-		goto Error;
+		goto uv_poll_start_failed;
 #else /* USE_LIBUV */
 	listener_ctx->sock = h2o_evloop_socket_create(thread_ctx->ctx.loop,
 		listener_ctx->fd, H2O_SOCKET_FLAG_DONT_READ);
@@ -2155,30 +2164,94 @@ static void *worker_func(void *param)
 		h2o_evloop_socket_create(thread_ctx->ctx.loop,
 			xtm_fd(thread_ctx->queue_from_tx),
 			H2O_SOCKET_FLAG_DONT_READ);
+#endif /* USE_LIBUV */
+
+	return true;
+
+#ifdef USE_LIBUV
+uv_poll_start_failed:
+	uv_close((uv_handle_t *)&thread_ctx->uv_poll_from_tx, NULL);
+uv_poll_init_failed:
+uv_listen_failed:
+uv_tcp_open_failed:
+	uv_close((uv_handle_t *)&listener_ctx->uv_tcp_listener, NULL);
+
+uv_tcp_init_failed:
+	if (thread_idx)
+		close(listener_ctx->fd);
+#endif /* USE_LIBUV */
+
+dup_failed:
+#ifdef USE_LIBUV
+	uv_loop_close(&thread_ctx->loop);
+#else /* USE_LIBUV */
+	h2o_evloop_destroy(thread_ctx->ctx.loop);
+#endif /* USE_LIBUV */
+	h2o_context_dispose(&thread_ctx->ctx);
+
+	free(thread_ctx->listener_ctxs);
+alloc_ctxs_failed:
+	xtm_delete(thread_ctx->queue_from_tx);
+alloc_xtm_failed:
+	return false;
+}
+
+static void *worker_func(void *param)
+{
+	/* FIXME: SIGTERM should terminate loop. */
+	const unsigned thread_idx = (unsigned)(uintptr_t)param;
+	thread_ctx_t *const thread_ctx = &conf.thread_ctxs[thread_idx];
+	curr_thread_ctx = thread_ctx;
+#ifdef USE_LIBUV
+	uv_run(&thread_ctx->loop, UV_RUN_DEFAULT);
+#else /* USE_LIBUV */
+
+	/* FIXME: Need more than one. */
+	listener_ctx_t *listener_ctx = &thread_ctx->listener_ctxs[0];
 
 	h2o_socket_read_start(thread_ctx->sock_from_tx, on_call_from_tx);
 	h2o_socket_read_start(listener_ctx->sock, on_accept);
-#endif /* USE_LIBUV */
-
-	/* For the fiber in TX thread to see everything we have initialized. */
-	__sync_synchronize();
-
-	/* FIXME: SIGTERM should terminate loop. */
-#ifdef USE_LIBUV
-	uv_run(&thread_ctx->loop, UV_RUN_DEFAULT);
-Error:
-	; /* FIXME: Free resources etc */
-#else /* USE_LIBUV */
 	h2o_evloop_t *loop = thread_ctx->ctx.loop;
 	while (h2o_evloop_run(loop, INT32_MAX) == 0)
 		;
 #endif /* USE_LIBUV */
 
-	/* FIXME: Should use h2o_socket_read_stop(). */
+	return NULL;
+}
+
+static void deinit_worker_thread(unsigned thread_idx)
+{
+	thread_ctx_t *const thread_ctx = &conf.thread_ctxs[thread_idx];
+
+	/* FIXME: Need more than one. */
+	listener_ctx_t *const listener_ctx = &thread_ctx->listener_ctxs[0];
+
+#ifdef USE_LIBUV
+	uv_read_stop((uv_stream_t *)&listener_ctx->uv_tcp_listener);
+	uv_poll_stop(&thread_ctx->uv_poll_from_tx);
+	uv_close((uv_handle_t *)&thread_ctx->uv_poll_from_tx, NULL);
+	uv_close((uv_handle_t *)&listener_ctx->uv_tcp_listener, NULL);
+#else /* USE_LIBUV */
+	h2o_socket_read_stop(listener_ctx->sock);
+	h2o_socket_read_stop(thread_ctx->sock_from_tx);
+	h2o_socket_close(listener_ctx->sock);
+	h2o_socket_close(thread_ctx->sock_from_tx);
+	h2o_evloop_t *const loop = thread_ctx->ctx.loop;
+	h2o_evloop_run(loop, 0); /* To actually free memory. */
+#endif /* USE_LIBUV */
+
+#ifdef USE_LIBUV
+	uv_loop_close(&thread_ctx->loop);
+#else /* USE_LIBUV */
+	h2o_evloop_destroy(loop);
+#endif /* USE_LIBUV */
+	h2o_context_dispose(&thread_ctx->ctx);
+
+	if (thread_idx)
+		close(listener_ctx->fd);
 	/* FIXME: Should flush these queues first. */
 	xtm_delete(thread_ctx->queue_from_tx);
 	free(thread_ctx->listener_ctxs);
-	return NULL;
 }
 
 static int
@@ -2203,6 +2276,8 @@ tx_fiber_func(va_list ap)
 /* Lua parameters: lua_sites, function_to_call, function_param */
 int cfg(lua_State *L)
 {
+	const char *lerr = NULL; /* Error message for caller. */
+	unsigned c_handlers = 0;
 	enum {
 		LUA_STACK_IDX_TABLE = 1,
 		LUA_STACK_IDX_LUA_SITES = -2,
@@ -2210,7 +2285,7 @@ int cfg(lua_State *L)
 	memset(&conf.globalconf, 0, sizeof(conf.globalconf));
 
 	if (lua_gettop(L) < 1)
-		goto Error;
+		return luaL_error(L, "No parameters specified");
 
 	lua_getfield(L, LUA_STACK_IDX_TABLE, "c_sites_func");
 	const path_desc_t *path_descs;
@@ -2219,15 +2294,16 @@ int cfg(lua_State *L)
 		goto Skip_c_sites;
 	}
 	if (lua_type(L, -1) != LUA_TFUNCTION)
-		goto Error;
+		return luaL_error(L, "c_sites_func must be function");
 
 	lua_getfield(L, LUA_STACK_IDX_TABLE, "c_sites_func_param");
 	if (lua_pcall(L, 1, 1, 0) != LUA_OK)
-		goto Error;
+		return luaL_error(L, "c_sites_func() failed");
 
 	int is_integer;
 	if (!lua_islightuserdata(L, -1))
-		goto Error;
+		return luaL_error(L,
+			"c_sites_func() returned wrong data type");
 	path_descs = (path_desc_t *)lua_touserdata(L, -1);
 Skip_c_sites:
 
@@ -2239,14 +2315,15 @@ Skip_c_sites:
 	else { \
 		name = my_lua_tointegerx(L, -1, &is_integer); \
 		if (!is_integer) \
-			goto Error; \
+			return luaL_error(L, \
+				"parameter " #name " is not a number"); \
 		if (name > MAX_##name) \
 			name = MAX_##name; \
 		else if (name < MIN_##name) \
 			name = MIN_##name; \
 	}
 
-	/* N. b.: These macros can "goto Error". */
+	/* N. b.: These macros can use return. */
 	PROCESS_OPTIONAL_PARAM(threads);
 	PROCESS_OPTIONAL_PARAM(max_conn_per_thread);
 	PROCESS_OPTIONAL_PARAM(shuttle_size);
@@ -2283,7 +2360,8 @@ Skip_c_sites:
 
 	if ((conf.thread_ctxs = (thread_ctx_t *)malloc(conf.num_threads *
 	    sizeof(thread_ctx_t))) == NULL)
-		goto Error;
+		return luaL_error(L,
+			"Failed to allocate memory for thread contexts");
 
 	h2o_config_init(&conf.globalconf);
 	conf.globalconf.max_request_entity_size = max_body_len;
@@ -2292,17 +2370,23 @@ Skip_c_sites:
 	h2o_hostconf_t *hostconf = h2o_config_register_host(&conf.globalconf,
 		h2o_iovec_init(H2O_STRLIT("default")),
 		H2O_DEFAULT_PORT_FOR_PROTOCOL_USED);
-	if (hostconf == NULL)
-		goto Error;
+	if (hostconf == NULL) {
+		lerr = "libh2o host registration failed";
+		goto register_host_failed;
+	}
 
 	if (path_descs != NULL) {
 		const path_desc_t *path_desc = path_descs;
-		if (path_desc->path == NULL)
-			goto Error; /* Need at least one */
+		if (path_desc->path == NULL) {
+			/* Need at least one. */
+			lerr = "Empty C sites list";
+			goto c_desc_empty;
+		}
 
 		do {
 			register_handler(hostconf, path_desc->path,
 				path_desc->handler);
+			++c_handlers;
 		} while ((++path_desc)->path != NULL);
 	}
 
@@ -2310,37 +2394,65 @@ Skip_c_sites:
 	 * when shutting down. */
 	lua_site_t *lua_sites = NULL;
 	lua_getfield(L, LUA_STACK_IDX_TABLE, "sites");
-	unsigned lua_site_idx = 0;
+	unsigned lua_site_count = 0;
 	if (lua_isnil(L, -1))
 		goto Skip_lua_sites;
+	if (!lua_istable(L, -1)) {
+		lerr = "sites is not a table";
+		goto invalid_sites_table;
+	}
 	lua_pushnil(L); /* Start of table. */
 	while (lua_next(L, LUA_STACK_IDX_LUA_SITES)) {
+		if (!lua_istable(L, -1)) {
+			lerr = "sites is not a table of tables";
+			goto invalid_sites;
+		}
 		lua_getfield(L, -1, "path");
+		if (lua_isnil(L, -1)) {
+			lerr = "sites[].path is nil";
+			goto invalid_sites;
+		}
+		if (!lua_isstring_strict(L, -1)) {
+			/* Numbers are converted automatically,
+			 * we do not want that. */
+			lerr = "sites[].path is not a string";
+			goto invalid_sites;
+		}
 		size_t path_len;
 		const char *const path = lua_tolstring(L, -1, &path_len);
-		if (path == NULL)
-			goto Error;
+		if (path == NULL) {
+			lerr = "sites[].path is not a string";
+			goto invalid_sites;
+		}
 
 		lua_site_t *const new_lua_sites =
 			realloc(lua_sites, sizeof(lua_site_t) *
-				(lua_site_idx + 1));
-		if (new_lua_sites == NULL)
-			goto Error;
+				(lua_site_count + 1));
+		if (new_lua_sites == NULL) {
+			lerr = "Failed to allocate memory "
+				"for Lua sites C array";
+			goto invalid_sites;
+		}
 		lua_sites = new_lua_sites;
-		lua_site_t *const lua_site = &lua_sites[lua_site_idx];
-		if ((lua_site->path = malloc(path_len + 1)) == NULL)
-			goto Error;
+		lua_site_t *const lua_site = &lua_sites[lua_site_count++];
+		lua_site->lua_handler_ref = LUA_REFNIL;
+		if ((lua_site->path = malloc(path_len + 1)) == NULL) {
+			lerr = "Failed to allocate memory "
+				"for Lua sites C array path";
+			goto invalid_sites;
+		}
 		memcpy(lua_site->path, path, path_len);
 		lua_site->path[path_len] = 0;
 
 		lua_getfield(L, -2, "handler");
-		if (lua_type(L, -1) != LUA_TFUNCTION)
-			goto Error;
+		if (lua_type(L, -1) != LUA_TFUNCTION) {
+			lerr = "sites[].handler is not a function";
+			goto invalid_sites;
+		}
 
 		register_lua_handler(hostconf, lua_site->path, path_len,
-			luaL_ref(L, LUA_REGISTRYINDEX));
-
-		++lua_site_idx;
+			(lua_site->lua_handler_ref =
+				luaL_ref(L, LUA_REGISTRYINDEX)));
 
 		/* Remove path string and site array value,
 		 * keep key for next iteration. */
@@ -2351,40 +2463,57 @@ Skip_lua_sites:
 	lua_getfield(L, LUA_STACK_IDX_TABLE, "handler");
 	if (lua_isnil(L, -1))
 		goto Skip_main_lua_handler;
-	if (lua_type(L, -1) != LUA_TFUNCTION)
-		goto Error;
+	if (lua_type(L, -1) != LUA_TFUNCTION) {
+		lerr = "handler is not a function";
+		goto invalid_handler;
+	}
 
 	lua_site_t *const new_lua_sites = realloc(lua_sites,
-		sizeof(lua_site_t) * (lua_site_idx + 1));
-	if (new_lua_sites == NULL)
-		goto Error;
+		sizeof(lua_site_t) * (lua_site_count + 1));
+	if (new_lua_sites == NULL) {
+		lerr = "Failed to allocate memory for Lua sites C array";
+		goto invalid_handler;
+	}
 	lua_sites = new_lua_sites;
-	lua_site_t *const lua_site = &lua_sites[lua_site_idx];
-	if ((lua_site->path = malloc(1 + 1)) == NULL)
-		goto Error;
+	lua_site_t *const lua_site = &lua_sites[lua_site_count++];
+	lua_site->lua_handler_ref = LUA_REFNIL;
+	if ((lua_site->path = malloc(1 + 1)) == NULL) {
+		lerr = "Failed to allocate memory for Lua sites C array path";
+		goto invalid_handler;
+	}
 	lua_site->path[0] = '/';
 	lua_site->path[1] = 0;
 	register_lua_handler(hostconf, lua_site->path, 2,
-		luaL_ref(L, LUA_REGISTRYINDEX));
-	++lua_site_idx;
+		(lua_site->lua_handler_ref = luaL_ref(L, LUA_REGISTRYINDEX)));
 
 Skip_main_lua_handler:
-	;
+	if (c_handlers + lua_site_count == 0) {
+		lerr = "No handlers specified";
+		goto no_handlers;
+	}
 	unsigned short port = DEFAULT_LISTEN_PORT;
 	lua_getfield(L, LUA_STACK_IDX_TABLE, "listen");
 	if (lua_isnil(L, -1))
 		goto Skip_listen;
-	if (lua_type(L, -1) != LUA_TTABLE)
-		goto Error;
+	if (lua_type(L, -1) != LUA_TTABLE) {
+		lerr = "listen is not a table";
+		goto listen_invalid;
+	}
 
 	lua_pushnil(L); /* Start of table. */
 	while (lua_next(L, -2)) {
+		if (!lua_istable(L, -1)) {
+			lerr = "listen is not a table of tables";
+			goto listen_invalid;
+		}
 		lua_getfield(L, -1, "port");
 		int is_integer;
 		const uint64_t candidate =
 			my_lua_tointegerx(L, -1, &is_integer);
-		if (!is_integer || !candidate || candidate >= 65535)
-			goto Error;
+		if (!is_integer || !candidate || candidate >= 65535) {
+			lerr = "invalid port specified";
+			goto listen_invalid;
+		}
 		/* Silently overwrite for now (FIXME: Multilisten). */
 		port = candidate;
 		/* Remove port and value, keep key for next iteration. */
@@ -2397,9 +2526,8 @@ Skip_listen:
 	/* FIXME: Should use customizable file names. */
 	if (USE_HTTPS && (ssl_ctx = setup_ssl("examples/cert.pem",
 	    "examples/key.pem")) == NULL) {
-		fprintf(stderr,
-			"setup_ssl() failed (cert/key files not found?)\n");
-		goto Error;
+		lerr = "setup_ssl() failed (cert/key files not found?)";
+		goto ssl_fail;
 	}
 
 #if 0
@@ -2415,8 +2543,10 @@ Skip_listen:
 	 * IPv4/IPv6, several IPs etc.) */
 	conf.num_listeners = 1; /* FIXME: Make customizable. */
 	if ((conf.listener_cfgs = (listener_cfg_t *)
-	    malloc(conf.num_listeners * sizeof(listener_cfg_t))) == NULL)
-		goto Error;
+	    malloc(conf.num_listeners * sizeof(listener_cfg_t))) == NULL) {
+		lerr = "Failed to allocate memory for listener cfgs";
+		goto listeners_alloc_fail;
+	}
 
 	{
 		unsigned listener_idx;
@@ -2426,30 +2556,36 @@ Skip_listen:
 			if ((conf.listener_cfgs[listener_idx].fd =
 
 			    /* FIXME: Make customizable. */
-			    open_listener_ipv4("0.0.0.0", port)) == -1)
-				goto Error;
+			    open_listener_ipv4("0.0.0.0", port)) == -1) {
+				lerr = "Failed to listen";
+				goto listeners_fail;
+			}
 	}
 
 	if ((conf.tx_fiber_ptrs = (struct fiber **)
-	    malloc(sizeof(struct fiber *) * conf.num_threads)) == NULL)
-		goto Error;
+	    malloc(sizeof(struct fiber *) * conf.num_threads)) == NULL) {
+		lerr = "Failed to allocate memory for fiber pointers array";
+		goto fibers_fail_alloc;
+	}
 
-	{
-		unsigned i;
-		for (i = 0; i < conf.num_threads; ++i) {
-			if ((conf.thread_ctxs[i].queue_to_tx =
-			    xtm_create(QUEUE_TO_TX_ITEMS)) == NULL)
-				goto Error;
-			conf.thread_ctxs[i].num_connections = 0;
-
-			char name[32];
-			sprintf(name, "tx_h2o_fiber_%u", i);
-			if ((conf.tx_fiber_ptrs[i] =
-			    fiber_new(name, tx_fiber_func)) == NULL)
-				goto Error;
-			fiber_set_joinable(conf.tx_fiber_ptrs[i], true);
-			fiber_start(conf.tx_fiber_ptrs[i], i);
+	unsigned fiber_idx;
+	for (fiber_idx = 0; fiber_idx < conf.num_threads; ++fiber_idx) {
+		if ((conf.thread_ctxs[fiber_idx].queue_to_tx =
+		    xtm_create(QUEUE_TO_TX_ITEMS)) == NULL) {
+			lerr = "Failed to create xtm queue";
+			goto fibers_fail;
 		}
+		conf.thread_ctxs[fiber_idx].num_connections = 0;
+
+		char name[32];
+		sprintf(name, "tx_h2o_fiber_%u", fiber_idx);
+		if ((conf.tx_fiber_ptrs[fiber_idx] =
+		    fiber_new(name, tx_fiber_func)) == NULL) {
+			lerr = "Failed to create fiber";
+			goto fibers_fail;
+		}
+		fiber_set_joinable(conf.tx_fiber_ptrs[fiber_idx], true);
+		fiber_start(conf.tx_fiber_ptrs[fiber_idx], fiber_idx);
 	}
 
 	if (path_descs != NULL) {
@@ -2457,27 +2593,79 @@ Skip_listen:
 		do {
 			if (path_desc->init_userdata_in_tx != NULL &&
 			    path_desc->init_userdata_in_tx(
-				    path_desc->init_userdata_in_tx_param))
-				goto Error;
+				    path_desc->init_userdata_in_tx_param)) {
+				lerr = "Failed to init userdata";
+				goto userdata_init_fail;
+			}
 		} while ((++path_desc)->path != NULL);
 	}
 
-	/* Start processing HTTP requests and requests from TX thread. */
-	{
-		unsigned i;
-		for (i = 0; i < conf.num_threads; ++i) {
-			pthread_t tid;
-			if (pthread_create(&tid, NULL, worker_func,
-			    (void *)(uintptr_t)i))
-				goto Error;
+	unsigned thr_init_idx;
+	for (thr_init_idx = 0; thr_init_idx < conf.num_threads;
+	    ++thr_init_idx)
+		if (!init_worker_thread(thr_init_idx)) {
+			lerr = "Failed to init worker threads";
+			goto threads_init_fail;
 		}
+
+	__sync_synchronize();
+
+	/* Start processing HTTP requests and requests from TX thread. */
+	unsigned thr_launch_idx;
+	for (thr_launch_idx = 0; thr_launch_idx < conf.num_threads;
+	    ++thr_launch_idx)
+		if (pthread_create(&conf.thread_ctxs[thr_launch_idx].tid,
+		    NULL, worker_func, (void *)(uintptr_t)thr_launch_idx)) {
+			lerr = "Failed to launch worker threads";
+			goto threads_launch_fail;
+		}
+
+	return 0;
+
+threads_launch_fail:
+	;
+	unsigned idx;
+	/* FIXME: Should terminate already launched threads,
+	 * not yet implemented, this code would lock up. */
+	for (idx = 0; idx < thr_launch_idx; ++idx)
+		pthread_join(conf.thread_ctxs[idx].tid, NULL);
+
+threads_init_fail:
+	for (idx = 0; idx < thr_init_idx; ++idx)
+		deinit_worker_thread(idx);
+userdata_init_fail:
+fibers_fail:
+	conf.tx_fiber_should_work = 0;
+	for (idx = 0; idx < fiber_idx; ++idx)
+		fiber_cancel(conf.tx_fiber_ptrs[idx]);
+
+fibers_fail_alloc:
+	for (idx = 0; idx < conf.num_listeners; ++idx)
+		close(conf.listener_cfgs[idx].fd);
+listeners_fail:
+	free(conf.listener_cfgs);
+listeners_alloc_fail:
+	SSL_CTX_free(ssl_ctx);
+ssl_fail:
+listen_invalid:
+no_handlers:
+invalid_handler:
+invalid_sites:
+	for (idx = 0; idx < lua_site_count; ++idx) {
+		lua_site_t *const lua_site = &lua_sites[idx];
+		if (lua_site->lua_handler_ref != LUA_REFNIL)
+			luaL_unref(L, LUA_REGISTRYINDEX,
+				lua_site->lua_handler_ref);
+		free(lua_site->path);
 	}
-
-	return 0;
-
-Error:
-	/* FIXME: Release resources, report errors details. */
-	return 0;
+	free(lua_sites);
+invalid_sites_table:
+c_desc_empty:
+register_host_failed:
+	h2o_config_dispose(&conf.globalconf);
+	free(conf.thread_ctxs);
+	assert(lerr != NULL);
+	return luaL_error(L, lerr);
 }
 
 int deinit(lua_State *L)
