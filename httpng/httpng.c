@@ -655,11 +655,11 @@ static int payload_writer_write(lua_State *L)
 	/* Lua parameters: self, payload, is_last. */
 	const unsigned num_params = lua_gettop(L);
 	if (num_params < 2)
-		goto Error;
+		return luaL_error(L, "Not enough parameters");
 
 	lua_getfield(L, 1, "shuttle");
 	if (!lua_islightuserdata(L, -1))
-		goto Error;
+		return luaL_error(L, "shuttle is invalid");
 	shuttle_t *const shuttle = (shuttle_t *)lua_touserdata(L, -1);
 
 	lua_response_t *const response = (lua_response_t *)&shuttle->payload;
@@ -700,10 +700,6 @@ static int payload_writer_write(lua_State *L)
 
 	/* Returning Lua true if connection has already been closed. */
 	lua_pushboolean(L, response->cancelled);
-	return 1;
-
-Error: /* FIXME: Error message */
-	lua_pushboolean(L, true);
 	return 1;
 }
 
@@ -757,12 +753,12 @@ static int header_writer_write_header(lua_State *L)
 	/* Lua parameters: self, code, headers, payload, is_last. */
 	const unsigned num_params = lua_gettop(L);
 	if (num_params < 2)
-		goto Error;
+		return luaL_error(L, "Not enough parameters");
 
 	lua_getfield(L, 1, "shuttle");
 
 	if (!lua_islightuserdata(L, -1))
-		goto Error;
+		return luaL_error(L, "shuttle is invalid");
 	shuttle_t *const shuttle = (shuttle_t *)lua_touserdata(L, -1);
 
 	bool is_last;
@@ -774,10 +770,11 @@ static int header_writer_write_header(lua_State *L)
 	lua_response_t *const response = (lua_response_t *)&shuttle->payload;
 	take_shuttle_ownership_lua(response);
 	if (response->sent_something)
-		goto Error;
+		return luaL_error(L, "Handler has already written header");
 	if (response->cancelled) {
 		/* Can't send anything, connection has been closed.
-		 * Returning Lua true because connection has already been closed. */
+		 * Returning Lua true because connection has already
+		 * been closed. */
 		lua_pushboolean(L, true);
 		return 1;
 	}
@@ -786,7 +783,7 @@ static int header_writer_write_header(lua_State *L)
 	response->un.resp.first.http_code =
 		my_lua_tointegerx(L, 2, &is_integer);
 	if (!is_integer)
-		goto Error;
+		return luaL_error(L, "HTTP code is not an integer");
 
 	unsigned headers_lua_index;
 	if (num_params >= 3)
@@ -813,10 +810,6 @@ static int header_writer_write_header(lua_State *L)
 
 	/* Returning Lua true if connection has already been closed. */
 	lua_pushboolean(L, response->cancelled);
-	return 1;
-
-Error: /* FIXME: Error message? */
-	lua_pushboolean(L, true);
 	return 1;
 }
 
@@ -951,19 +944,18 @@ static int websocket_send_text(lua_State *L)
 	/* Lua parameters: self, payload. */
 	const unsigned num_params = lua_gettop(L);
 	if (num_params < 2)
-		goto Error;
+		return luaL_error(L, "Not enough parameters");
 
 	lua_getfield(L, 1, "shuttle");
 	if (!lua_islightuserdata(L, -1))
-		goto Error;
+		return luaL_error(L, "shuttle is invalid");
 	shuttle_t *const shuttle = (shuttle_t *)lua_touserdata(L, -1);
 
 	lua_response_t *const response = (lua_response_t *)&shuttle->payload;
 	if (response->in_recv_handler) {
-		fprintf(stderr, "User WebSocket recv handler for \"\%s\" is "
-			"NOT allowed to call yielding functions\n",
+		return luaL_error(L, "User WebSocket recv handler for "
+			"\"%s\" is NOT allowed to call yielding functions",
 			response->site_path);
-		goto Error;
 	}
 	take_shuttle_ownership_lua(response);
 	if (response->cancelled || response->ws_send_failed) {
@@ -985,10 +977,6 @@ static int websocket_send_text(lua_State *L)
 	 * been closed. */
 	lua_pushboolean(L, response->ws_send_failed || response->cancelled);
 	return 1;
-
-Error: /* FIXME: Error message. */
-	lua_pushboolean(L, true);
-	return 1;
 }
 
 /* Launched in HTTP server thread. */
@@ -1008,19 +996,18 @@ static int close_lua_websocket(lua_State *L)
 	/* Lua parameters: self. */
 	const unsigned num_params = lua_gettop(L);
 	if (num_params < 1)
-		goto Error;
+		return luaL_error(L, "Not enough parameters");
 
 	lua_getfield(L, 1, "shuttle");
 	if (!lua_islightuserdata(L, -1))
-		goto Error;
+		return luaL_error(L, "shuttle is invalid");
 	shuttle_t *const shuttle = (shuttle_t *)lua_touserdata(L, -1);
 
 	lua_response_t *const response = (lua_response_t *)&shuttle->payload;
 	if (response->in_recv_handler) {
-		fprintf(stderr, "User WebSocket recv handler for \"\%s\" is "
-			"NOT allowed to call yielding functions\n",
+		return luaL_error(L, "User WebSocket recv handler for "
+			"\"%s\" is NOT allowed to call yielding functions",
 			response->site_path);
-		goto Error;
 	}
 	take_shuttle_ownership_lua(response);
 	if (response->cancelled)
@@ -1030,9 +1017,6 @@ static int close_lua_websocket(lua_State *L)
 	stubborn_dispatch_lua(shuttle->thread_ctx->queue_from_tx,
 		&close_websocket, response);
 	wait_for_lua_shuttle_return(response);
-	return 0;
-
-Error: /* FIXME: Error message. */
 	return 0;
 }
 
@@ -1084,17 +1068,18 @@ static int header_writer_upgrade_to_websocket(lua_State *L)
 	/* Lua parameters: self, headers, recv_function. */
 	const unsigned num_params = lua_gettop(L);
 	if (num_params < 1)
-		goto Error;
+		return luaL_error(L, "Not enough parameters");
 
 	lua_getfield(L, 1, "shuttle");
 	if (!lua_islightuserdata(L, -1))
-		goto Error;
+		return luaL_error(L, "shuttle is invalid");
 	shuttle_t *const shuttle = (shuttle_t *)lua_touserdata(L, -1);
 
 	lua_response_t *const response = (lua_response_t *)&shuttle->payload;
 	take_shuttle_ownership_lua(response);
 	if (response->sent_something)
-		goto Error;
+		return luaL_error(L, "Unable to upgrade to WebSockets "
+			"after sending HTTP headers");
 	if (response->cancelled) {
 		/* Can't send anything, connection has been closed. */
 		lua_pushnil(L);
@@ -1161,10 +1146,6 @@ static int header_writer_upgrade_to_websocket(lua_State *L)
 		lua_pushlightuserdata(L, shuttle);
 		lua_setfield(L, -2, "shuttle");
 	}
-	return 1;
-
-Error: /* FIXME: Error message? */
-	lua_pushnil(L);
 	return 1;
 }
 
@@ -1291,11 +1272,11 @@ static int close_lua_req(lua_State *L)
 	/* Lua parameters: self. */
 	const unsigned num_params = lua_gettop(L);
 	if (num_params < 1)
-		goto Error;
+		return luaL_error(L, "Not enough parameters");
 
 	lua_getfield(L, 1, "shuttle");
 	if (!lua_islightuserdata(L, -1))
-		goto Error;
+		return luaL_error(L, "shuttle is invalid");
 	shuttle_t *const shuttle = (shuttle_t *)lua_touserdata(L, -1);
 	lua_response_t *const response = (lua_response_t *)&shuttle->payload;
 	take_shuttle_ownership_lua(response);
@@ -1317,9 +1298,6 @@ static int close_lua_req(lua_State *L)
 			&postprocess_lua_req_first, shuttle);
 	}
 	wait_for_lua_shuttle_return(response);
-	return 0;
-
-Error: /* FIXME: Error message */
 	return 0;
 }
 
@@ -1445,14 +1423,14 @@ static int get_query(lua_State *L)
 	/* Lua parameters: self. */
 	const unsigned num_params = lua_gettop(L);
 	if (num_params < 1)
-		goto Error;
+		return luaL_error(L, "Not enough parameters");
 
 	/* Do not extract data from shuttle -
 	 * they may have already been overwritten. */
 
 	lua_getfield(L, -1, "query_at");
 	if (!lua_isnumber(L, -1))
-		goto Error;
+		return luaL_error(L, "query_at is not an integer");
 	const int64_t query_at = lua_tointeger(L, -1);
 	if (-1 == query_at) {
 		lua_pushnil(L);
@@ -1460,17 +1438,15 @@ static int get_query(lua_State *L)
 	}
 	lua_getfield(L, -2, "path");
 	if (!lua_isstring_strict(L, -1))
-		goto Error;
+		return luaL_error(L, "path is not a string");
 
 	size_t len;
 	const char *path = lua_tolstring(L, -1, &len);
+	if ((uint64_t)query_at - 1 > (uint64_t)len)
+		return luaL_error(L, "query_at value is invalid");
 
 	/* N.b.: query_at is 1-based; we also skip '?'. */
 	lua_pushlstring(L, path + query_at, len - query_at);
-	return 1;
-
-Error: /* FIXME: Error message */
-	lua_pushnil(L);
 	return 1;
 }
 
@@ -1486,7 +1462,7 @@ lua_fiber_func(va_list ap)
 	/* User handler function, written in Lua. */
 	lua_rawgeti(L, LUA_REGISTRYINDEX, response->un.req.lua_handler_ref);
 
-	/* First param for Lua handler - query */
+	/* First param for Lua handler - req. */
 	lua_createtable(L, 0, 7);
 	lua_pushinteger(L, response->un.req.version_major);
 	lua_setfield(L, -2, "version_major");
@@ -1518,7 +1494,7 @@ lua_fiber_func(va_list ap)
 	 * (it is union). */
 	response->un.resp.first.num_headers = 0;
 
-	/* Second param for Lua handler - header_writer. */
+	/* Second param for Lua handler - io. */
 	lua_createtable(L, 0, 6);
 	lua_pushcfunction(L, header_writer_write_header);
 	lua_setfield(L, -2, "write_header");
