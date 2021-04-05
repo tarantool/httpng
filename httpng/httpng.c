@@ -2467,6 +2467,11 @@ Skip_main_lua_handler:
 		lerr = "No handlers specified";
 		goto no_handlers;
 	}
+	if (lua_site_count != 0 &&
+	    shuttle_size < sizeof(shuttle_t) + sizeof(lua_response_t)) {
+		lerr = "shuttle_size is too small for Lua handlers";
+		goto no_handlers;
+	}
 	unsigned short port = DEFAULT_LISTEN_PORT;
 	lua_getfield(L, LUA_STACK_IDX_TABLE, "listen");
 	if (lua_isnil(L, -1))
