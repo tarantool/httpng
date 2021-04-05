@@ -2293,10 +2293,17 @@ Skip_c_sites:
 		if (!is_integer) \
 			return luaL_error(L, \
 				"parameter " #name " is not a number"); \
-		if (name > MAX_##name) \
+		if (name > MAX_##name) { \
 			name = MAX_##name; \
-		else if (name < MIN_##name) \
+			fprintf(stderr, "Warning: parameter \"" #name "\" " \
+				"adjusted to %llu (upper limit)\n", \
+				(unsigned long long)name); \
+		} else if (name < MIN_##name) { \
 			name = MIN_##name; \
+			fprintf(stderr, "Warning: parameter \"" #name "\" " \
+				"adjusted to %llu (lower limit)\n", \
+				(unsigned long long)name); \
+		} \
 	}
 
 	/* N. b.: These macros can use return. */
