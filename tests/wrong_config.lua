@@ -90,6 +90,16 @@ g.test_min_proto_version_invalid = function()
         http.cfg, { handler = function() end, min_proto_version = 'ssl2' })
 end
 
+g.test_level_nan = function()
+    t.assert_error_msg_content_equals('openssl_security_level is not a number',
+        http.cfg, { handler = function() end, openssl_security_level = 'ssl' })
+end
+
+g.test_level_invalid = function()
+    t.assert_error_msg_content_equals('openssl_security_level is invalid',
+        http.cfg, { handler = function() end, openssl_security_level = 6 })
+end
+
 g.test_simple = function()
     http.cfg( { handler = function() end } )
 end
