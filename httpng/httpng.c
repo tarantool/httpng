@@ -2032,7 +2032,7 @@ static int open_listener_ipv4(const char *addr_str, uint16_t port)
 }
 
 static SSL_CTX *setup_ssl(const char *cert_file, const char *key_file,
-	long min_proto_version)
+	int level, long min_proto_version)
 {
 	if (!SSL_load_error_strings())
 		return NULL;
@@ -2571,12 +2571,28 @@ Skip_listen:
 	}
 
 Skip_min_proto_version:
+	lua_getfield(L, LUA_STACK_IDX_TABLE, "openssl_security_level");
+	uint64_t openssl_security_level;
+	if (lua_isnil(L, -1)) {
+		openssl_security_level = 1;
+		goto Skip_openssl_security_level;
+	}
+	openssl_security_level = my_lua_tointegerx(L, -1, &is_integer);
+	if (!is_integer)
+		return luaL_error(L,
+			"openssl_security_level is not a number");
+	if (openssl_security_level > 5)
+		return luaL_error(L,
+			"openssl_security_level is invalid");
+
+Skip_openssl_security_level:
 	;
 	SSL_CTX *ssl_ctx;
 	/* FIXME: Should use customizable file names. */
 	if (USE_HTTPS) {
 		if ((ssl_ctx = setup_ssl("examples/cert.pem",
-		    "examples/key.pem", min_proto_version)) == NULL) {
+		    "examples/key.pem", openssl_security_level,
+		    min_proto_version)) == NULL) {
 			lerr = "setup_ssl() failed (cert/key files not found?)";
 			goto ssl_fail;
 		}
