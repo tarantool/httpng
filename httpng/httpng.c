@@ -2043,8 +2043,9 @@ static SSL_CTX *setup_ssl(const char *cert_file, const char *key_file,
 	if (ssl_ctx == NULL)
 		return NULL;
 
-	/* FIXME: Make configurable. */
 	SSL_CTX_set_min_proto_version(ssl_ctx, min_proto_version);
+
+	SSL_CTX_set_security_level(ssl_ctx, level);
 
 	if (SSL_CTX_use_certificate_file(ssl_ctx, cert_file,
 	    SSL_FILETYPE_PEM) != 1) {
