@@ -22,6 +22,7 @@ http.cfg{
         { port = 8080 },
     },
     threads = 8,
+    openssl_security_level = 0,
     handler = function(req, io)
         local payload
         local req_query = req:query()
