@@ -82,6 +82,14 @@
 
 #define DEFAULT_LISTEN_PORT 8080
 
+/* N.b.: for SSL3 to work you should probably use custom OpenSSL build. */
+#define SSL3_STR "ssl3"
+#define TLS1_STR "tls1"
+#define TLS1_0_STR "tls1.0"
+#define TLS1_1_STR "tls1.1"
+#define TLS1_2_STR "tls1.2"
+#define TLS1_3_STR "tls1.3"
+
 struct listener_ctx;
 
 typedef struct {
@@ -2023,7 +2031,8 @@ static int open_listener_ipv4(const char *addr_str, uint16_t port)
 	return fd;
 }
 
-static SSL_CTX *setup_ssl(const char *cert_file, const char *key_file)
+static SSL_CTX *setup_ssl(const char *cert_file, const char *key_file,
+	long min_proto_version)
 {
 	if (!SSL_load_error_strings())
 		return NULL;
@@ -2035,7 +2044,7 @@ static SSL_CTX *setup_ssl(const char *cert_file, const char *key_file)
 		return NULL;
 
 	/* FIXME: Make configurable. */
-	SSL_CTX_set_min_proto_version(ssl_ctx, TLS1_2_VERSION);
+	SSL_CTX_set_min_proto_version(ssl_ctx, min_proto_version);
 
 	if (SSL_CTX_use_certificate_file(ssl_ctx, cert_file,
 	    SSL_FILETYPE_PEM) != 1) {
@@ -2510,11 +2519,64 @@ Skip_main_lua_handler:
 
 Skip_listen:
 	;
+	long min_proto_version;
+	lua_getfield(L, LUA_STACK_IDX_TABLE, "min_proto_version");
+	if (lua_isnil(L, -1)) {
+		min_proto_version = TLS1_2_VERSION;
+		fprintf(stderr, "Using default min_proto_version=tls1.2\n");
+		goto Skip_min_proto_version;
+	}
+
+	if (!lua_isstring_strict(L, -1))
+		return luaL_error(L, "min_proto_version is not a string");
+	size_t min_proto_version_len;
+	const char *const min_proto_version_str =
+		lua_tolstring(L, -1, &min_proto_version_len);
+	if (min_proto_version_str == NULL) {
+		lerr = "min_proto_version is not a string";
+		goto min_proto_version_invalid;
+	}
+
+#define FILL_PROTO_STR(name, value) \
+	{ .str = (name), .len = sizeof(name) - 1, .num = (value) }
+
+	{
+		struct {
+			char str[8];
+			size_t len;
+			long num;
+		} protos[] = {
+			FILL_PROTO_STR(SSL3_STR, SSL3_VERSION),
+			FILL_PROTO_STR(TLS1_STR, TLS1_VERSION),
+			FILL_PROTO_STR(TLS1_0_STR, TLS1_VERSION),
+			FILL_PROTO_STR(TLS1_1_STR, TLS1_1_VERSION),
+			FILL_PROTO_STR(TLS1_2_STR, TLS1_2_VERSION),
+			FILL_PROTO_STR(TLS1_3_STR, TLS1_3_VERSION),
+		};
+#undef FILL_PROTO_STR
+		unsigned idx;
+		for (idx = 0; idx < lengthof(protos); ++idx) {
+			if (protos[idx].len == min_proto_version_len &&
+			    !memcmp(&protos[idx].str, min_proto_version_str,
+			    min_proto_version_len)) {
+				min_proto_version = protos[idx].num;
+				goto Proto_found;
+			}
+		}
+		/* This is security, do not silently fall back to default. */
+		lerr = "unknown min_proto_version specified";
+		goto min_proto_version_invalid;
+	Proto_found:
+		;
+	}
+
+Skip_min_proto_version:
+	;
 	SSL_CTX *ssl_ctx;
 	/* FIXME: Should use customizable file names. */
 	if (USE_HTTPS) {
 		if ((ssl_ctx = setup_ssl("examples/cert.pem",
-		    "examples/key.pem")) == NULL) {
+		    "examples/key.pem", min_proto_version)) == NULL) {
 			lerr = "setup_ssl() failed (cert/key files not found?)";
 			goto ssl_fail;
 		}
@@ -2638,6 +2700,7 @@ listeners_fail:
 listeners_alloc_fail:
 	SSL_CTX_free(ssl_ctx);
 ssl_fail:
+min_proto_version_invalid:
 listen_invalid:
 no_handlers:
 invalid_handler:
