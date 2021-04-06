@@ -5,6 +5,7 @@ http.cfg{
         { port = 8080 },
     },
     threads = 7,
+    openssl_security_level = 0,
     handler = function(req, io)
         return {
             status = 200,
