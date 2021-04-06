@@ -80,6 +80,16 @@ g.test_listen_port_root = function()
         http.cfg, { handler = function() end, listen = { { port = 80 } } })
 end
 
+g.test_min_proto_version_num = function()
+    t.assert_error_msg_content_equals('min_proto_version is not a string',
+        http.cfg, { handler = function() end, min_proto_version = 1 })
+end
+
+g.test_min_proto_version_invalid = function()
+    t.assert_error_msg_content_equals('unknown min_proto_version specified',
+        http.cfg, { handler = function() end, min_proto_version = 'ssl2' })
+end
+
 g.test_simple = function()
     http.cfg( { handler = function() end } )
 end
