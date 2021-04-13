@@ -10,9 +10,11 @@
 #define H2O_USE_LIBUV 1
 #else
 #define H2O_USE_EPOLL 1 /* FIXME */
+#include <h2o/evloop_socket.h>
 #endif /* USE_LIBUV */
 #include <h2o.h>
 #include <h2o/websocket.h>
+#include "../third_party/h2o/deps/cloexec/cloexec.h"
 
 #ifdef USE_LIBUV
 #include <uv.h>
@@ -93,20 +95,45 @@
 struct listener_ctx;
 
 typedef struct {
+#ifdef USE_LIBUV
+	uv_tcp_t super;
+#else /* USE_LIBUV */
+	struct st_h2o_evloop_socket_t super;
+#endif /* USE_LIBUV */
+	h2o_linklist_t accepted_list;
+} our_sock_t;
+
+typedef struct {
 	h2o_context_t ctx;
 	struct listener_ctx *listener_ctxs;
 	struct xtm_queue *queue_to_tx;
 	struct xtm_queue *queue_from_tx;
+	struct fiber *fiber_to_wake_on_shutdown;
 #ifndef USE_LIBUV
 	h2o_socket_t *sock_from_tx;
 #endif /* USE_LIBUV */
 #ifdef USE_LIBUV
 	uv_loop_t loop;
 	uv_poll_t uv_poll_from_tx;
+	uv_async_t async;
+#else /* USE_LIBUV */
+	h2o_loop_t *loop;
+	struct {
+		int write_fd;
+		h2o_socket_t *read_socket;
+	} async;
 #endif /* USE_LIBUV */
+	h2o_linklist_t accepted_sockets;
 	unsigned num_connections;
 	unsigned idx;
+	unsigned active_lua_fibers;
 	pthread_t tid;
+	bool shutdown_requested; /* Tarantool asked us to shut down. */
+	bool should_notify_tx_done;
+	bool tx_done_notification_received;
+	bool tx_fiber_should_exit;
+	bool tx_fiber_finished;
+	bool thread_finished;
 } thread_ctx_t;
 
 struct anchor;
@@ -274,7 +301,9 @@ static struct {
 	unsigned shuttle_size;
 	unsigned recv_data_size;
 	unsigned num_listeners;
+#ifndef USE_LIBUV
 	unsigned num_accepts;
+#endif /* USE_LIBUV */
 	unsigned max_conn_per_thread;
 	unsigned num_threads;
 	unsigned max_headers_lua;
@@ -284,7 +313,6 @@ static struct {
 #ifdef SPLIT_LARGE_BODY
 	bool use_body_split;
 #endif /* SPLIT_LARGE_BODY */
-	volatile bool tx_fiber_should_work;
 } conf = {
 	.tfo_queues = H2O_DEFAULT_LENGTH_TCP_FASTOPEN_QUEUE,
 };
@@ -315,6 +343,21 @@ extern void stubborn_dispatch_uni(struct xtm_queue *queue, void *func,
 static inline bool lua_isstring_strict(lua_State *L, int idx)
 {
 	return lua_type(L, idx) == LUA_TSTRING;
+}
+
+static inline void h2o_linklist_insert_fast(h2o_linklist_t *pos,
+	h2o_linklist_t *node)
+{
+    node->prev = pos->prev;
+    node->next = pos;
+    node->prev->next = node;
+    node->next->prev = node;
+}
+
+static inline void h2o_linklist_unlink_fast(h2o_linklist_t *node)
+{
+    node->next->prev = node->prev;
+    node->prev->next = node->next;
 }
 
 static inline void
@@ -374,6 +417,21 @@ static inline void stubborn_dispatch_recv(struct xtm_queue *queue,
 	void (*func)(recv_data_t *), recv_data_t *param)
 {
 	stubborn_dispatch_uni(queue, func, param);
+}
+
+/* Called when dispatch must not fail. */
+static inline void stubborn_dispatch_thr_to_tx(thread_ctx_t *thread_ctx,
+	void (*func)(thread_ctx_t *))
+{
+	stubborn_dispatch_uni(thread_ctx->queue_to_tx, func, thread_ctx);
+}
+
+/* Called when dispatch must not fail. */
+static inline void stubborn_dispatch_thr_from_tx(
+	thread_ctx_t *thread_ctx, void (*func)(thread_ctx_t *))
+{
+	stubborn_dispatch_uni(thread_ctx->queue_from_tx,
+		func, thread_ctx);
 }
 
 /* Launched in HTTP server thread. */
@@ -1039,9 +1097,11 @@ lua_websocket_recv_fiber_func(va_list ap)
 	while (1) {
 		response->is_recv_fiber_waiting = true;
 		fiber_yield();
-		if (response->is_recv_fiber_cancelled)
+		if (response->is_recv_fiber_cancelled) {
 			/* FIXME: Can we leak recv_data? */
+			fiber_wakeup(response->fiber);
 			return 0;
+		}
 		response->is_recv_fiber_waiting = false;
 
 		/* User handler function, written in Lua. */
@@ -1459,6 +1519,22 @@ static int get_query(lua_State *L)
 }
 
 /* Launched in TX thread. */
+static void exit_tx_fiber(thread_ctx_t *thread_ctx)
+{
+	thread_ctx->tx_fiber_should_exit = true;
+}
+
+/* Launched in HTTP server thread. */
+static void tx_done(thread_ctx_t *thread_ctx)
+{
+#ifdef USE_LIBUV
+	uv_stop(&thread_ctx->loop);
+#endif /* USE_LIBUV */
+	thread_ctx->tx_done_notification_received = true;
+	stubborn_dispatch_thr_to_tx(thread_ctx, exit_tx_fiber);
+}
+
+/* Launched in TX thread. */
 static int
 lua_fiber_func(va_list ap)
 {
@@ -1517,6 +1593,7 @@ lua_fiber_func(va_list ap)
 	lua_createtable(L, 0, 2);
 	lua_setfield(L, -2, "headers");
 
+	thread_ctx_t *const thread_ctx = shuttle->thread_ctx;
 	if (lua_pcall(L, 2, 1, 0) != LUA_OK) {
 		/* FIXME: Should probably log this instead(?) */
 		fprintf(stderr, "User handler for \"\%s\" failed with error "
@@ -1533,8 +1610,8 @@ lua_fiber_func(va_list ap)
 				free_lua_shuttle_from_tx(shuttle);
 		} else if (response->upgraded_to_websocket) {
 			take_shuttle_ownership_lua(response);
-			stubborn_dispatch_lua(shuttle->thread_ctx
-				->queue_from_tx, &close_websocket, response);
+			stubborn_dispatch_lua(thread_ctx->queue_from_tx,
+				&close_websocket, response);
 			wait_for_lua_shuttle_return(response);
 			free_lua_websocket_shuttle_from_tx(shuttle);
 		} else {
@@ -1550,7 +1627,7 @@ lua_fiber_func(va_list ap)
 	} else if (response->upgraded_to_websocket) {
 		take_shuttle_ownership_lua(response);
 		assert(!response->cancelled);
-		stubborn_dispatch_lua(shuttle->thread_ctx->queue_from_tx,
+		stubborn_dispatch_lua(thread_ctx->queue_from_tx,
 			&close_websocket, response);
 		wait_for_lua_shuttle_return(response);
 		free_lua_websocket_shuttle_from_tx(shuttle);
@@ -1563,6 +1640,10 @@ lua_fiber_func(va_list ap)
 
 Done:
 	luaL_unref(luaT_state(), LUA_REGISTRYINDEX, lua_state_ref);
+	if (--thread_ctx->active_lua_fibers == 0 &&
+	    thread_ctx->should_notify_tx_done)
+		stubborn_dispatch_thr_from_tx(thread_ctx, &tx_done);
+
 	return 0;
 }
 
@@ -1601,6 +1682,7 @@ static void process_lua_req_in_tx(shuttle_t *shuttle)
 		RETURN_WITH_ERROR("Failed to create fiber");
 	response->fiber_done = false;
 	response->tx_fiber = fiber_self();
+	++shuttle->thread_ctx->active_lua_fibers;
 	fiber_start(response->fiber, shuttle, new_L);
 }
 #undef RETURN_WITH_ERROR
@@ -1848,25 +1930,16 @@ shuttle_t *prepare_shuttle(h2o_req_t *req)
 	return shuttle;
 }
 
+static void on_underlying_socket_free(void *data)
+{
+	h2o_linklist_unlink_fast(&container_of(data,
+		our_sock_t, super)->accepted_list);
+	thread_ctx_t *const thread_ctx = get_curr_thread_ctx();
+	--thread_ctx->num_connections;
 #ifdef USE_LIBUV
-
-static void on_uv_socket_free(void *data)
-{
-	thread_ctx_t *const thread_ctx = get_curr_thread_ctx();
-	--thread_ctx->num_connections;
 	free(data);
-}
-
-#else /* USE_LIBUV */
-
-static void on_socketclose(void *data)
-{
-	(void)data;
-	thread_ctx_t *const thread_ctx = get_curr_thread_ctx();
-	--thread_ctx->num_connections;
-}
-
 #endif /* USE_LIBUV */
+}
 
 #ifdef USE_LIBUV
 
@@ -1898,23 +1971,31 @@ static void on_accept(uv_stream_t *uv_listener, int status)
 	if (status != 0)
 		return;
 
+	thread_ctx_t *const thread_ctx = get_curr_thread_ctx();
+	if (thread_ctx->num_connections >= conf.max_conn_per_thread)
+		return;
+
 	/* FIXME: Pools instead of malloc? */
-	uv_tcp_t *const conn = h2o_mem_alloc(sizeof(*conn));
-	if (uv_tcp_init(uv_listener->loop, conn)) {
+	our_sock_t *const conn = h2o_mem_alloc(sizeof(*conn));
+	if (uv_tcp_init(uv_listener->loop, &conn->super)) {
 		free(conn);
 		return;
 	}
 
-	if (uv_accept(uv_listener, (uv_stream_t *)conn)) {
+	if (uv_accept(uv_listener, (uv_stream_t *)&conn->super)) {
 		uv_close((uv_handle_t *)conn, (uv_close_cb)free);
 		return;
 	}
 
+	h2o_linklist_insert_fast(&thread_ctx->accepted_sockets,
+		&conn->accepted_list);
+	++thread_ctx->num_connections;
+
 	listener_ctx_t *const listener_ctx =
 		(listener_ctx_t *)uv_listener->data;
 	h2o_accept(&listener_ctx->accept_ctx,
-		h2o_uv_socket_create((uv_stream_t *)conn,
-			(uv_close_cb)on_uv_socket_free));
+		h2o_uv_socket_create((uv_stream_t *)&conn->super,
+			(uv_close_cb)on_underlying_socket_free));
 }
 
 #else /* USE_LIBUV */
@@ -1931,15 +2012,23 @@ static void on_accept(h2o_socket_t *listener, const char *err)
 	do {
 		if (thread_ctx->num_connections >= conf.max_conn_per_thread)
 			break;
-		h2o_socket_t *sock = h2o_evloop_socket_accept(listener);
+		struct st_h2o_evloop_socket_t *const sock =
+			h2o_evloop_socket_accept_ex(listener,
+				sizeof(our_sock_t));
 		if (sock == NULL)
 			return;
 
+		our_sock_t *const item =
+			container_of(sock, our_sock_t, super);
+		h2o_linklist_insert_fast(&thread_ctx->accepted_sockets,
+			&item->accepted_list);
+
 		++thread_ctx->num_connections;
 
-		sock->on_close.cb = on_socketclose;
+		sock->super.on_close.cb = on_underlying_socket_free;
+		sock->super.on_close.data = sock;
 
-		h2o_accept(&listener_ctx->accept_ctx, sock);
+		h2o_accept(&listener_ctx->accept_ctx, &sock->super);
 	} while (--remain);
 }
 
@@ -2081,6 +2170,9 @@ static SSL_CTX *setup_ssl(const char *cert_file, const char *key_file,
 /* Returns false in case of error. */
 static bool init_worker_thread(unsigned thread_idx)
 {
+#ifdef USE_LIBUV
+	int fd_consumed = 0;
+#endif /* USE_LIBUV */
 	thread_ctx_t *const thread_ctx = &conf.thread_ctxs[thread_idx];
 	thread_ctx->idx = thread_idx;
 	if ((thread_ctx->queue_from_tx = xtm_create(QUEUE_FROM_TX_ITEMS))
@@ -2102,6 +2194,7 @@ static bool init_worker_thread(unsigned thread_idx)
 	h2o_context_init(&thread_ctx->ctx, h2o_evloop_create(),
 		&conf.globalconf);
 #endif /* USE_LIBUV */
+	h2o_linklist_init_anchor(&thread_ctx->accepted_sockets);
 
 	/* FIXME: Need more than one. */
 	listener_ctx_t *listener_ctx = &thread_ctx->listener_ctxs[0];
@@ -2128,6 +2221,7 @@ static bool init_worker_thread(unsigned thread_idx)
 	if (uv_tcp_open(&listener_ctx->uv_tcp_listener, listener_ctx->fd))
 		/* FIXME: Should report. */
 		goto uv_tcp_open_failed;
+	fd_consumed = 1;
 	listener_ctx->uv_tcp_listener.data = listener_ctx;
 	if (uv_listen((uv_stream_t *)&listener_ctx->uv_tcp_listener,
 	    SOMAXCONN, on_accept))
@@ -2152,6 +2246,12 @@ static bool init_worker_thread(unsigned thread_idx)
 			H2O_SOCKET_FLAG_DONT_READ);
 #endif /* USE_LIBUV */
 
+	thread_ctx->active_lua_fibers = 0;
+	thread_ctx->shutdown_requested = false;
+	thread_ctx->tx_done_notification_received = false;
+	thread_ctx->tx_fiber_finished = false;
+	thread_ctx->thread_finished = false;
+
 	return true;
 
 #ifdef USE_LIBUV
@@ -2163,17 +2263,18 @@ uv_tcp_open_failed:
 	uv_close((uv_handle_t *)&listener_ctx->uv_tcp_listener, NULL);
 
 uv_tcp_init_failed:
-	if (thread_idx)
+	if (!fd_consumed && thread_idx)
 		close(listener_ctx->fd);
 #endif /* USE_LIBUV */
 
 dup_failed:
 #ifdef USE_LIBUV
 	uv_loop_close(&thread_ctx->loop);
+	h2o_context_dispose(&thread_ctx->ctx);
 #else /* USE_LIBUV */
+	h2o_context_dispose(&thread_ctx->ctx);
 	h2o_evloop_destroy(thread_ctx->ctx.loop);
 #endif /* USE_LIBUV */
-	h2o_context_dispose(&thread_ctx->ctx);
 
 	free(thread_ctx->listener_ctxs);
 alloc_ctxs_failed:
@@ -2182,6 +2283,56 @@ alloc_xtm_failed:
 	return false;
 }
 
+/* Launched in TX thread. */
+static void finish_processing_lua_reqs_in_tx(thread_ctx_t *thread_ctx)
+{
+	if (thread_ctx->active_lua_fibers == 0)
+		stubborn_dispatch_thr_from_tx(thread_ctx, &tx_done);
+	else
+		thread_ctx->should_notify_tx_done = true;
+}
+
+/* Launched in HTTP server thread. */
+static inline void tell_close_connection(our_sock_t *item)
+{
+#ifdef USE_LIBUV
+	item->super.read_cb((uv_stream_t *)&item->super, -1, NULL);
+#else /* USE_LIBUV */
+	item->super.super._cb.read(&item->super.super, "shutting down");
+#endif /* USE_LIBUV */
+}
+
+/* Launched in HTTP server thread. */
+static void close_existing_connections(thread_ctx_t *thread_ctx)
+{
+	our_sock_t *item =
+		container_of(thread_ctx->accepted_sockets.next,
+			our_sock_t, accepted_list);
+	while (&item->accepted_list != &thread_ctx->accepted_sockets) {
+		our_sock_t *const next = container_of(item->accepted_list.next,
+			our_sock_t, accepted_list);
+		tell_close_connection(item);
+		item = next;
+	}
+}
+
+/* Launched in HTTP server thread. */
+static void prepare_for_shutdown(thread_ctx_t *thread_ctx)
+{
+	/* FIXME: If we want to send something through existing
+	 * connections, should do it now (accepts are already
+	 * blocked). */
+
+	close_existing_connections(thread_ctx);
+
+	fprintf(stderr, "Thread #%u: shutdown request received, "
+		"waiting for TX processing to complete...\n",
+		thread_ctx->idx);
+	stubborn_dispatch_thr_to_tx(thread_ctx,
+		&finish_processing_lua_reqs_in_tx);
+}
+
+/* This is HTTP server thread main function. */
 static void *worker_func(void *param)
 {
 	/* FIXME: SIGTERM should terminate loop. */
@@ -2189,7 +2340,17 @@ static void *worker_func(void *param)
 	thread_ctx_t *const thread_ctx = &conf.thread_ctxs[thread_idx];
 	curr_thread_ctx = thread_ctx;
 #ifdef USE_LIBUV
+	/* Process incoming connections/data and requests
+	 * from TX thread. */
 	uv_run(&thread_ctx->loop, UV_RUN_DEFAULT);
+
+	assert(thread_ctx->shutdown_requested);
+
+	prepare_for_shutdown(thread_ctx);
+
+	/* Process remaining requests from TX thread. */
+	uv_run(&thread_ctx->loop, UV_RUN_DEFAULT);
+	assert(thread_ctx->tx_done_notification_received);
 #else /* USE_LIBUV */
 
 	/* FIXME: Need more than one. */
@@ -2198,10 +2359,19 @@ static void *worker_func(void *param)
 	h2o_socket_read_start(thread_ctx->sock_from_tx, on_call_from_tx);
 	h2o_socket_read_start(listener_ctx->sock, on_accept);
 	h2o_evloop_t *loop = thread_ctx->ctx.loop;
-	while (h2o_evloop_run(loop, INT32_MAX) == 0)
-		;
+	while (!thread_ctx->shutdown_requested)
+		h2o_evloop_run(loop, INT32_MAX);
+
+	prepare_for_shutdown(thread_ctx);
+
+	/* Process remaining requests from TX thread. */
+	while (!thread_ctx->tx_done_notification_received)
+		h2o_evloop_run(loop, 1);
+	h2o_socket_read_stop(thread_ctx->sock_from_tx);
+	h2o_socket_close(thread_ctx->sock_from_tx);
 #endif /* USE_LIBUV */
 
+	thread_ctx->thread_finished = true;
 	return NULL;
 }
 
@@ -2228,13 +2398,12 @@ static void deinit_worker_thread(unsigned thread_idx)
 
 #ifdef USE_LIBUV
 	uv_loop_close(&thread_ctx->loop);
+	h2o_context_dispose(&thread_ctx->ctx);
 #else /* USE_LIBUV */
+	h2o_context_dispose(&thread_ctx->ctx);
 	h2o_evloop_destroy(loop);
 #endif /* USE_LIBUV */
-	h2o_context_dispose(&thread_ctx->ctx);
 
-	if (thread_idx)
-		close(listener_ctx->fd);
 	/* FIXME: Should flush these queues first. */
 	xtm_delete(thread_ctx->queue_from_tx);
 	free(thread_ctx->listener_ctxs);
@@ -2248,13 +2417,145 @@ tx_fiber_func(va_list ap)
 	thread_ctx_t *const thread_ctx = &conf.thread_ctxs[fiber_idx];
 	struct xtm_queue *const queue_to_tx = thread_ctx->queue_to_tx;
 	const int pipe_fd = xtm_fd(queue_to_tx);
-	/* conf.tx_fiber_should_work is read non-atomically for performance
-	 * reasons so it should be changed in this thread by queueing
-	 * corresponding function call */
-	while (conf.tx_fiber_should_work) {
+	/* thread_ctx->tx_fiber_should_exit is read non-atomically for
+	 * performance reasons so it should be changed in this thread by
+	 * queueing corresponding function call. */
+	while (!thread_ctx->tx_fiber_should_exit) {
 		if (coio_wait(pipe_fd, COIO_READ, DBL_MAX) & COIO_READ) {
 			xtm_fun_invoke_all(queue_to_tx);
 		}
+	}
+	thread_ctx->tx_fiber_finished = true;
+	if (thread_ctx->fiber_to_wake_on_shutdown != NULL)
+		fiber_wakeup(thread_ctx->fiber_to_wake_on_shutdown);
+	return 0;
+}
+
+/* Launched in HTTP server thread. */
+static void async_cb(void *param)
+{
+	thread_ctx_t *const thread_ctx =
+		container_of(param, thread_ctx_t, async);
+	thread_ctx->shutdown_requested = true;
+#ifdef USE_LIBUV
+	uv_stop(&thread_ctx->loop);
+#endif /* USE_LIBUV */
+}
+
+#ifndef USE_LIBUV
+/* Launched in HTTP server thread. */
+static void on_async_read(h2o_socket_t *sock, const char *err)
+{
+	if (err != NULL) {
+		fprintf(stderr, "pipe error: %s\n", err);
+		abort();
+	}
+
+	h2o_buffer_consume(&sock->input, sock->input->size);
+	thread_ctx_t *const thread_ctx = get_curr_thread_ctx();
+	async_cb(&thread_ctx->async);
+}
+
+/* Launched in TX thread. */
+static void init_async(thread_ctx_t *thread_ctx)
+{
+	h2o_loop_t *const loop = thread_ctx->ctx.loop;
+	int fds[2];
+
+	if (cloexec_pipe(fds) != 0) {
+		perror("pipe");
+		abort();
+	}
+	if (fcntl(fds[1], F_SETFL, O_NONBLOCK) != 0) {
+		perror("fcntl");
+		abort();
+	}
+	thread_ctx->async.write_fd = fds[1];
+	thread_ctx->async.read_socket =
+		h2o_evloop_socket_create(loop, fds[0], 0);
+	h2o_socket_read_start(thread_ctx->async.read_socket,
+		on_async_read);
+}
+#endif /* USE_LIBUV */
+
+static void close_async(thread_ctx_t *thread_ctx)
+{
+#ifdef USE_LIBUV
+	/* FIXME: Such call in h2o proper uses free()
+	 * as callback - bug? */
+	uv_close((uv_handle_t *)&thread_ctx->async, NULL);
+#else /* USE_LIBUV */
+	h2o_socket_read_stop(thread_ctx->async.read_socket);
+	h2o_socket_close(thread_ctx->async.read_socket);
+	close(thread_ctx->async.write_fd);
+#endif /* USE_LIBUV */
+}
+
+/* Launched in TX thread. */
+static void tell_thread_to_terminate(thread_ctx_t *thread_ctx)
+{
+#ifdef USE_LIBUV
+	uv_async_send(&thread_ctx->async);
+#else /* USE_LIBUV */
+	while (write(thread_ctx->async.write_fd, "", 1) < 0
+	    && errno == EINTR)
+		;
+#endif /* USE_LIBUV */
+}
+
+/* Launched in TX thread. */
+static int on_shutdown(lua_State *L)
+{
+	unsigned thr_idx;
+	for (thr_idx = 0; thr_idx < conf.num_threads; ++thr_idx) {
+		thread_ctx_t *const thread_ctx =
+			&conf.thread_ctxs[thr_idx];
+		thread_ctx->fiber_to_wake_on_shutdown = fiber_self();
+
+		/* FIXME: Need more than one. */
+		listener_ctx_t *const listener_ctx =
+			&thread_ctx->listener_ctxs[0];
+
+#ifdef USE_LIBUV
+		uv_read_stop((uv_stream_t *)
+			&listener_ctx->uv_tcp_listener);
+		uv_close((uv_handle_t *)&listener_ctx->uv_tcp_listener,
+			NULL);
+#else /* USE_LIBUV */
+		h2o_socket_read_stop(listener_ctx->sock);
+		h2o_socket_close(listener_ctx->sock);
+#endif /* USE_LIBUV */
+
+		tell_thread_to_terminate(thread_ctx);
+	}
+
+	for (thr_idx = 0; thr_idx < conf.num_threads; ++thr_idx) {
+		thread_ctx_t *const thread_ctx =
+			&conf.thread_ctxs[thr_idx];
+		/* We must yield CPU to other fibers to finish. */
+		while (thread_ctx->active_lua_fibers ||
+		    !thread_ctx->thread_finished)
+			fiber_sleep(0.001);
+		pthread_join(thread_ctx->tid, NULL);
+		close_async(thread_ctx);
+
+#ifdef USE_LIBUV
+		uv_close((uv_handle_t *)&thread_ctx->uv_poll_from_tx,
+			NULL);
+		uv_loop_close(&thread_ctx->loop);
+		h2o_context_dispose(&thread_ctx->ctx);
+#else /* USE_LIBUV */
+		h2o_context_dispose(&thread_ctx->ctx);
+		h2o_evloop_destroy(thread_ctx->ctx.loop);
+#endif /* USE_LIBUV */
+
+		if (!thread_ctx->tx_fiber_finished)
+			fiber_yield();
+		assert(thread_ctx->tx_fiber_finished);
+
+		free(thread_ctx->listener_ctxs);
+		xtm_delete(thread_ctx->queue_to_tx);
+		xtm_delete(thread_ctx->queue_from_tx);
 	}
 	return 0;
 }
@@ -2329,7 +2630,6 @@ Skip_c_sites:
 	conf.use_body_split = lua_isnil(L, -1) ? false : lua_toboolean(L, -1);
 #endif /* SPLIT_LARGE_BODY */
 
-	conf.tx_fiber_should_work = 1;
 	/* FIXME: Add sanity checks, especially shuttle_size -
 	 * it must >sizeof(shuttle_t) (accounting for Lua payload)
 	 * and aligned. */
@@ -2347,9 +2647,11 @@ Skip_c_sites:
 	conf.max_recv_bytes_lua_websocket = conf.recv_data_size -
 		(uintptr_t)get_websocket_recv_location(NULL);
 	conf.max_conn_per_thread = max_conn_per_thread;
+#ifndef USE_LIBUV
 	conf.num_accepts = conf.max_conn_per_thread / 16;
 	if (conf.num_accepts < 8)
 		conf.num_accepts = 8;
+#endif /* USE_LIBUV */
 
 	if ((conf.thread_ctxs = (thread_ctx_t *)malloc(conf.num_threads *
 	    sizeof(thread_ctx_t))) == NULL)
@@ -2638,14 +2940,24 @@ Skip_openssl_security_level:
 		goto fibers_fail_alloc;
 	}
 
-	unsigned fiber_idx;
-	for (fiber_idx = 0; fiber_idx < conf.num_threads; ++fiber_idx) {
-		if ((conf.thread_ctxs[fiber_idx].queue_to_tx =
+	unsigned xtm_to_tx_idx;
+	for (xtm_to_tx_idx = 0; xtm_to_tx_idx < conf.num_threads;
+	    ++xtm_to_tx_idx)
+		if ((conf.thread_ctxs[xtm_to_tx_idx].queue_to_tx =
 		    xtm_create(QUEUE_TO_TX_ITEMS)) == NULL) {
 			lerr = "Failed to create xtm queue";
-			goto fibers_fail;
+			goto xtm_to_tx_fail;
 		}
-		conf.thread_ctxs[fiber_idx].num_connections = 0;
+
+	unsigned fiber_idx;
+	for (fiber_idx = 0; fiber_idx < conf.num_threads; ++fiber_idx) {
+		thread_ctx_t *const thread_ctx =
+			&conf.thread_ctxs[fiber_idx];
+		thread_ctx->num_connections = 0;
+		thread_ctx->active_lua_fibers = 0;
+		thread_ctx->should_notify_tx_done = false;
+		thread_ctx->tx_fiber_should_exit = false;
+		thread_ctx->fiber_to_wake_on_shutdown = NULL;
 
 		char name[32];
 		sprintf(name, "tx_h2o_fiber_%u", fiber_idx);
@@ -2678,6 +2990,21 @@ Skip_openssl_security_level:
 			goto threads_init_fail;
 		}
 
+	{
+		unsigned idx;
+		for (idx = 0; idx < conf.num_threads; ++idx) {
+			thread_ctx_t *const thread_ctx =
+				&conf.thread_ctxs[idx];
+#ifdef USE_LIBUV
+			uv_async_init(&thread_ctx->loop,
+				&thread_ctx->async,
+				(uv_async_cb)async_cb);
+#else /* USE_LIBUV */
+			init_async(thread_ctx);
+#endif /* USE_LIBUV */
+		}
+	}
+
 	__sync_synchronize();
 
 	/* Start processing HTTP requests and requests from TX thread. */
@@ -2690,24 +3017,56 @@ Skip_openssl_security_level:
 			goto threads_launch_fail;
 		}
 
+	lua_getglobal(L, "box");
+	if (lua_type(L, -1) == LUA_TTABLE) {
+		lua_getfield(L, -1, "ctl");
+		if (lua_type(L, -1) == LUA_TTABLE) {
+			lua_getfield(L, -1, "on_shutdown");
+			if (lua_type(L, -1) == LUA_TFUNCTION) {
+				lua_pushcfunction(L, on_shutdown);
+				if (lua_pcall(L, 1, 0, 0) != LUA_OK) {
+					fprintf(stderr,
+			"Warning: box.ctl.on_shutdown() failed\n");
+				}
+			} else
+				fprintf(stderr,
+	"Warning: global 'box.ctl.on_shutdown' is not a function\n");
+		} else
+			fprintf(stderr,
+			"Warning: global 'box.ctl' is not a table\n");
+	} else
+		fprintf(stderr, "Warning: global 'box' is not a table\n");
+
 	return 0;
 
 threads_launch_fail:
 	;
 	unsigned idx;
-	/* FIXME: Should terminate already launched threads,
-	 * not yet implemented, this code would lock up. */
+	for (idx = 0; idx < thr_launch_idx; ++idx)
+		tell_thread_to_terminate(&conf.thread_ctxs[idx]);
+
 	for (idx = 0; idx < thr_launch_idx; ++idx)
 		pthread_join(conf.thread_ctxs[idx].tid, NULL);
+
+	for (idx = 0; idx < thr_launch_idx; ++idx)
+		close_async(&conf.thread_ctxs[idx]);
 
 threads_init_fail:
 	for (idx = 0; idx < thr_init_idx; ++idx)
 		deinit_worker_thread(idx);
 userdata_init_fail:
 fibers_fail:
-	conf.tx_fiber_should_work = 0;
-	for (idx = 0; idx < fiber_idx; ++idx)
+	for (idx = 0; idx < fiber_idx; ++idx) {
+		conf.thread_ctxs[idx].tx_fiber_should_exit = true;
+		__sync_synchronize();
 		fiber_cancel(conf.tx_fiber_ptrs[idx]);
+	}
+
+xtm_to_tx_fail:
+	for (idx = 0; idx < xtm_to_tx_idx; ++idx)
+		xtm_delete(conf.thread_ctxs[idx].queue_to_tx);
+
+	free(conf.tx_fiber_ptrs);
 
 fibers_fail_alloc:
 	for (idx = 0; idx < conf.num_listeners; ++idx)
