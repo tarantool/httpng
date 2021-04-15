@@ -89,17 +89,25 @@ if (HTTPNG_USE_LIBUV)
     add_definitions(-DUSE_LIBUV)
 endif (HTTPNG_USE_LIBUV)
 
-set(HEADERS include/tarantool-httpng/httpng.h)
+set(HEADERS httpng/openssl_utils.h)
 
-build_module(httpng httpng/httpng.c ${HEADERS})
+set (HTTPNG_C_SRC
+                  httpng/multilisten.c
+                  httpng/openssl_utils.c
+)
+
+set(HTTPNG_SRC ${HTTPNG_C_SRC} ${HEADERS})
+
+build_module(httpng_c "${HTTPNG_SRC}")
 
 if (HTTPNG_USE_LIBUV)
-    target_link_libraries(httpng wslay libh2o)
+    target_link_libraries(httpng_c wslay libh2o)
 else (HTTPNG_USE_LIBUV)
-    target_link_libraries(httpng wslay libh2o-evloop)
+    target_link_libraries(httpng_c wslay libh2o-evloop)
 endif (HTTPNG_USE_LIBUV)
 
-target_link_libraries(httpng xtm_api_static)
+target_link_libraries(httpng_c xtm_api_static)
 
 # Install library
-install(TARGETS httpng LIBRARY DESTINATION ${TARANTOOL_INSTALL_LIBDIR})
+install(TARGETS httpng_c LIBRARY DESTINATION ${TARANTOOL_INSTALL_LIBDIR})
+install(FILES httpng.lua DESTINATION ${TARANTOOL_INSTALL_LUADIR})

@@ -1,0 +1,413 @@
+#!/usr/bin/env tarantool
+
+local log = require("log")
+local uri = require("uri")
+local socket = require("socket")
+
+package.cpath = package.cpath .. ';./?.dylib;../?.dylib'
+local httpng_c = require("httpng_c")
+
+-- ========================================================================= --
+--                      local support functions.                             --
+-- ========================================================================= --
+
+--- Make contents of `tbl` in string representation, with indentation.
+-- Returns string if table type passed, nil otherwise.
+local function print_table_to_string(tbl)
+
+	local function tprint(tbl, indent, str_res)
+		for k, v in pairs(tbl) do
+			local formatting = string.rep("  ", indent) .. k .. ": "
+			if type(v) == "table" then
+				str_res = str_res .. formatting .. "\n"
+				str_res = tprint(v, indent + 1, str_res)
+			else
+				str_res = str_res .. formatting .. tostring(v) .. "\n"
+			end
+		end
+		return str_res
+	end
+
+	return (type(tbl) == "table" and tprint(tbl, 0, "") or nil)
+end
+
+--- Find out if the table is an array.
+-- Array is considered as a table with only [1...#table-1] indexes.
+local function table_is_array(t)
+	local i = 0
+	for _ in pairs(t) do
+		i = i + 1
+		if t[i] == nil then return false end
+	end
+	return true
+end
+
+--- Concatenate t2 table with t1, if they are arrays.
+local function array_concat(t1, t2)
+	for i = 1, #t2 do
+		t1[#t1 + 1] = t2[i]
+	end
+	return t1
+end
+
+--- Get list of IP addresses by hostname.
+local function get_ip_addrs_by_hostname(hostname)
+	local addrinfo = socket.getaddrinfo(hostname, nil, {
+			protocol = 'tcp'})
+	if addrinfo == nil then
+		return nil
+	end
+
+	local res = {}
+	for _, info in ipairs(addrinfo) do
+		table.insert(res, info.host)
+	end
+	return res
+end
+
+-- Returns table where every element has a key "<field1>:<field2>..."
+-- and a value is an array that contains the elements of @arr with the
+-- same values at provided fields.
+local function find_duplicates_by_fields(arr, ...)
+	local arg = { ... }
+
+	if #arg == 0 then
+		error("No fields provided")
+	end
+
+	local res = {}
+	for i, v in ipairs(arr) do
+		local key = ""
+		for j, field in ipairs(arg) do
+			key = key .. tostring(v[field])
+			if j ~= #arg then
+				key = key .. ":"
+			end
+		end
+
+		if res[key] == nil then
+			res[key] = { v }
+		else
+			res[key][#res[key] + 1] = v
+		end
+	end
+	return res
+end
+
+local function is_integer(obj)
+	return type(obj) == "number" and math.floor(obj) == obj and true or false
+end
+-- ========================================================================= --
+--                Listen defaults and functions for them.                    --
+-- ========================================================================= --
+
+
+local DEFAULT_LISTEN_PORT = 3300
+local MAX_PORT_VALUE = 65535
+
+-- If listen is absent, use this one.
+local DEFAULT_LISTEN_VALUE = DEFAULT_LISTEN_PORT
+
+-- Default parameters for protocols.
+local PROTOCOL_DEFAULTS = {
+	["http"] = {
+		port = 80,
+	},
+	["https"] = {
+		port =  443,
+	},
+}
+-- If IP adress isn't defined, create listeners with the same other parameters
+-- on these IP addresses.
+local DEFAULT_IP_ADDRESSES = {
+	"0.0.0.0",
+	"::",
+}
+
+local DEFAULT_USES_SNI = false
+
+--- Get element from PROTOCOL_DEFAULTS using field name and value at this field.
+-- Returns element if found, nil otherwise.
+local function get_protocol_defaults_by(field, value)
+	local res
+	for protocol, defaults in pairs(PROTOCOL_DEFAULTS) do
+		if defaults[field] == value then
+			res = defaults
+			break
+		end
+	end
+	return res
+end
+
+-- ========================================================================= --
+-- Functions for parsing <listen-conf>.
+--
+-- listen consists of, as we call it, <listen-conf>s.
+--
+-- If listen is a table and array(contains only [1...#listen-1] indexes),
+--   then each element is considered as a <listen-conf>.
+-- Otherwise, it is a single <listen-conf>.
+--
+-- "Clear" <listen-conf> is a table which has fields:
+--  * addr - string with IPv4/IPv6 address or hostname.
+--  * port - number of port to listen on.
+--  * tls - table of tables <tls_config> if listener using tls, nil otherwise.
+--      * <tls_config>:
+--          * certificate_file - path to ssl certificate.
+--          * certificate_key_file - path to key.
+--
+-- After preprocessing listen should be an array of "clear" <listen-conf>s.
+-- Every "clear" <listen-conf> describes one listener.
+-- ========================================================================= --
+
+--- Get "clear" <listen-conf> from parameters.
+-- addr and port are required. If tls is absent it will be set by default rules.
+local function get_clear_listen_conf(listen_conf)
+	assert(type(listen_conf.addr) == "string")
+	assert(type(listen_conf.port) == "number")
+	if (type(listen_conf.tls) == "table") then
+		assert(table_is_array(listen_conf.tls))
+		assert(type(listen_conf.uses_sni) == "boolean")
+		assert(#listen_conf.tls > 1 and listen_conf.uses_sni or #listen_conf.tls == 1)
+	else
+		assert(not listen_conf.tls)
+	end
+
+	return {
+		addr = listen_conf.addr,
+		port = listen_conf.port,
+		tls = not listen_conf.tls and nil or listen_conf.tls,
+		uses_sni = listen_conf.uses_sni
+	}
+end
+
+-------------------------------------------------------------------------------
+--                    Validation of <listen-conf> functions.                 --
+-------------------------------------------------------------------------------
+local function validate_number_listen_conf(listen_conf)
+	assert(type(listen_conf) == "number")
+	if not is_integer(listen_conf) then
+		error("port must be an integer, not float:\n" .. listen_conf)
+	end
+	if listen_conf < 0 or listen_conf > MAX_PORT_VALUE then
+		error(("incorrect port value (must be in interval (0, %s]):\n")
+			  :format(MAX_PORT_VALUE) ..
+			  listen_conf)
+	end
+end
+
+local function validate_string_listen_conf(listen_conf)
+	assert(type(listen_conf) == "string")
+end
+
+local function validate_table_listen_conf(listen_conf)
+	assert(type(listen_conf) == "table")
+	local addr = listen_conf.addr
+	local port = listen_conf.port
+	local tls = listen_conf.tls
+	local uses_sni = listen_conf.uses_sni
+
+	if addr and type(addr) ~= "string" then
+		error("'addr' must be a string:\n" .. print_table_to_string(listen_conf))
+	end
+	if port and type(port) ~= "number" then
+		error("'port' must be a number:\n" .. print_table_to_string(listen_conf))
+	end
+	if not tls then
+		return
+	end
+	if type(tls) ~= "table" then
+		error("'tls' must be a table:\n" .. print_table_to_string(listen_conf))
+	end
+	if table_is_array(tls) == false then
+		error("'tls' should be an array:\n" .. print_table_to_string(listen_conf))
+	end
+	if #tls > 1 and not uses_sni then
+		error("'uses_sni' can't be false or nil if there're certificates more than 1:\n" .. print_table_to_string(listen_conf))
+	end
+
+ -- TODO: throw warning if found unused fields
+
+	for _, tls_config in ipairs(tls) do
+		local certificate_file = tls_config.certificate_file
+		local certificate_key_file = tls_config.certificate_key_file
+		if certificate_file and type(certificate_file) ~= "string" then
+			error("'certificate_file'' must be a string\n" .. print_table_to_string(tls_config))
+		end
+		if certificate_key_file and type(certificate_key_file) ~= "string" then
+			error("'certificate_key_file' must be a string:\n" .. print_table_to_string(tls_config))
+		end
+		if certificate_file == nil or certificate_key_file == nil then
+			error("missing 'certificate_file' or 'certificate_key_file':\n" .. print_table_to_string(tls_config))
+		end
+	end
+end
+
+-------------------------------------------------------------------------------
+--           Getting "clear" <listen-conf>s from "dirty" one functions.      --
+-------------------------------------------------------------------------------
+
+local function get_clear_listen_confs_from_number(listen_conf)
+	validate_number_listen_conf(listen_conf)
+
+	local port = listen_conf
+	local res = {}
+	for _, addr in ipairs(DEFAULT_IP_ADDRESSES) do
+		local clear_conf = get_clear_listen_conf({addr = addr, port = port})
+		table.insert(res, clear_conf)
+	end
+	return res
+end
+
+local function get_clear_listen_confs_from_string(listen_conf)
+	validate_string_listen_conf(listen_conf)
+
+	local res
+	-- If listen_conf is protocol (http/https like).
+	if listen_conf:match("^[a-z%d]+$") and not get_ip_addrs_by_hostname(listen_conf) then
+		local protocol = listen_conf
+		local defaults = PROTOCOL_DEFAULTS[protocol]
+		if not defaults then
+			log.error("unknown protocol recieved: " .. protocol)
+			os.exit(1)
+		end
+		res = get_clear_listen_confs_from_number(defaults.port)
+
+	-- listen_conf is considered as uri.
+	else
+		local uri_table = uri.parse(listen_conf)
+		if uri_table == nil then
+			-- uri can't parse :port
+			if listen_conf:match("^:%d+$") then
+				local port = tonumber(listen_conf:sub(2))
+				res =  get_clear_listen_confs_from_number(port)
+				goto return_get_clear_lc_from_str
+			else
+				log.error("impossible to parse URI: " .. listen_conf)
+			end
+		end
+
+		local host = uri_table.host
+		local port = tonumber(uri_table.service)
+		local protocol = uri_table.scheme
+		if protocol and PROTOCOL_DEFAULTS[protocol] then
+			if not port then
+				port = PROTOCOL_DEFAULTS[protocol].port
+			end
+		end
+		if port == nil then
+			port = DEFAULT_LISTEN_PORT
+		end
+
+		local ip_addrs = get_ip_addrs_by_hostname(host)
+		if ip_addrs == nil then
+			log.error("unknown hostame: " .. host)
+		end
+
+		res = {}
+		for i = 1, #ip_addrs do
+			table.insert(res, get_clear_listen_conf({addr = ip_addrs[i], port = port}))
+		end
+	end
+::return_get_clear_lc_from_str:: return res
+end
+
+local function get_clear_listen_confs_from_table(listen_conf)
+	validate_table_listen_conf(listen_conf)
+
+	local addr = listen_conf.addr
+	local port = listen_conf.port
+	local tls = listen_conf.tls
+	local uses_sni = listen_conf.uses_sni
+	local res = {}
+
+	if uses_sni == nil then
+		uses_sni = DEFAULT_USES_SNI
+	end
+	if port == nil then
+		port = DEFAULT_LISTEN_PORT
+	end
+	if addr == nil then
+		res = {}
+		for _, addr in ipairs(DEFAULT_IP_ADDRESSES) do
+			local clear_conf = get_clear_listen_conf({addr = addr, port = port, tls = tls, uses_sni = uses_sni})
+			table.insert(res, clear_conf)
+		end
+	else
+		local clear_conf = get_clear_listen_conf({addr = addr, port = port, tls = tls, uses_sni = uses_sni})
+		table.insert(res, clear_conf)
+	end
+	return res
+end
+
+--- Get an array of "clear" <listen-conf>s from given <listen-conf>.
+-- Return value is an array because from one <listen-conf> can be created few
+-- "clear" <listen-confs>. E.g.: <listen-conf> = 3300 create few listeners with
+-- default ip addresses on port 3300.
+local function get_clear_listen_confs(listen_conf)
+	-- TODO: check unexpected input data
+	local res
+	if type(listen_conf) == "number" then
+		res = get_clear_listen_confs_from_number(listen_conf)
+	elseif type(listen_conf) == "string" then
+		res = get_clear_listen_confs_from_string(listen_conf)
+	elseif type(listen_conf) == "table" then
+		res = get_clear_listen_confs_from_table(listen_conf)
+	else
+		log.error("unknown listen_conf type:\n")
+		os.exit(1)
+	end
+	return res
+end
+
+-- ========================================================================= --
+--             High-level local functions of preprocessing 'listen'.         --
+-- ========================================================================= --
+
+-- TODO: exclude duplicate listeners
+--- Get listen as an array of "clear" <listen-conf>s.
+local function prepare_listen_for_c(listen)
+	if listen == nil then
+		listen = DEFAULT_LISTEN_VALUE
+	end
+
+	local result_listen
+	if type(listen) == "table" and table_is_array(listen) then
+		result_listen = {}
+		for i = 1, #listen do
+			local clear_listen_confs = get_clear_listen_confs(listen[i])
+			array_concat(result_listen, clear_listen_confs)
+		end
+	else
+		result_listen = get_clear_listen_confs(listen)
+	end
+	return result_listen
+end
+
+
+local function check_for_duplicate_listeners(listen)
+	local duplicate_listen = find_duplicates_by_fields(listen, "addr", "port")
+
+	for addr_port, duplicate_listeners in pairs(duplicate_listen) do
+		if #duplicate_listeners > 1 then
+			local err_msg = ("Duplicate listeners for %s found:\n%s"):format(
+					addr_port, print_table_to_string(duplicate_listeners))
+			log.error(err_msg)
+			os.exit(1)
+		end
+	end
+end
+
+-- Main cfg function.
+local function cfg(config)
+	local prepared_listen = prepare_listen_for_c(config.listen)
+	check_for_duplicate_listeners(prepared_listen)
+	config.listen = prepared_listen
+
+	log.debug("Listeners for C:\n" .. print_table_to_string(config.listen))
+	httpng_c.cfg(config)
+end
+
+return {
+	cfg = cfg,
+}
