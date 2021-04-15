@@ -1542,6 +1542,7 @@ lua_fiber_func(va_list ap)
 	lua_State *const L = va_arg(ap, lua_State *);
 
 	lua_response_t *const response = (lua_response_t *)&shuttle->payload;
+	thread_ctx_t *const thread_ctx = shuttle->thread_ctx;
 
 	/* User handler function, written in Lua. */
 	lua_rawgeti(L, LUA_REGISTRYINDEX, response->un.req.lua_handler_ref);
@@ -1593,7 +1594,6 @@ lua_fiber_func(va_list ap)
 	lua_createtable(L, 0, 2);
 	lua_setfield(L, -2, "headers");
 
-	thread_ctx_t *const thread_ctx = shuttle->thread_ctx;
 	if (lua_pcall(L, 2, 1, 0) != LUA_OK) {
 		/* FIXME: Should probably log this instead(?) */
 		fprintf(stderr, "User handler for \"\%s\" failed with error "
