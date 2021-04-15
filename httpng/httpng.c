@@ -1596,7 +1596,7 @@ lua_fiber_func(va_list ap)
 
 	if (lua_pcall(L, 2, 1, 0) != LUA_OK) {
 		/* FIXME: Should probably log this instead(?) */
-		fprintf(stderr, "User handler for \"\%s\" failed with error "
+		fprintf(stderr, "User handler for \"%s\" failed with error "
 			"\"%s\"\n", response->site_path, lua_tostring(L, -1));
 
 		if (response->cancelled) {
