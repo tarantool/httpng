@@ -2540,7 +2540,6 @@ static int on_shutdown(lua_State *L)
 			NULL);
 #else /* USE_LIBUV */
 		h2o_socket_read_stop(listener_ctx->sock);
-		h2o_socket_close(listener_ctx->sock);
 #endif /* USE_LIBUV */
 
 		tell_thread_to_terminate(thread_ctx);
@@ -2554,6 +2553,14 @@ static int on_shutdown(lua_State *L)
 		    !thread_ctx->thread_finished)
 			fiber_sleep(0.001);
 		pthread_join(thread_ctx->tid, NULL);
+
+#ifndef USE_LIBUV
+		/* FIXME: Need more than one. */
+		listener_ctx_t *const listener_ctx =
+			&thread_ctx->listener_ctxs[0];
+
+		h2o_socket_close(listener_ctx->sock);
+#endif /* USE_LIBUV */
 		close_async(thread_ctx);
 
 #ifdef USE_LIBUV
