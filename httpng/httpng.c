@@ -3146,6 +3146,7 @@ unsigned get_shuttle_size(void)
 
 static const struct luaL_Reg mylib[] = {
 	{"cfg", cfg},
+	{"shutdown", on_shutdown},
 	{NULL, NULL}
 };
 

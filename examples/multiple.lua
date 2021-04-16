@@ -367,6 +367,7 @@ local lua_sites = {
 }
 
 print '\n\n\nFilling in test spaces completed, launching HTTP server...\n\n'
+::restart::
 init_func({
     threads = 4,
     max_conn_per_thread = 64,
@@ -378,3 +379,11 @@ init_func({
     },
     sites = lua_sites,
 })
+
+fiber.sleep(10)
+print '\n\n\nStopping HTTP server...\n\n'
+httpng_lib.shutdown()
+print '\n\n\nSleeping...\n\n'
+fiber.sleep(1)
+print '\n\n\nLaunching again...\n\n'
+goto restart
