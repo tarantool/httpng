@@ -3078,6 +3078,12 @@ fibers_fail:
 		__sync_synchronize();
 		fiber_cancel(conf.tx_fiber_ptrs[idx]);
 	}
+	for (idx = 0; idx < fiber_idx; ++idx) {
+		const thread_ctx_t *const thread_ctx = &conf.thread_ctxs[idx];
+		while (!thread_ctx->tx_fiber_finished)
+			fiber_sleep(0.001);
+		assert(thread_ctx->tx_fiber_finished);
+	}
 
 xtm_to_tx_fail:
 	for (idx = 0; idx < xtm_to_tx_idx; ++idx)
