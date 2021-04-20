@@ -3,6 +3,7 @@
 
 #include <lauxlib.h>
 #include <module.h>
+#include <semaphore.h>
 
 #include <xtm/xtm_api.h>
 
@@ -19,6 +20,14 @@
 #ifdef USE_LIBUV
 #include <uv.h>
 #include <h2o/socket/uv-binding.h>
+#endif /* USE_LIBUV */
+
+#ifndef USE_LIBUV
+/* evloop requires initing ctx in http thread (uses thread local vars).
+ * Can't easily do the same for libuv - a lot of initializiation is
+ * required and some functions can return errors.
+ * */
+#define INIT_CTX_IN_HTTP_THREAD
 #endif /* USE_LIBUV */
 
 #ifndef lengthof
@@ -124,6 +133,7 @@ typedef struct {
 	} async;
 #endif /* USE_LIBUV */
 	h2o_linklist_t accepted_sockets;
+	sem_t can_be_terminated;
 	unsigned num_connections;
 	unsigned idx;
 	unsigned active_lua_fibers;
@@ -339,6 +349,13 @@ static void fill_http_headers(lua_State *L, lua_response_t *response,
 /* Called when dispatch must not fail */
 extern void stubborn_dispatch_uni(struct xtm_queue *queue, void *func,
 	void *param);
+
+#ifndef USE_LIBUV
+static void on_async_read(h2o_socket_t *sock, const char *err);
+static void init_async(thread_ctx_t *thread_ctx);
+#endif /* USE_LIBUV */
+static void close_async(thread_ctx_t *thread_ctx);
+static void async_cb(void *param);
 
 static inline bool lua_isstring_strict(lua_State *L, int idx)
 {
@@ -2205,11 +2222,18 @@ static bool init_worker_thread(unsigned thread_idx)
 	memset(&thread_ctx->ctx, 0, sizeof(thread_ctx->ctx));
 #ifdef USE_LIBUV
 	uv_loop_init(&thread_ctx->loop);
+#ifndef INIT_CTX_IN_HTTP_THREAD
 	h2o_context_init(&thread_ctx->ctx, &thread_ctx->loop,
 		&conf.globalconf);
+#endif /* INIT_CTX_IN_HTTP_THREAD */
 #else /* USE_LIBUV */
+	/* Can't call h2o_context_init() here, this must be done
+	 * from HTTP thread because it (indirectly)
+	 * uses thread-local variables. */
+#ifndef INIT_CTX_IN_HTTP_THREAD
 	h2o_context_init(&thread_ctx->ctx, h2o_evloop_create(),
 		&conf.globalconf);
+#endif /* INIT_CTX_IN_HTTP_THREAD */
 #endif /* USE_LIBUV */
 	h2o_linklist_init_anchor(&thread_ctx->accepted_sockets);
 
@@ -2252,15 +2276,6 @@ static bool init_worker_thread(unsigned thread_idx)
 	if (uv_poll_start(&thread_ctx->uv_poll_from_tx, UV_READABLE,
 	    on_call_from_tx))
 		goto uv_poll_start_failed;
-#else /* USE_LIBUV */
-	listener_ctx->sock = h2o_evloop_socket_create(thread_ctx->ctx.loop,
-		listener_ctx->fd, H2O_SOCKET_FLAG_DONT_READ);
-	listener_ctx->sock->data = listener_ctx;
-
-	thread_ctx->sock_from_tx =
-		h2o_evloop_socket_create(thread_ctx->ctx.loop,
-			xtm_fd(thread_ctx->queue_from_tx),
-			H2O_SOCKET_FLAG_DONT_READ);
 #endif /* USE_LIBUV */
 
 	thread_ctx->active_lua_fibers = 0;
@@ -2287,9 +2302,13 @@ uv_tcp_init_failed:
 dup_failed:
 #ifdef USE_LIBUV
 	uv_loop_close(&thread_ctx->loop);
+#ifndef INIT_CTX_IN_HTTP_THREAD
 	h2o_context_dispose(&thread_ctx->ctx);
+#endif /* INIT_CTX_IN_HTTP_THREAD */
 #else /* USE_LIBUV */
+#ifndef INIT_CTX_IN_HTTP_THREAD
 	h2o_context_dispose(&thread_ctx->ctx);
+#endif /* INIT_CTX_IN_HTTP_THREAD */
 	h2o_evloop_destroy(thread_ctx->ctx.loop);
 #endif /* USE_LIBUV */
 
@@ -2357,6 +2376,23 @@ static void *worker_func(void *param)
 	thread_ctx_t *const thread_ctx = &conf.thread_ctxs[thread_idx];
 	curr_thread_ctx = thread_ctx;
 #ifdef USE_LIBUV
+#ifdef INIT_CTX_IN_HTTP_THREAD
+	h2o_context_init(&thread_ctx->ctx, &thread_ctx->loop,
+		&conf.globalconf);
+#endif /* INIT_CTX_IN_HTTP_THREAD */
+	uv_async_init(&thread_ctx->loop, &thread_ctx->async,
+		(uv_async_cb)async_cb);
+#else /* USE_LIBUV */
+#ifdef INIT_CTX_IN_HTTP_THREAD
+	h2o_context_init(&thread_ctx->ctx, h2o_evloop_create(),
+		&conf.globalconf);
+#endif /* INIT_CTX_IN_HTTP_THREAD */
+	init_async(thread_ctx);
+#endif /* USE_LIBUV */
+
+	__sync_synchronize();
+	sem_post(&thread_ctx->can_be_terminated);
+#ifdef USE_LIBUV
 	/* Process incoming connections/data and requests
 	 * from TX thread. */
 	uv_run(&thread_ctx->loop, UV_RUN_DEFAULT);
@@ -2373,6 +2409,15 @@ static void *worker_func(void *param)
 	/* FIXME: Need more than one. */
 	listener_ctx_t *listener_ctx = &thread_ctx->listener_ctxs[0];
 
+	listener_ctx->sock = h2o_evloop_socket_create(thread_ctx->ctx.loop,
+		listener_ctx->fd, H2O_SOCKET_FLAG_DONT_READ);
+	listener_ctx->sock->data = listener_ctx;
+
+	thread_ctx->sock_from_tx =
+		h2o_evloop_socket_create(thread_ctx->ctx.loop,
+			xtm_fd(thread_ctx->queue_from_tx),
+			H2O_SOCKET_FLAG_DONT_READ);
+
 	h2o_socket_read_start(thread_ctx->sock_from_tx, on_call_from_tx);
 	h2o_socket_read_start(listener_ctx->sock, on_accept);
 	h2o_evloop_t *loop = thread_ctx->ctx.loop;
@@ -2387,6 +2432,13 @@ static void *worker_func(void *param)
 	h2o_socket_read_stop(thread_ctx->sock_from_tx);
 	h2o_socket_close(thread_ctx->sock_from_tx);
 #endif /* USE_LIBUV */
+
+#ifdef INIT_CTX_IN_HTTP_THREAD
+	h2o_context_dispose(&thread_ctx->ctx);
+#endif /* INIT_CTX_IN_HTTP_THREAD */
+
+	close_async(thread_ctx);
+	sem_destroy(&thread_ctx->can_be_terminated);
 
 	thread_ctx->thread_finished = true;
 	return NULL;
@@ -2415,9 +2467,13 @@ static void deinit_worker_thread(unsigned thread_idx)
 
 #ifdef USE_LIBUV
 	uv_loop_close(&thread_ctx->loop);
+#ifndef INIT_CTX_IN_HTTP_THREAD
 	h2o_context_dispose(&thread_ctx->ctx);
+#endif /* INIT_CTX_IN_HTTP_THREAD */
 #else /* USE_LIBUV */
+#ifndef INIT_CTX_IN_HTTP_THREAD
 	h2o_context_dispose(&thread_ctx->ctx);
+#endif /* INIT_CTX_IN_HTTP_THREAD */
 	h2o_evloop_destroy(loop);
 #endif /* USE_LIBUV */
 
@@ -2511,6 +2567,8 @@ static void close_async(thread_ctx_t *thread_ctx)
 /* Launched in TX thread. */
 static void tell_thread_to_terminate(thread_ctx_t *thread_ctx)
 {
+	while (sem_wait(&thread_ctx->can_be_terminated) < 0 && errno == EINTR)
+		;
 #ifdef USE_LIBUV
 	uv_async_send(&thread_ctx->async);
 #else /* USE_LIBUV */
@@ -2561,15 +2619,18 @@ static int on_shutdown(lua_State *L)
 
 		h2o_socket_close(listener_ctx->sock);
 #endif /* USE_LIBUV */
-		close_async(thread_ctx);
 
 #ifdef USE_LIBUV
 		uv_close((uv_handle_t *)&thread_ctx->uv_poll_from_tx,
 			NULL);
 		uv_loop_close(&thread_ctx->loop);
+#ifndef INIT_CTX_IN_HTTP_THREAD
 		h2o_context_dispose(&thread_ctx->ctx);
+#endif /* INIT_CTX_IN_HTTP_THREAD */
 #else /* USE_LIBUV */
+#ifndef INIT_CTX_IN_HTTP_THREAD
 		h2o_context_dispose(&thread_ctx->ctx);
+#endif /* INIT_CTX_IN_HTTP_THREAD */
 		h2o_evloop_destroy(thread_ctx->ctx.loop);
 #endif /* USE_LIBUV */
 
@@ -3014,32 +3075,21 @@ Skip_openssl_security_level:
 			goto threads_init_fail;
 		}
 
-	{
-		unsigned idx;
-		for (idx = 0; idx < conf.num_threads; ++idx) {
-			thread_ctx_t *const thread_ctx =
-				&conf.thread_ctxs[idx];
-#ifdef USE_LIBUV
-			uv_async_init(&thread_ctx->loop,
-				&thread_ctx->async,
-				(uv_async_cb)async_cb);
-#else /* USE_LIBUV */
-			init_async(thread_ctx);
-#endif /* USE_LIBUV */
-		}
-	}
-
 	__sync_synchronize();
 
 	/* Start processing HTTP requests and requests from TX thread. */
 	unsigned thr_launch_idx;
 	for (thr_launch_idx = 0; thr_launch_idx < conf.num_threads;
-	    ++thr_launch_idx)
-		if (pthread_create(&conf.thread_ctxs[thr_launch_idx].tid,
+	    ++thr_launch_idx) {
+		thread_ctx_t *const thread_ctx =
+			&conf.thread_ctxs[thr_launch_idx];
+		sem_init(&thread_ctx->can_be_terminated, 0, 0);
+		if (pthread_create(&thread_ctx->tid,
 		    NULL, worker_func, (void *)(uintptr_t)thr_launch_idx)) {
 			lerr = "Failed to launch worker threads";
 			goto threads_launch_fail;
 		}
+	}
 
 	lua_getglobal(L, "box");
 	if (lua_type(L, -1) == LUA_TTABLE) {
@@ -3071,9 +3121,6 @@ threads_launch_fail:
 
 	for (idx = 0; idx < thr_launch_idx; ++idx)
 		pthread_join(conf.thread_ctxs[idx].tid, NULL);
-
-	for (idx = 0; idx < thr_launch_idx; ++idx)
-		close_async(&conf.thread_ctxs[idx]);
 
 threads_init_fail:
 	for (idx = 0; idx < thr_init_idx; ++idx)
