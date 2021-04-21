@@ -103,5 +103,11 @@ endif (HTTPNG_USE_LIBUV)
 
 target_link_libraries(httpng ${LIBS})
 
+if (NOT(ENABLE_ASAN))
+    # Just test
+    add_custom_target(test-linkability ALL COMMAND "tarantool" "${CMAKE_CURRENT_SOURCE_DIR}/tests/linkability.lua")
+    add_dependencies(test-linkability httpng)
+endif (NOT(ENABLE_ASAN))
+
 # Install library
 install(TARGETS httpng LIBRARY DESTINATION ${TARANTOOL_INSTALL_LIBDIR})
