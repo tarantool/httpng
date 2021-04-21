@@ -93,13 +93,15 @@ set(HEADERS include/tarantool-httpng/httpng.h)
 
 build_module(httpng httpng/httpng.c ${HEADERS})
 
+set(LIBS wslay xtm_api_static)
+
 if (HTTPNG_USE_LIBUV)
-    target_link_libraries(httpng wslay libh2o)
+    set(LIBS ${LIBS} libh2o)
 else (HTTPNG_USE_LIBUV)
-    target_link_libraries(httpng wslay libh2o-evloop)
+    set(LIBS ${LIBS} libh2o-evloop)
 endif (HTTPNG_USE_LIBUV)
 
-target_link_libraries(httpng xtm_api_static)
+target_link_libraries(httpng ${LIBS})
 
 # Install library
 install(TARGETS httpng LIBRARY DESTINATION ${TARANTOOL_INSTALL_LIBDIR})
