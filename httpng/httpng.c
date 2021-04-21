@@ -2331,11 +2331,38 @@ static void finish_processing_lua_reqs_in_tx(thread_ctx_t *thread_ctx)
 /* Launched in HTTP server thread. */
 static inline void tell_close_connection(our_sock_t *item)
 {
+	static const char err[] = "shutting down";
+	/* Using read callback is faster and futureproof but, alas,
+	 * we can't do this if it is NULL. */
 #ifdef USE_LIBUV
-	item->super.read_cb((uv_stream_t *)&item->super, -1, NULL);
+	struct st_h2o_uv_socket_t *const uv_sock = item->super.data;
+
+	/* This is not really safe (st_h2o_uv_socket_t can be changed
+	 * so h2o_socket_t is no longer first member - unlikely but possible)
+	 * but the alternative is to include A LOT of h2o internal headers. */
+	h2o_socket_t *const sock = (h2o_socket_t *)uv_sock;
 #else /* USE_LIBUV */
-	item->super.super._cb.read(&item->super.super, "shutting down");
+	h2o_socket_t *const sock = &item->super.super;
 #endif /* USE_LIBUV */
+	h2o_socket_read_stop(sock);
+	/* Alas, we have to find proper handler ourself. */
+	switch (sock->proto) {
+	case SOCK_PROTO_SSL:
+		h2o_ssl_on_handshake_complete(sock, err);
+		break;
+	case SOCK_PROTO_HTTP1:
+		h2o_http1_reqread_on_read(sock, err);
+		break;
+	case SOCK_PROTO_HTTP2:
+		h2o_http2_close_connection_now(sock->data);
+		break;
+	case SOCK_PROTO_EXPECT_PROXY:
+		/* FIXME: Looks like this would never happen. */
+		h2o_on_read_proxy_line(sock, err);
+		break;
+	default:
+		assert(!"Invalid sock proto");
+	}
 }
 
 /* Launched in HTTP server thread. */
