@@ -16,6 +16,7 @@
 #include <h2o.h>
 #include <h2o/websocket.h>
 #include "../third_party/h2o/deps/cloexec/cloexec.h"
+#include "httpng_sem.h"
 
 #ifdef USE_LIBUV
 #include <uv.h>
@@ -133,7 +134,7 @@ typedef struct {
 	} async;
 #endif /* USE_LIBUV */
 	h2o_linklist_t accepted_sockets;
-	sem_t can_be_terminated;
+	httpng_sem_t can_be_terminated;
 	unsigned num_connections;
 	unsigned idx;
 	unsigned active_lua_fibers;
@@ -2419,7 +2420,7 @@ static void *worker_func(void *param)
 #endif /* USE_LIBUV */
 
 	__sync_synchronize();
-	sem_post(&thread_ctx->can_be_terminated);
+	httpng_sem_post(&thread_ctx->can_be_terminated);
 #ifdef USE_LIBUV
 	/* Process incoming connections/data and requests
 	 * from TX thread. */
@@ -2469,7 +2470,7 @@ static void *worker_func(void *param)
 #endif /* INIT_CTX_IN_HTTP_THREAD */
 
 	close_async(thread_ctx);
-	sem_destroy(&thread_ctx->can_be_terminated);
+	httpng_sem_destroy(&thread_ctx->can_be_terminated);
 
 	thread_ctx->thread_finished = true;
 	return NULL;
@@ -2594,8 +2595,7 @@ static void close_async(thread_ctx_t *thread_ctx)
 /* Launched in TX thread. */
 static void tell_thread_to_terminate(thread_ctx_t *thread_ctx)
 {
-	while (sem_wait(&thread_ctx->can_be_terminated) < 0 && errno == EINTR)
-		;
+	httpng_sem_wait(&thread_ctx->can_be_terminated);
 #ifdef USE_LIBUV
 	uv_async_send(&thread_ctx->async);
 #else /* USE_LIBUV */
@@ -3108,7 +3108,7 @@ Skip_openssl_security_level:
 	    ++thr_launch_idx) {
 		thread_ctx_t *const thread_ctx =
 			&conf.thread_ctxs[thr_launch_idx];
-		sem_init(&thread_ctx->can_be_terminated, 0, 0);
+		httpng_sem_init(&thread_ctx->can_be_terminated, 0);
 		if (pthread_create(&thread_ctx->tid,
 		    NULL, worker_func, (void *)(uintptr_t)thr_launch_idx)) {
 			lerr = "Failed to launch worker threads";
