@@ -323,6 +323,7 @@ static struct {
 #ifdef SPLIT_LARGE_BODY
 	bool use_body_split;
 #endif /* SPLIT_LARGE_BODY */
+	bool configured;
 } conf = {
 	.tfo_queues = H2O_DEFAULT_LENGTH_TCP_FASTOPEN_QUEUE,
 };
@@ -2607,6 +2608,8 @@ static void tell_thread_to_terminate(thread_ctx_t *thread_ctx)
 /* Launched in TX thread. */
 static int on_shutdown(lua_State *L)
 {
+	if (!conf.configured)
+		return luaL_error(L, "Server is not launched");
 	unsigned thr_idx;
 	for (thr_idx = 0; thr_idx < conf.num_threads; ++thr_idx) {
 		thread_ctx_t *const thread_ctx =
@@ -2658,12 +2661,15 @@ static int on_shutdown(lua_State *L)
 		xtm_delete(thread_ctx->queue_to_tx);
 		xtm_delete(thread_ctx->queue_from_tx);
 	}
+	conf.configured = false;
 	return 0;
 }
 
 /* Lua parameters: lua_sites, function_to_call, function_param */
 int cfg(lua_State *L)
 {
+	if (conf.configured)
+		return luaL_error(L, "Server is already launched");
 	const char *lerr = NULL; /* Error message for caller. */
 	unsigned c_handlers = 0;
 	enum {
@@ -3127,6 +3133,7 @@ Skip_openssl_security_level:
 	} else
 		fprintf(stderr, "Warning: global 'box' is not a table\n");
 
+	conf.configured = true;
 	return 0;
 
 threads_launch_fail:
