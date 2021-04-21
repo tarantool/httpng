@@ -3198,15 +3198,6 @@ register_host_failed:
 	return luaL_error(L, lerr);
 }
 
-int deinit(lua_State *L)
-{
-	(void)L;
-	/* FIXME: Finish requests processing, terminate workers. */
-	free(conf.listener_cfgs);
-	free(conf.thread_ctxs);
-	return 0;
-}
-
 unsigned get_shuttle_size(void)
 {
 	assert(conf.shuttle_size >= MIN_shuttle_size);
