@@ -2661,6 +2661,9 @@ static int on_shutdown(lua_State *L)
 		xtm_delete(thread_ctx->queue_to_tx);
 		xtm_delete(thread_ctx->queue_from_tx);
 	}
+	h2o_config_dispose(&conf.globalconf);
+	free(conf.listener_cfgs);
+	free(conf.thread_ctxs);
 	conf.configured = false;
 	return 0;
 }
