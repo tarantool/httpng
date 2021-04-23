@@ -329,6 +329,7 @@ static struct {
 	unsigned max_path_len_lua;
 	unsigned max_recv_bytes_lua_websocket;
 	int tfo_queues;
+	int on_shutdown_ref;
 #ifdef SPLIT_LARGE_BODY
 	bool use_body_split;
 #endif /* SPLIT_LARGE_BODY */
@@ -337,6 +338,7 @@ static struct {
 	bool is_shutdown_in_progress;
 } conf = {
 	.tfo_queues = H2O_DEFAULT_LENGTH_TCP_FASTOPEN_QUEUE,
+	.on_shutdown_ref = LUA_REFNIL,
 };
 
 __thread thread_ctx_t *curr_thread_ctx;
@@ -368,7 +370,7 @@ static void init_async(thread_ctx_t *thread_ctx);
 #endif /* USE_LIBUV */
 static void close_async(thread_ctx_t *thread_ctx);
 static void async_cb(void *param);
-static int on_shutdown(lua_State *L);
+static int on_shutdown_callback(lua_State *L);
 
 static inline void my_xtm_delete_queue_from_tx(thread_ctx_t *thread_ctx)
 {
@@ -2636,9 +2638,29 @@ static void tell_thread_to_terminate(thread_ctx_t *thread_ctx)
 #endif /* USE_LIBUV */
 }
 
-/* Launched in TX thread. */
-static void setup_on_shutdown(lua_State *L, bool setup)
+static void configure_shutdown_callback(lua_State *L, bool setup)
 {
+	if (lua_pcall(L, 2, 0, 0) == LUA_OK) {
+		conf.is_on_shutdown_setup = setup;
+		if (!setup) {
+			luaL_unref(L, LUA_REGISTRYINDEX, conf.on_shutdown_ref);
+			conf.on_shutdown_ref = LUA_REFNIL;
+		}
+	} else
+		fprintf(stderr, "Warning: box.ctl.on_shutdown() failed: %s\n",
+			lua_tostring(L, -1));
+}
+
+/* Launched in TX thread. */
+static void setup_on_shutdown(lua_State *L, bool setup,
+	bool called_from_callback)
+{
+	if (conf.on_shutdown_ref == LUA_REFNIL && !called_from_callback) {
+		assert(setup);
+		lua_pushcfunction(L, on_shutdown_callback);
+		conf.on_shutdown_ref = luaL_ref(L, LUA_REGISTRYINDEX);
+	}
+
 	lua_getglobal(L, "box");
 	if (lua_type(L, -1) == LUA_TTABLE) {
 		lua_getfield(L, -1, "ctl");
@@ -2646,18 +2668,16 @@ static void setup_on_shutdown(lua_State *L, bool setup)
 			lua_getfield(L, -1, "on_shutdown");
 			if (lua_type(L, -1) == LUA_TFUNCTION) {
 				if (setup) {
-					lua_pushcfunction(L, on_shutdown);
+					lua_rawgeti(L, LUA_REGISTRYINDEX,
+						conf.on_shutdown_ref);
 					lua_pushnil(L);
-				} else {
+					configure_shutdown_callback(L, setup);
+				} else if (!called_from_callback) {
 					lua_pushnil(L);
-					lua_pushcfunction(L, on_shutdown);
+					lua_rawgeti(L, LUA_REGISTRYINDEX,
+						conf.on_shutdown_ref);
+					configure_shutdown_callback(L, setup);
 				}
-				if (lua_pcall(L, 2, 0, 0) == LUA_OK)
-					conf.is_on_shutdown_setup = setup;
-				else
-					fprintf(stderr,
-			"Warning: box.ctl.on_shutdown() failed: %s\n",
-						lua_tostring(L, -1));
 			} else
 				fprintf(stderr,
 	"Warning: global 'box.ctl.on_shutdown' is not a function\n");
@@ -2669,7 +2689,7 @@ static void setup_on_shutdown(lua_State *L, bool setup)
 }
 
 /* Launched in TX thread. */
-static int on_shutdown(lua_State *L)
+static int on_shutdown_internal(lua_State *L, bool called_from_callback)
 {
 	if (!conf.configured)
 		return luaL_error(L, "Server is not launched");
@@ -2680,7 +2700,7 @@ static int on_shutdown(lua_State *L)
 	}
 	conf.is_shutdown_in_progress = true;
 	if (conf.is_on_shutdown_setup)
-		setup_on_shutdown(L, false);
+		setup_on_shutdown(L, false, called_from_callback);
 	unsigned thr_idx;
 	for (thr_idx = 0; thr_idx < conf.num_threads; ++thr_idx) {
 		thread_ctx_t *const thread_ctx =
@@ -2747,6 +2767,18 @@ static int on_shutdown(lua_State *L)
 	complain_loudly_about_leaked_fds();
 	conf.is_shutdown_in_progress = false;
 	return 0;
+}
+
+/* Launched in TX thread. */
+static int on_shutdown_callback(lua_State *L)
+{
+	return on_shutdown_internal(L, true);
+}
+
+/* Launched in TX thread. */
+static int on_shutdown_for_user(lua_State *L)
+{
+	return on_shutdown_internal(L, false);
 }
 
 /* Lua parameters: lua_sites, function_to_call, function_param */
@@ -3198,7 +3230,7 @@ Skip_openssl_security_level:
 	}
 
 	if (!conf.is_on_shutdown_setup)
-		setup_on_shutdown(L, true);
+		setup_on_shutdown(L, true, false);
 	conf.configured = true;
 	return 0;
 
@@ -3273,7 +3305,7 @@ unsigned get_shuttle_size(void)
 
 static const struct luaL_Reg mylib[] = {
 	{"cfg", cfg},
-	{"shutdown", on_shutdown},
+	{"shutdown", on_shutdown_for_user},
 	{NULL, NULL}
 };
 
