@@ -1,5 +1,6 @@
 box.cfg{
     listen = 3306,
+    wal_mode = 'none',
 }
 
 local s = box.schema.space.create('tester')

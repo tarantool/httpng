@@ -7,6 +7,7 @@ require('strict')
 print '\n\n\n\n\nFilling in test spaces, please wait...\n\n\n'
 box.cfg{
     listen = 3306,
+    wal_mode = 'none',
 }
 
 local s = box.schema.space.create('tester')
