@@ -418,7 +418,7 @@ static inline thread_ctx_t *get_curr_thread_ctx(void)
 static inline void stubborn_dispatch(struct xtm_queue *queue,
 	void (*func)(shuttle_t *), shuttle_t *shuttle)
 {
-	stubborn_dispatch_uni(queue, func, shuttle);
+	stubborn_dispatch_uni(queue, (void *)func, (void *)shuttle);
 }
 
 /* FIXME: Use lua_tointegerx() when we would no longer care about
@@ -439,7 +439,7 @@ static inline shuttle_t *get_shuttle_from_generator_lua(
 /* Called when dispatch must not fail */
 void stubborn_dispatch_uni(struct xtm_queue *queue, void *func, void *param)
 {
-	while (xtm_fun_dispatch(queue, func, param, 0)) {
+	while (xtm_fun_dispatch(queue, (void (*)(void*))func, param, 0)) {
 		/* Error; we must not fail so retry a little later. */
 		fiber_sleep(0);
 	}
@@ -449,21 +449,22 @@ void stubborn_dispatch_uni(struct xtm_queue *queue, void *func, void *param)
 static inline void stubborn_dispatch_lua(struct xtm_queue *queue,
 	void (*func)(lua_response_t *), lua_response_t *param)
 {
-	stubborn_dispatch_uni(queue, func, param);
+	stubborn_dispatch_uni(queue, (void *)func, param);
 }
 
 /* Called when dispatch must not fail. */
 static inline void stubborn_dispatch_recv(struct xtm_queue *queue,
 	void (*func)(recv_data_t *), recv_data_t *param)
 {
-	stubborn_dispatch_uni(queue, func, param);
+	stubborn_dispatch_uni(queue, (void *)func, param);
 }
 
 /* Called when dispatch must not fail. */
 static inline void stubborn_dispatch_thr_to_tx(thread_ctx_t *thread_ctx,
 	void (*func)(thread_ctx_t *))
 {
-	stubborn_dispatch_uni(thread_ctx->queue_to_tx, func, thread_ctx);
+	stubborn_dispatch_uni(thread_ctx->queue_to_tx,
+		(void *)func, thread_ctx);
 }
 
 /* Called when dispatch must not fail. */
@@ -471,7 +472,7 @@ static inline void stubborn_dispatch_thr_from_tx(
 	thread_ctx_t *thread_ctx, void (*func)(thread_ctx_t *))
 {
 	stubborn_dispatch_uni(thread_ctx->queue_from_tx,
-		func, thread_ctx);
+		(void *)func, thread_ctx);
 }
 
 /* Launched in HTTP server thread. */
@@ -660,7 +661,7 @@ static void proceed_sending_lua(h2o_generator_t *self, h2o_req_t *req)
 static inline void send_lua(h2o_req_t *req, lua_response_t *const response)
 {
 	h2o_iovec_t buf;
-	buf.base = (void *)response->un.resp.any.payload;
+	buf.base = (char *)response->un.resp.any.payload;
 	buf.len = response->un.resp.any.payload_len;
 	h2o_send(req, &buf, 1, response->un.resp.any.is_last_send
 		? H2O_SEND_STATE_FINAL : H2O_SEND_STATE_IN_PROGRESS);
@@ -722,8 +723,8 @@ static inline void add_http_header_to_lua_response(
 		/* FIXME: Misconfiguration, should we log something? */
 		return;
 
-	response->headers[response->num_headers++] =
-		(http_header_entry_t){key, value, key_len, value_len};
+	response->headers[response->num_headers++] = (http_header_entry_t)
+		{key, value, (unsigned)key_len, (unsigned)value_len};
 }
 
 /* Launched in TX thread.
@@ -974,7 +975,7 @@ static void process_lua_websocket_received_data_in_tx(recv_data_t *recv_data)
 static void websocket_msg_callback(h2o_websocket_conn_t *conn,
 	const struct wslay_event_on_msg_recv_arg *arg)
 {
-	shuttle_t *const shuttle = conn->data;
+	shuttle_t *const shuttle = (shuttle_t*)conn->data;
 	if (arg == NULL) {
 		lua_response_t *const response =
 			(lua_response_t *)&shuttle->payload;
@@ -1344,7 +1345,7 @@ static inline int fill_received_headers_and_body(lua_State *L,
 	/* FIXME: Should use content-length to preallocate enough memory and
 	 * avoid allocations and copying. Or we can just allocate in
 	 * HTTP server thread and pass pointer. */
-	char *body_buf = malloc(response->un.req.body_len);
+	char *body_buf = (char *)malloc(response->un.req.body_len);
 	if (body_buf == NULL)
 		/* There was memory allocation failure.
 		 * FIXME: Should log this. */
@@ -1367,7 +1368,7 @@ static inline int fill_received_headers_and_body(lua_State *L,
 		}
 
 		{
-			char *const new_body_buf = realloc(body_buf,
+			char *const new_body_buf = (char *)realloc(body_buf,
 				body_offset + response->un.req.body_len);
 			if (new_body_buf == NULL) {
 				free(body_buf);
@@ -1954,7 +1955,7 @@ void free_shuttle_with_anchor(shuttle_t *shuttle)
 /* Launched in HTTP server thread. */
 static void anchor_dispose(void *param)
 {
-	anchor_t *const anchor = param;
+	anchor_t *const anchor = (anchor_t*)param;
 	shuttle_t *const shuttle = anchor->shuttle;
 	if (shuttle != NULL) {
 		if (anchor->user_free_shuttle != NULL)
@@ -1973,7 +1974,7 @@ static void anchor_dispose(void *param)
 /* Launched in HTTP server thread. */
 shuttle_t *prepare_shuttle(h2o_req_t *req)
 {
-	anchor_t *const anchor = h2o_mem_alloc_shared(&req->pool,
+	anchor_t *const anchor = (anchor_t *)h2o_mem_alloc_shared(&req->pool,
 		sizeof(anchor_t), &anchor_dispose);
 	anchor->user_free_shuttle = NULL;
 	thread_ctx_t *const thread_ctx = get_curr_thread_ctx();
@@ -2380,7 +2381,7 @@ static inline void tell_close_connection(our_sock_t *item)
 		h2o_http1_reqread_on_read(sock, err);
 		break;
 	case SOCK_PROTO_HTTP2:
-		h2o_http2_close_connection_now(sock->data);
+		h2o_http2_close_connection_now((h2o_http2_conn_t *)sock->data);
 		break;
 	case SOCK_PROTO_EXPECT_PROXY:
 		/* FIXME: Looks like this would never happen. */
@@ -2906,7 +2907,7 @@ Skip_c_sites:
 		}
 
 		lua_site_t *const new_lua_sites =
-			realloc(lua_sites, sizeof(lua_site_t) *
+			(lua_site_t *)realloc(lua_sites, sizeof(lua_site_t) *
 				(lua_site_count + 1));
 		if (new_lua_sites == NULL) {
 			lerr = "Failed to allocate memory "
@@ -2948,7 +2949,7 @@ Skip_lua_sites:
 		goto invalid_handler;
 	}
 
-	lua_site_t *const new_lua_sites = realloc(lua_sites,
+	lua_site_t *const new_lua_sites = (lua_site_t *)realloc(lua_sites,
 		sizeof(lua_site_t) * (lua_site_count + 1));
 	if (new_lua_sites == NULL) {
 		lerr = "Failed to allocate memory for Lua sites C array";

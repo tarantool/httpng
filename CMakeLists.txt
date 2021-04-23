@@ -91,6 +91,7 @@ endif (HTTPNG_USE_LIBUV)
 
 set(HEADERS include/tarantool-httpng/httpng.h)
 
+#set_source_files_properties(httpng/httpng.c PROPERTIES LANGUAGE CXX)
 build_module(httpng httpng/httpng.c ${HEADERS})
 
 set(LIBS wslay xtm_api_static)
