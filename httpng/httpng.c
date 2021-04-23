@@ -102,6 +102,11 @@
 #define TLS1_2_STR "tls1.2"
 #define TLS1_3_STR "tls1.3"
 
+#define my_container_of(ptr, type, member) ({ \
+	const typeof( ((type *)0)->member  ) *__mptr = \
+		(typeof( &((type *)0)->member  ))(ptr); \
+	(type *)( (char *)__mptr - offsetof(type,member)  );})
+
 struct listener_ctx;
 
 typedef struct {
@@ -1990,7 +1995,7 @@ shuttle_t *prepare_shuttle(h2o_req_t *req)
 
 static void on_underlying_socket_free(void *data)
 {
-	h2o_linklist_unlink_fast(&container_of(data,
+	h2o_linklist_unlink_fast(&my_container_of(data,
 		our_sock_t, super)->accepted_list);
 	thread_ctx_t *const thread_ctx = get_curr_thread_ctx();
 	--thread_ctx->num_connections;
@@ -2562,7 +2567,7 @@ tx_fiber_func(va_list ap)
 static void async_cb(void *param)
 {
 	thread_ctx_t *const thread_ctx =
-		container_of(param, thread_ctx_t, async);
+		my_container_of(param, thread_ctx_t, async);
 	thread_ctx->shutdown_requested = true;
 #ifdef USE_LIBUV
 	uv_stop(&thread_ctx->loop);
@@ -2917,7 +2922,7 @@ Skip_c_sites:
 		lua_sites = new_lua_sites;
 		lua_site_t *const lua_site = &lua_sites[lua_site_count++];
 		lua_site->lua_handler_ref = LUA_REFNIL;
-		if ((lua_site->path = malloc(path_len + 1)) == NULL) {
+		if ((lua_site->path = (char *)malloc(path_len + 1)) == NULL) {
 			lerr = "Failed to allocate memory "
 				"for Lua sites C array path";
 			goto invalid_sites;
@@ -2958,7 +2963,7 @@ Skip_lua_sites:
 	lua_sites = new_lua_sites;
 	lua_site_t *const lua_site = &lua_sites[lua_site_count++];
 	lua_site->lua_handler_ref = LUA_REFNIL;
-	if ((lua_site->path = malloc(1 + 1)) == NULL) {
+	if ((lua_site->path = (char *)malloc(1 + 1)) == NULL) {
 		lerr = "Failed to allocate memory for Lua sites C array path";
 		goto invalid_handler;
 	}
