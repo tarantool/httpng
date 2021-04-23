@@ -325,6 +325,8 @@ static struct {
 	bool use_body_split;
 #endif /* SPLIT_LARGE_BODY */
 	bool configured;
+	bool is_on_shutdown_setup;
+	bool is_shutdown_in_progress;
 } conf = {
 	.tfo_queues = H2O_DEFAULT_LENGTH_TCP_FASTOPEN_QUEUE,
 };
@@ -358,6 +360,7 @@ static void init_async(thread_ctx_t *thread_ctx);
 #endif /* USE_LIBUV */
 static void close_async(thread_ctx_t *thread_ctx);
 static void async_cb(void *param);
+static int on_shutdown(lua_State *L);
 
 static inline bool lua_isstring_strict(lua_State *L, int idx)
 {
@@ -2606,10 +2609,50 @@ static void tell_thread_to_terminate(thread_ctx_t *thread_ctx)
 }
 
 /* Launched in TX thread. */
+static void setup_on_shutdown(lua_State *L, bool setup)
+{
+	lua_getglobal(L, "box");
+	if (lua_type(L, -1) == LUA_TTABLE) {
+		lua_getfield(L, -1, "ctl");
+		if (lua_type(L, -1) == LUA_TTABLE) {
+			lua_getfield(L, -1, "on_shutdown");
+			if (lua_type(L, -1) == LUA_TFUNCTION) {
+				if (setup) {
+					lua_pushcfunction(L, on_shutdown);
+					lua_pushnil(L);
+				} else {
+					lua_pushnil(L);
+					lua_pushcfunction(L, on_shutdown);
+				}
+				if (lua_pcall(L, 2, 0, 0) == LUA_OK)
+					conf.is_on_shutdown_setup = setup;
+				else
+					fprintf(stderr,
+			"Warning: box.ctl.on_shutdown() failed: %s\n",
+						lua_tostring(L, -1));
+			} else
+				fprintf(stderr,
+	"Warning: global 'box.ctl.on_shutdown' is not a function\n");
+		} else
+			fprintf(stderr,
+			"Warning: global 'box.ctl' is not a table\n");
+	} else
+		fprintf(stderr, "Warning: global 'box' is not a table\n");
+}
+
+/* Launched in TX thread. */
 static int on_shutdown(lua_State *L)
 {
 	if (!conf.configured)
 		return luaL_error(L, "Server is not launched");
+	if (conf.is_shutdown_in_progress) {
+		fprintf(stderr,
+			"Warning: on_shutdown() is already in progress\n");
+		return 0;
+	}
+	conf.is_shutdown_in_progress = true;
+	if (conf.is_on_shutdown_setup)
+		setup_on_shutdown(L, false);
 	unsigned thr_idx;
 	for (thr_idx = 0; thr_idx < conf.num_threads; ++thr_idx) {
 		thread_ctx_t *const thread_ctx =
@@ -2665,6 +2708,7 @@ static int on_shutdown(lua_State *L)
 	free(conf.listener_cfgs);
 	free(conf.thread_ctxs);
 	conf.configured = false;
+	conf.is_shutdown_in_progress = false;
 	return 0;
 }
 
@@ -3116,26 +3160,8 @@ Skip_openssl_security_level:
 		}
 	}
 
-	lua_getglobal(L, "box");
-	if (lua_type(L, -1) == LUA_TTABLE) {
-		lua_getfield(L, -1, "ctl");
-		if (lua_type(L, -1) == LUA_TTABLE) {
-			lua_getfield(L, -1, "on_shutdown");
-			if (lua_type(L, -1) == LUA_TFUNCTION) {
-				lua_pushcfunction(L, on_shutdown);
-				if (lua_pcall(L, 1, 0, 0) != LUA_OK) {
-					fprintf(stderr,
-			"Warning: box.ctl.on_shutdown() failed\n");
-				}
-			} else
-				fprintf(stderr,
-	"Warning: global 'box.ctl.on_shutdown' is not a function\n");
-		} else
-			fprintf(stderr,
-			"Warning: global 'box.ctl' is not a table\n");
-	} else
-		fprintf(stderr, "Warning: global 'box' is not a table\n");
-
+	if (!conf.is_on_shutdown_setup)
+		setup_on_shutdown(L, true);
 	conf.configured = true;
 	return 0;
 
