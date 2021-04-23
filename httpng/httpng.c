@@ -375,6 +375,11 @@ static inline void my_xtm_delete_queue_from_tx(thread_ctx_t *thread_ctx)
 		xtm_delete(thread_ctx->queue_from_tx);
 }
 
+__attribute__((weak))
+void complain_loudly_about_leaked_fds(void)
+{
+}
+
 static inline bool lua_isstring_strict(lua_State *L, int idx)
 {
 	return lua_type(L, idx) == LUA_TSTRING;
@@ -2733,6 +2738,7 @@ static int on_shutdown(lua_State *L)
 	free(conf.listener_cfgs);
 	free(conf.thread_ctxs);
 	conf.configured = false;
+	complain_loudly_about_leaked_fds();
 	conf.is_shutdown_in_progress = false;
 	return 0;
 }
