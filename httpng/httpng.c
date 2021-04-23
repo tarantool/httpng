@@ -2705,6 +2705,14 @@ static int on_shutdown(lua_State *L)
 		xtm_delete(thread_ctx->queue_from_tx);
 	}
 	h2o_config_dispose(&conf.globalconf);
+#ifdef USE_LIBUV
+	unsigned idx;
+	for (idx = 0; idx < conf.num_listeners; ++idx) {
+		close(conf.listener_cfgs[idx].fd);
+		for (thr_idx = 1; thr_idx < conf.num_threads; ++thr_idx)
+			close(conf.thread_ctxs[thr_idx].listener_ctxs[0].fd);
+	}
+#endif /* USE_LIBUV */
 	free(conf.listener_cfgs);
 	free(conf.thread_ctxs);
 	conf.configured = false;
