@@ -3032,7 +3032,7 @@ Skip_listen:
 	}
 
 #define FILL_PROTO_STR(name, value) \
-	{ .str = (name), .len = sizeof(name) - 1, .num = (value) }
+	{ (name), sizeof(name) - 1, (value) }
 
 	{
 		struct {
