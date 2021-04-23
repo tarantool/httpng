@@ -101,6 +101,17 @@ else (HTTPNG_USE_LIBUV)
     set(LIBS ${LIBS} libh2o-evloop)
 endif (HTTPNG_USE_LIBUV)
 
+if (ENABLE_FD_LEAK_DETECTOR)
+    set(LEAK httpng/fd-leak-detector.h)
+    target_precompile_headers(httpng PUBLIC ${LEAK})
+    target_precompile_headers(libh2o PUBLIC ${LEAK})
+    target_precompile_headers(libh2o-evloop PUBLIC ${LEAK})
+    target_precompile_headers(xtm_api_static PUBLIC ${LEAK})
+    add_library(fd-leak-detector httpng/fd-leak-detector.cpp)
+    set_property(TARGET fd-leak-detector PROPERTY POSITION_INDEPENDENT_CODE ON)
+    set(LIBS ${LIBS} fd-leak-detector)
+endif (ENABLE_FD_LEAK_DETECTOR)
+
 target_link_libraries(httpng ${LIBS})
 
 if (NOT(ENABLE_ASAN))
