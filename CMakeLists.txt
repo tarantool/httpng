@@ -105,7 +105,7 @@ target_link_libraries(httpng ${LIBS})
 
 if (NOT(ENABLE_ASAN))
     # Just test
-    add_custom_target(test-linkability ALL COMMAND "tarantool" "${CMAKE_CURRENT_SOURCE_DIR}/tests/linkability.lua")
+    add_custom_target(test-linkability ALL COMMAND "$ENV{SHELL}" "tests/linkability-helper.sh" "${CMAKE_CURRENT_SOURCE_DIR}/tests/linkability.lua")
     add_dependencies(test-linkability httpng)
 endif (NOT(ENABLE_ASAN))
 
