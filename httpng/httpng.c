@@ -145,6 +145,9 @@ typedef struct {
 	bool tx_fiber_should_exit;
 	bool tx_fiber_finished;
 	bool thread_finished;
+#ifndef USE_LIBUV
+	bool queue_from_tx_fd_consumed;
+#endif /* USE_LIBUV */
 } thread_ctx_t;
 
 struct anchor;
@@ -361,6 +364,16 @@ static void init_async(thread_ctx_t *thread_ctx);
 static void close_async(thread_ctx_t *thread_ctx);
 static void async_cb(void *param);
 static int on_shutdown(lua_State *L);
+
+static inline void my_xtm_delete_queue_from_tx(thread_ctx_t *thread_ctx)
+{
+#ifndef USE_LIBUV
+	if (thread_ctx->queue_from_tx_fd_consumed)
+		xtm_delete_ex(thread_ctx->queue_from_tx);
+	else
+#endif /* USE_LIBUV */
+		xtm_delete(thread_ctx->queue_from_tx);
+}
 
 static inline bool lua_isstring_strict(lua_State *L, int idx)
 {
@@ -2214,6 +2227,9 @@ static bool init_worker_thread(unsigned thread_idx)
 #endif /* USE_LIBUV */
 	thread_ctx_t *const thread_ctx = &conf.thread_ctxs[thread_idx];
 	thread_ctx->idx = thread_idx;
+#ifndef USE_LIBUV
+	thread_ctx->queue_from_tx_fd_consumed = false;
+#endif /* USE_LIBUV */
 	if ((thread_ctx->queue_from_tx = xtm_create(QUEUE_FROM_TX_ITEMS))
 	    == NULL)
 		/* FIXME: Report. */
@@ -2319,7 +2335,7 @@ dup_failed:
 
 	free(thread_ctx->listener_ctxs);
 alloc_ctxs_failed:
-	xtm_delete(thread_ctx->queue_from_tx);
+	my_xtm_delete_queue_from_tx(thread_ctx);
 alloc_xtm_failed:
 	return false;
 }
@@ -2451,6 +2467,7 @@ static void *worker_func(void *param)
 			H2O_SOCKET_FLAG_DONT_READ);
 
 	h2o_socket_read_start(thread_ctx->sock_from_tx, on_call_from_tx);
+	thread_ctx->queue_from_tx_fd_consumed = true;
 	h2o_socket_read_start(listener_ctx->sock, on_accept);
 	h2o_evloop_t *loop = thread_ctx->ctx.loop;
 	while (!thread_ctx->shutdown_requested)
@@ -2509,7 +2526,7 @@ static void deinit_worker_thread(unsigned thread_idx)
 #endif /* USE_LIBUV */
 
 	/* FIXME: Should flush these queues first. */
-	xtm_delete(thread_ctx->queue_from_tx);
+	my_xtm_delete_queue_from_tx(thread_ctx);
 	free(thread_ctx->listener_ctxs);
 }
 
@@ -2702,7 +2719,7 @@ static int on_shutdown(lua_State *L)
 
 		free(thread_ctx->listener_ctxs);
 		xtm_delete(thread_ctx->queue_to_tx);
-		xtm_delete(thread_ctx->queue_from_tx);
+		my_xtm_delete_queue_from_tx(thread_ctx);
 	}
 	h2o_config_dispose(&conf.globalconf);
 #ifdef USE_LIBUV
