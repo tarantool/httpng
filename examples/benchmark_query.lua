@@ -1,6 +1,7 @@
 box.cfg{
     listen = 3306,
     wal_mode = 'none',
+    checkpoint_interval = 0,
 }
 
 local s = box.schema.space.create('tester')
