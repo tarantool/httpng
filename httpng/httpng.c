@@ -144,6 +144,7 @@ typedef struct {
 	unsigned idx;
 	unsigned active_lua_fibers;
 	pthread_t tid;
+	bool http_and_tx_lua_handlers_flushed;
 	bool shutdown_requested; /* Tarantool asked us to shut down. */
 	bool should_notify_tx_done;
 	bool tx_done_notification_received;
@@ -213,16 +214,17 @@ typedef struct waiter {
 } waiter_t;
 
 typedef struct {
-	char *path;
-	int lua_handler_ref;
-} lua_site_t;
-
-typedef struct {
 	h2o_handler_t super;
 	int lua_handler_ref;
 	const char *path;
 	size_t path_len;
 } lua_h2o_handler_t;
+
+typedef struct {
+	char *path;
+	lua_h2o_handler_t *handler;
+	int lua_handler_ref;
+} lua_site_t;
 
 typedef struct {
 	shuttle_t *parent_shuttle;
@@ -317,6 +319,8 @@ static struct {
 	thread_ctx_t *thread_ctxs;
 	struct fiber **tx_fiber_ptrs;
 	SSL_CTX *ssl_ctx;
+	lua_site_t *lua_sites;
+	unsigned lua_site_count;
 	unsigned shuttle_size;
 	unsigned recv_data_size;
 	unsigned num_listeners;
@@ -334,6 +338,7 @@ static struct {
 	bool use_body_split;
 #endif /* SPLIT_LARGE_BODY */
 	bool configured;
+	bool hot_reload_in_progress;
 	bool is_on_shutdown_setup;
 	bool is_shutdown_in_progress;
 } conf = {
@@ -1917,19 +1922,25 @@ static h2o_pathconf_t *register_handler(h2o_hostconf_t *hostconf,
 	return pathconf;
 }
 
-/* N. b.: *path must live until server is shutdown */
 static h2o_pathconf_t *register_lua_handler(h2o_hostconf_t *hostconf,
+	lua_site_t *lua_site,
 	const char *path, size_t path_len, int lua_handler_ref)
 {
+	memcpy(lua_site->path, path, path_len);
+	lua_site->path[path_len] = 0;
+
 	/* These functions never return NULL, dying instead */
-	h2o_pathconf_t *pathconf = h2o_config_register_path(hostconf, path, 0);
+	h2o_pathconf_t *pathconf =
+		h2o_config_register_path(hostconf, lua_site->path, 0);
 	lua_h2o_handler_t *handler = (lua_h2o_handler_t *)
 		h2o_create_handler(pathconf, sizeof(*handler));
 	handler->super.on_req =
 		(int (*)(h2o_handler_t *, h2o_req_t *))lua_req_handler;
+	lua_site->lua_handler_ref =
 	handler->lua_handler_ref = lua_handler_ref;
 	handler->path = path;
 	handler->path_len = path_len;
+	lua_site->handler = handler;
 	return pathconf;
 }
 
@@ -2763,6 +2774,9 @@ static int on_shutdown_internal(lua_State *L, bool called_from_callback)
 #endif /* USE_LIBUV */
 	free(conf.listener_cfgs);
 	free(conf.thread_ctxs);
+	for (unsigned idx = 0; idx < conf.lua_site_count; ++idx)
+		free(conf.lua_sites[idx].path);
+	free(conf.lua_sites);
 	conf.configured = false;
 	complain_loudly_about_leaked_fds();
 	conf.is_shutdown_in_progress = false;
@@ -2781,17 +2795,93 @@ static int on_shutdown_for_user(lua_State *L)
 	return on_shutdown_internal(L, false);
 }
 
+/* Launched in TX thread. */
+static void flush_tx_lua_handlers(thread_ctx_t *thread_ctx)
+{
+	thread_ctx->http_and_tx_lua_handlers_flushed = true;
+}
+
+/* Launched in HTTP server thread. */
+static void flush_http_lua_handlers(thread_ctx_t *thread_ctx)
+{
+	stubborn_dispatch_thr_to_tx(thread_ctx, flush_tx_lua_handlers);
+}
+
+enum {
+	LUA_STACK_IDX_TABLE = 1,
+	LUA_STACK_IDX_LUA_SITES = -2,
+};
+
+/* Lua parameters: same as cfg(). */
+static int hot_reload(lua_State *L)
+{
+	/* FIXME: For now we replace Lua handler and ignore everything else. */
+	if (conf.hot_reload_in_progress)
+		return luaL_error(L, "Reconfiguration is already in progress");
+	conf.hot_reload_in_progress = true;
+	const char *lerr = NULL; /* Error message for caller. */
+	lua_getfield(L, LUA_STACK_IDX_TABLE, "handler");
+	if (lua_isnil(L, -1)) {
+		lerr = "new handler can't be nil";
+		goto Error;
+	}
+	if (lua_type(L, -1) != LUA_TFUNCTION) {
+		lerr = "new handler is not a function";
+		goto Error;
+	}
+
+	unsigned lua_site_idx;
+	for (lua_site_idx = 0; lua_site_idx < conf.lua_site_count;
+	    ++lua_site_idx)
+		if (!memcmp(conf.lua_sites[lua_site_idx].path, "/", 2))
+			goto found;
+
+	lerr = "there is no existing handler for \"/\"";
+
+Error:
+	conf.hot_reload_in_progress = false;
+	return luaL_error(L, lerr);
+
+found:
+	;
+	lua_h2o_handler_t *const handler =
+		conf.lua_sites[lua_site_idx].handler;
+	const int old_ref = handler->lua_handler_ref;
+	handler->lua_handler_ref = luaL_ref(L, LUA_REGISTRYINDEX);
+	__sync_synchronize();
+	/* Now we should call useless function in HTTP thread
+	 * which would call useless function in TX thread to ensure
+	 * that no one would use "old" lua_handler_ref. */
+	unsigned thr_idx;
+	for (thr_idx = 0; thr_idx < conf.num_threads; ++thr_idx) {
+		thread_ctx_t *const thread_ctx =  &conf.thread_ctxs[thr_idx];
+		assert(!thread_ctx->http_and_tx_lua_handlers_flushed);
+		stubborn_dispatch_thr_from_tx(thread_ctx,
+			&flush_http_lua_handlers);
+	}
+	for (thr_idx = 0; thr_idx < conf.num_threads; ++thr_idx) {
+		thread_ctx_t *const thread_ctx =  &conf.thread_ctxs[thr_idx];
+
+		while (!thread_ctx->http_and_tx_lua_handlers_flushed)
+			fiber_sleep(0.001);
+
+		/* For next reload. */
+		thread_ctx->http_and_tx_lua_handlers_flushed = false;
+	}
+
+	luaL_unref(L, LUA_REGISTRYINDEX, old_ref);
+
+	conf.hot_reload_in_progress = false;
+	return 0;
+}
+
 /* Lua parameters: lua_sites, function_to_call, function_param */
 int cfg(lua_State *L)
 {
 	if (conf.configured)
-		return luaL_error(L, "Server is already launched");
+		return hot_reload(L);
 	const char *lerr = NULL; /* Error message for caller. */
 	unsigned c_handlers = 0;
-	enum {
-		LUA_STACK_IDX_TABLE = 1,
-		LUA_STACK_IDX_LUA_SITES = -2,
-	};
 	memset(&conf.globalconf, 0, sizeof(conf.globalconf));
 
 	if (lua_gettop(L) < 1)
@@ -2959,8 +3049,6 @@ Skip_c_sites:
 				"for Lua sites C array path";
 			goto invalid_sites;
 		}
-		memcpy(lua_site->path, path, path_len);
-		lua_site->path[path_len] = 0;
 
 		lua_getfield(L, -2, "handler");
 		if (lua_type(L, -1) != LUA_TFUNCTION) {
@@ -2968,9 +3056,8 @@ Skip_c_sites:
 			goto invalid_sites;
 		}
 
-		register_lua_handler(hostconf, lua_site->path, path_len,
-			(lua_site->lua_handler_ref =
-				luaL_ref(L, LUA_REGISTRYINDEX)));
+		register_lua_handler(hostconf, lua_site, path, path_len,
+			luaL_ref(L, LUA_REGISTRYINDEX));
 
 		/* Remove path string and site array value,
 		 * keep key for next iteration. */
@@ -2999,10 +3086,8 @@ Skip_lua_sites:
 		lerr = "Failed to allocate memory for Lua sites C array path";
 		goto invalid_handler;
 	}
-	lua_site->path[0] = '/';
-	lua_site->path[1] = 0;
-	register_lua_handler(hostconf, lua_site->path, 2,
-		(lua_site->lua_handler_ref = luaL_ref(L, LUA_REGISTRYINDEX)));
+	register_lua_handler(hostconf, lua_site, "/", 2,
+		luaL_ref(L, LUA_REGISTRYINDEX));
 
 Skip_main_lua_handler:
 	if (c_handlers + lua_site_count == 0) {
@@ -3181,6 +3266,7 @@ Skip_openssl_security_level:
 		thread_ctx->should_notify_tx_done = false;
 		thread_ctx->tx_fiber_should_exit = false;
 		thread_ctx->fiber_to_wake_on_shutdown = NULL;
+		thread_ctx->http_and_tx_lua_handlers_flushed = false;
 
 		char name[32];
 		sprintf(name, "tx_h2o_fiber_%u", fiber_idx);
@@ -3229,6 +3315,8 @@ Skip_openssl_security_level:
 		}
 	}
 
+	conf.lua_sites = lua_sites;
+	conf.lua_site_count = lua_site_count;
 	if (!conf.is_on_shutdown_setup)
 		setup_on_shutdown(L, true, false);
 	conf.configured = true;
