@@ -2705,6 +2705,8 @@ static int on_shutdown_internal(lua_State *L, bool called_from_callback)
 	if (!conf.configured)
 		return luaL_error(L, "Server is not launched");
 	if (conf.is_shutdown_in_progress) {
+		if (!called_from_callback)
+			return luaL_error(L, "on_shutdown() is already in progress");
 		fprintf(stderr,
 			"Warning: on_shutdown() is already in progress\n");
 		return 0;
