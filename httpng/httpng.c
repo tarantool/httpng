@@ -2814,42 +2814,13 @@ enum {
 	LUA_STACK_IDX_LUA_SITES = -2,
 };
 
-/* Lua parameters: same as cfg(). */
-static int hot_reload(lua_State *L)
+static void replace_lua_handlers(lua_State *L,
+	unsigned lua_site_idx, int new_ref)
 {
-	/* FIXME: For now we replace Lua handler and ignore everything else. */
-	if (conf.hot_reload_in_progress)
-		return luaL_error(L, "Reconfiguration is already in progress");
-	conf.hot_reload_in_progress = true;
-	const char *lerr = NULL; /* Error message for caller. */
-	lua_getfield(L, LUA_STACK_IDX_TABLE, "handler");
-	if (lua_isnil(L, -1)) {
-		lerr = "new handler can't be nil";
-		goto Error;
-	}
-	if (lua_type(L, -1) != LUA_TFUNCTION) {
-		lerr = "new handler is not a function";
-		goto Error;
-	}
-
-	unsigned lua_site_idx;
-	for (lua_site_idx = 0; lua_site_idx < conf.lua_site_count;
-	    ++lua_site_idx)
-		if (!memcmp(conf.lua_sites[lua_site_idx].path, "/", 2))
-			goto found;
-
-	lerr = "there is no existing handler for \"/\"";
-
-Error:
-	conf.hot_reload_in_progress = false;
-	return luaL_error(L, lerr);
-
-found:
-	;
 	lua_h2o_handler_t *const handler =
 		conf.lua_sites[lua_site_idx].handler;
 	const int old_ref = handler->lua_handler_ref;
-	handler->lua_handler_ref = luaL_ref(L, LUA_REGISTRYINDEX);
+	handler->lua_handler_ref = new_ref;
 	__sync_synchronize();
 	/* Now we should call useless function in HTTP thread
 	 * which would call useless function in TX thread to ensure
@@ -2872,22 +2843,29 @@ found:
 	}
 
 	luaL_unref(L, LUA_REGISTRYINDEX, old_ref);
-
-	conf.hot_reload_in_progress = false;
-	return 0;
 }
 
 /* Lua parameters: lua_sites, function_to_call, function_param */
 int cfg(lua_State *L)
 {
-	if (conf.configured)
-		return hot_reload(L);
+	bool is_hot_reload;
+	if (conf.configured) {
+		if (conf.hot_reload_in_progress)
+			return luaL_error(L,
+				"Reconfiguration is already in progress");
+		conf.hot_reload_in_progress = true;
+		is_hot_reload = true;
+	} else
+		is_hot_reload = false;
 	const char *lerr = NULL; /* Error message for caller. */
 	unsigned c_handlers = 0;
-	memset(&conf.globalconf, 0, sizeof(conf.globalconf));
+	if (!is_hot_reload)
+		memset(&conf.globalconf, 0, sizeof(conf.globalconf));
 
-	if (lua_gettop(L) < 1)
-		return luaL_error(L, "No parameters specified");
+	if (lua_gettop(L) < 1) {
+		lerr = "No parameters specified";
+		goto error_no_parameters;
+	}
 
 	lua_getfield(L, LUA_STACK_IDX_TABLE, "c_sites_func");
 	const path_desc_t *path_descs;
@@ -2895,17 +2873,27 @@ int cfg(lua_State *L)
 		path_descs = NULL;
 		goto Skip_c_sites;
 	}
-	if (lua_type(L, -1) != LUA_TFUNCTION)
-		return luaL_error(L, "c_sites_func must be function");
+	if (is_hot_reload) {
+		lerr = "Reconfiguration can't be used with C handlers";
+		goto error_hot_reload_c;
+	}
+
+	if (lua_type(L, -1) != LUA_TFUNCTION) {
+		lerr = "c_sites_func must be a function";
+		goto error_c_sites_func_not_a_function;
+	}
 
 	lua_getfield(L, LUA_STACK_IDX_TABLE, "c_sites_func_param");
-	if (lua_pcall(L, 1, 1, 0) != LUA_OK)
-		return luaL_error(L, "c_sites_func() failed");
+	if (lua_pcall(L, 1, 1, 0) != LUA_OK) {
+		lerr = "c_sites_func() failed";
+		goto error_c_sites_func_failed;
+	}
 
 	int is_integer;
-	if (!lua_islightuserdata(L, -1))
-		return luaL_error(L,
-			"c_sites_func() returned wrong data type");
+	if (!lua_islightuserdata(L, -1)) {
+		lerr = "c_sites_func() returned wrong data type";
+		goto error_c_sites_func_wrong_return;
+	}
 	path_descs = (path_desc_t *)lua_touserdata(L, -1);
 Skip_c_sites:
 
@@ -2916,9 +2904,10 @@ Skip_c_sites:
 		name = DEFAULT_##name; \
 	else { \
 		name = my_lua_tointegerx(L, -1, &is_integer); \
-		if (!is_integer) \
-			return luaL_error(L, \
-				"parameter " #name " is not a number"); \
+		if (!is_integer) { \
+			lerr = "parameter " #name " is not a number"; \
+			goto error_parameter_not_a_number; \
+		} \
 		if (name > MAX_##name) { \
 			name = MAX_##name; \
 			fprintf(stderr, "Warning: parameter \"" #name "\" " \
@@ -2932,7 +2921,7 @@ Skip_c_sites:
 		} \
 	}
 
-	/* N. b.: These macros can use return. */
+	/* N. b.: These macros can use goto. */
 	PROCESS_OPTIONAL_PARAM(threads);
 	PROCESS_OPTIONAL_PARAM(max_conn_per_thread);
 	PROCESS_OPTIONAL_PARAM(shuttle_size);
@@ -2942,14 +2931,34 @@ Skip_c_sites:
 
 #ifdef SPLIT_LARGE_BODY
 	lua_getfield(L, LUA_STACK_IDX_TABLE, "use_body_split");
-	conf.use_body_split = lua_isnil(L, -1) ? false : lua_toboolean(L, -1);
+	const bool use_body_split =
+		lua_isnil(L, -1) ? false : lua_toboolean(L, -1);
+	if (is_hot_reload) {
+		if (conf.use_body_split != use_body_split) {
+			lerr = "Reconfiguration can't change use_body_split";
+			goto error_hot_reload_body_split;
+		}
+	} else
+		conf.use_body_split = use_body_split;
 #endif /* SPLIT_LARGE_BODY */
 
 	/* FIXME: Add sanity checks, especially shuttle_size -
 	 * it must >sizeof(shuttle_t) (accounting for Lua payload)
 	 * and aligned. */
-	conf.num_threads = threads;
-	conf.shuttle_size = shuttle_size;
+	if (is_hot_reload) {
+		if (conf.num_threads != threads) {
+			lerr =
+			"Reconfiguration can't change number of threads (yet)";
+			goto error_hot_reload_threads;
+		}
+		if (conf.shuttle_size != shuttle_size) {
+			lerr = "Reconfiguration can't change shuttle_size";
+			goto error_hot_reload_shuttle_size;
+		}
+	} else {
+		conf.num_threads = threads;
+		conf.shuttle_size = shuttle_size;
+	}
 
 	/* FIXME: Can differ from shuttle_size. */
 	conf.recv_data_size = shuttle_size;
@@ -2968,10 +2977,14 @@ Skip_c_sites:
 		conf.num_accepts = 8;
 #endif /* USE_LIBUV */
 
+	if (is_hot_reload)
+		goto Skip_inits_on_hot_reload;
+
 	if ((conf.thread_ctxs = (thread_ctx_t *)malloc(conf.num_threads *
-	    sizeof(thread_ctx_t))) == NULL)
-		return luaL_error(L,
-			"Failed to allocate memory for thread contexts");
+	    sizeof(thread_ctx_t))) == NULL) {
+		lerr = "Failed to allocate memory for thread contexts";
+		goto thread_ctxs_alloc_failed;
+	}
 
 	h2o_config_init(&conf.globalconf);
 	conf.globalconf.max_request_entity_size = max_body_len;
@@ -3000,8 +3013,8 @@ Skip_c_sites:
 		} while ((++path_desc)->path != NULL);
 	}
 
-	/* FIXME: Free allocated memory - including malloc'ed path -
-	 * when shutting down. */
+Skip_inits_on_hot_reload:
+	;
 	lua_site_t *lua_sites = NULL;
 	lua_getfield(L, LUA_STACK_IDX_TABLE, "sites");
 	unsigned lua_site_count = 0;
@@ -3035,6 +3048,17 @@ Skip_c_sites:
 			goto invalid_sites;
 		}
 
+		unsigned lua_site_idx;
+		if (is_hot_reload) {
+			for (lua_site_idx = 0;
+			    lua_site_idx < conf.lua_site_count; ++lua_site_idx)
+				if (!memcmp(conf.lua_sites[lua_site_idx].path,
+				    path, path_len))
+					goto Skip_creating_sites_structs;
+			lerr =
+			"specifying new sites[].path is not supported (yet?)";
+			goto invalid_sites;
+		}
 		lua_site_t *const new_lua_sites =
 			(lua_site_t *)realloc(lua_sites, sizeof(lua_site_t) *
 				(lua_site_count + 1));
@@ -3052,14 +3076,19 @@ Skip_c_sites:
 			goto invalid_sites;
 		}
 
+	Skip_creating_sites_structs:
 		lua_getfield(L, -2, "handler");
 		if (lua_type(L, -1) != LUA_TFUNCTION) {
 			lerr = "sites[].handler is not a function";
 			goto invalid_sites;
 		}
 
-		register_lua_handler(hostconf, lua_site, path, path_len,
-			luaL_ref(L, LUA_REGISTRYINDEX));
+		if (is_hot_reload)
+			replace_lua_handlers(L, lua_site_idx,
+				luaL_ref(L, LUA_REGISTRYINDEX));
+		else
+			register_lua_handler(hostconf, lua_site, path,
+				path_len, luaL_ref(L, LUA_REGISTRYINDEX));
 
 		/* Remove path string and site array value,
 		 * keep key for next iteration. */
@@ -3073,6 +3102,26 @@ Skip_lua_sites:
 	if (lua_type(L, -1) != LUA_TFUNCTION) {
 		lerr = "handler is not a function";
 		goto invalid_handler;
+	}
+
+	if (is_hot_reload) {
+		unsigned lua_site_idx;
+		for (lua_site_idx = 0; lua_site_idx < conf.lua_site_count;
+		    ++lua_site_idx)
+			if (!memcmp(conf.lua_sites[lua_site_idx].path, "/", 2))
+				goto Primary_handler_found;
+		lerr = "there is no existing handler for \"/\"";
+		goto invalid_handler;
+
+	Primary_handler_found:
+		replace_lua_handlers(L, lua_site_idx,
+			luaL_ref(L, LUA_REGISTRYINDEX));
+
+		/* FIXME: Actually we should check other parameters for sanity,
+		 * not doing that for easier merging of multilisten. */
+		//goto Skip_creating_primary_handler_structs;
+
+		goto Hot_reload_done;
 	}
 
 	lua_site_t *const new_lua_sites = (lua_site_t *)realloc(lua_sites,
@@ -3091,6 +3140,7 @@ Skip_lua_sites:
 	register_lua_handler(hostconf, lua_site, "/", 2,
 		luaL_ref(L, LUA_REGISTRYINDEX));
 
+//Skip_creating_primary_handler_structs:
 Skip_main_lua_handler:
 	if (c_handlers + lua_site_count == 0) {
 		lerr = "No handlers specified";
@@ -3140,8 +3190,10 @@ Skip_listen:
 		goto Skip_min_proto_version;
 	}
 
-	if (!lua_isstring_strict(L, -1))
-		return luaL_error(L, "min_proto_version is not a string");
+	if (!lua_isstring_strict(L, -1)) {
+		lerr = "min_proto_version is not a string";
+		goto min_proto_version_invalid;
+	}
 	size_t min_proto_version_len;
 	const char *const min_proto_version_str =
 		lua_tolstring(L, -1, &min_proto_version_len);
@@ -3191,12 +3243,14 @@ Skip_min_proto_version:
 		goto Skip_openssl_security_level;
 	}
 	openssl_security_level = my_lua_tointegerx(L, -1, &is_integer);
-	if (!is_integer)
-		return luaL_error(L,
-			"openssl_security_level is not a number");
-	if (openssl_security_level > 5)
-		return luaL_error(L,
-			"openssl_security_level is invalid");
+	if (!is_integer) {
+		lerr = "openssl_security_level is not a number";
+		goto invalid_openssl_security_level;
+	}
+	if (openssl_security_level > 5) {
+		lerr = "openssl_security_level is invalid";
+		goto invalid_openssl_security_level;
+	}
 
 Skip_openssl_security_level:
 	;
@@ -3324,6 +3378,10 @@ Skip_openssl_security_level:
 	conf.configured = true;
 	return 0;
 
+Hot_reload_done:
+	conf.hot_reload_in_progress = false;
+	return 0;
+
 threads_launch_fail:
 	;
 	unsigned idx;
@@ -3364,6 +3422,7 @@ listeners_fail:
 listeners_alloc_fail:
 	SSL_CTX_free(ssl_ctx);
 ssl_fail:
+invalid_openssl_security_level:
 min_proto_version_invalid:
 listen_invalid:
 no_handlers:
@@ -3382,7 +3441,18 @@ c_desc_empty:
 register_host_failed:
 	h2o_config_dispose(&conf.globalconf);
 	free(conf.thread_ctxs);
+thread_ctxs_alloc_failed:
+error_hot_reload_shuttle_size:
+error_hot_reload_threads:
+error_hot_reload_body_split:
+error_parameter_not_a_number:
+error_c_sites_func_wrong_return:
+error_c_sites_func_failed:
+error_c_sites_func_not_a_function:
+error_hot_reload_c:
+error_no_parameters:
 	assert(lerr != NULL);
+	conf.hot_reload_in_progress = false;
 	return luaL_error(L, lerr);
 }
 
