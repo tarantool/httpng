@@ -2405,6 +2405,9 @@ static inline void tell_close_connection(our_sock_t *item)
 		/* FIXME: Looks like this would never happen. */
 		h2o_on_read_proxy_line(sock, err);
 		break;
+	case SOCK_PROTO_WEBSOCKET:
+		h2o_websocket_on_recv(sock, err);
+		break;
 	default:
 		assert(!"Invalid sock proto");
 	}
