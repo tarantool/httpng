@@ -2936,13 +2936,6 @@ Skip_c_sites:
 	lua_getfield(L, LUA_STACK_IDX_TABLE, "use_body_split");
 	const bool use_body_split =
 		lua_isnil(L, -1) ? false : lua_toboolean(L, -1);
-	if (is_hot_reload) {
-		if (conf.use_body_split != use_body_split) {
-			lerr = "Reconfiguration can't change use_body_split";
-			goto error_hot_reload_body_split;
-		}
-	} else
-		conf.use_body_split = use_body_split;
 #endif /* SPLIT_LARGE_BODY */
 
 	/* FIXME: Add sanity checks, especially shuttle_size -
@@ -2973,12 +2966,6 @@ Skip_c_sites:
 		offsetof(lua_response_t, un.req.buffer);
 	conf.max_recv_bytes_lua_websocket = conf.recv_data_size -
 		(uintptr_t)get_websocket_recv_location(NULL);
-	conf.max_conn_per_thread = max_conn_per_thread;
-#ifndef USE_LIBUV
-	conf.num_accepts = conf.max_conn_per_thread / 16;
-	if (conf.num_accepts < 8)
-		conf.num_accepts = 8;
-#endif /* USE_LIBUV */
 
 	if (is_hot_reload)
 		goto Skip_inits_on_hot_reload;
@@ -2990,7 +2977,6 @@ Skip_c_sites:
 	}
 
 	h2o_config_init(&conf.globalconf);
-	conf.globalconf.max_request_entity_size = max_body_len;
 
 	/* FIXME: Should make customizable. */
 	h2o_hostconf_t *hostconf = h2o_config_register_host(&conf.globalconf,
@@ -3124,7 +3110,7 @@ Skip_lua_sites:
 		 * not doing that for easier merging of multilisten. */
 		//goto Skip_creating_primary_handler_structs;
 
-		goto Hot_reload_done;
+		goto Apply_new_config;
 	}
 
 	lua_site_t *const new_lua_sites = (lua_site_t *)realloc(lua_sites,
@@ -3358,6 +3344,9 @@ Skip_openssl_security_level:
 			goto threads_init_fail;
 		}
 
+	goto Apply_new_config;
+
+After_applying_new_config:
 	__sync_synchronize();
 
 	/* Start processing HTTP requests and requests from TX thread. */
@@ -3381,7 +3370,19 @@ Skip_openssl_security_level:
 	conf.configured = true;
 	return 0;
 
-Hot_reload_done:
+Apply_new_config:
+	conf.use_body_split = use_body_split;
+	conf.max_conn_per_thread = max_conn_per_thread;
+#ifndef USE_LIBUV
+	conf.num_accepts = max_conn_per_thread / 16;
+	if (conf.num_accepts < 8)
+		conf.num_accepts = 8;
+#endif /* USE_LIBUV */
+	conf.globalconf.max_request_entity_size = max_body_len;
+
+	if (!is_hot_reload)
+		goto After_applying_new_config;
+
 	conf.hot_reload_in_progress = false;
 	return 0;
 
@@ -3447,7 +3448,6 @@ register_host_failed:
 thread_ctxs_alloc_failed:
 error_hot_reload_shuttle_size:
 error_hot_reload_threads:
-error_hot_reload_body_split:
 error_parameter_not_a_number:
 error_c_sites_func_wrong_return:
 error_c_sites_func_failed:
