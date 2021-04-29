@@ -231,6 +231,9 @@ typedef struct {
 	char *path;
 	lua_h2o_handler_t *handler;
 	int lua_handler_ref;
+	int old_lua_handler_ref;
+	int new_lua_handler_ref;
+	unsigned generation;
 } lua_site_t;
 
 typedef struct {
@@ -339,6 +342,7 @@ static struct {
 	unsigned max_headers_lua;
 	unsigned max_path_len_lua;
 	unsigned max_recv_bytes_lua_websocket;
+	unsigned generation;
 	int tfo_queues;
 	int on_shutdown_ref;
 #ifdef SPLIT_LARGE_BODY
@@ -2831,13 +2835,16 @@ enum {
 	LUA_STACK_IDX_LUA_SITES = -2,
 };
 
-static void replace_lua_handlers(lua_State *L,
-	unsigned lua_site_idx, int new_ref)
+static void replace_lua_handlers(lua_State *L)
 {
-	lua_h2o_handler_t *const handler =
-		conf.lua_sites[lua_site_idx].handler;
-	const int old_ref = handler->lua_handler_ref;
-	handler->lua_handler_ref = new_ref;
+	unsigned idx;
+	for (idx = 0; idx < conf.lua_site_count; ++idx) {
+		lua_site_t *const site = &conf.lua_sites[idx];
+		lua_h2o_handler_t *const handler = site->handler;
+		site->old_lua_handler_ref = handler->lua_handler_ref;
+		handler->lua_handler_ref = site->lua_handler_ref =
+			site->new_lua_handler_ref;
+	}
 	__sync_synchronize();
 	/* Now we should call useless function in HTTP thread
 	 * which would call useless function in TX thread to ensure
@@ -2859,7 +2866,9 @@ static void replace_lua_handlers(lua_State *L,
 		thread_ctx->http_and_tx_lua_handlers_flushed = false;
 	}
 
-	luaL_unref(L, LUA_REGISTRYINDEX, old_ref);
+	for (idx = 0; idx < conf.lua_site_count; ++idx)
+		luaL_unref(L, LUA_REGISTRYINDEX,
+			conf.lua_sites[idx].old_lua_handler_ref);
 }
 
 /* Lua parameters: lua_sites, function_to_call, function_param */
@@ -3021,6 +3030,7 @@ Skip_inits_on_hot_reload:
 	lua_site_t *lua_sites = NULL;
 	lua_getfield(L, LUA_STACK_IDX_TABLE, "sites");
 	unsigned lua_site_count = 0;
+	const unsigned generation = ++conf.generation;
 	if (lua_isnil(L, -1))
 		goto Skip_lua_sites;
 	if (!lua_istable(L, -1)) {
@@ -3071,7 +3081,7 @@ Skip_inits_on_hot_reload:
 			goto invalid_sites;
 		}
 		lua_sites = new_lua_sites;
-		lua_site_t *const lua_site = &lua_sites[lua_site_count++];
+		lua_site_t *lua_site = &lua_sites[lua_site_count++];
 		lua_site->lua_handler_ref = LUA_REFNIL;
 		if ((lua_site->path = (char *)malloc(path_len + 1)) == NULL) {
 			lerr = "Failed to allocate memory "
@@ -3086,12 +3096,18 @@ Skip_inits_on_hot_reload:
 			goto invalid_sites;
 		}
 
-		if (is_hot_reload)
-			replace_lua_handlers(L, lua_site_idx,
-				luaL_ref(L, LUA_REGISTRYINDEX));
-		else
+		if (is_hot_reload) {
+			lua_site = &conf.lua_sites[lua_site_idx];
+			if (lua_site->generation == generation) {
+				lerr = "duplicated site description";
+				goto invalid_sites;
+			}
+			lua_site->new_lua_handler_ref =
+				luaL_ref(L, LUA_REGISTRYINDEX);
+		} else
 			register_lua_handler(hostconf, lua_site, path,
 				path_len, luaL_ref(L, LUA_REGISTRYINDEX));
+		lua_site->generation = generation;
 
 		/* Remove path string and site array value,
 		 * keep key for next iteration. */
@@ -3117,14 +3133,20 @@ Skip_lua_sites:
 		goto invalid_handler;
 
 	Primary_handler_found:
-		replace_lua_handlers(L, lua_site_idx,
-			luaL_ref(L, LUA_REGISTRYINDEX));
+		;
+		lua_site_t *const lua_site = &conf.lua_sites[lua_site_idx];
+		if (lua_site->generation == generation) {
+			lerr = "duplicated site description for /";
+			goto invalid_sites;
+		}
+		lua_site->new_lua_handler_ref = luaL_ref(L, LUA_REGISTRYINDEX);
+		lua_site->generation = generation;
 
 		/* FIXME: Actually we should check other parameters for sanity,
 		 * not doing that for easier merging of multilisten. */
 		//goto Skip_creating_primary_handler_structs;
 
-		goto Apply_new_config;
+		goto Apply_new_config_hot_reload;
 	}
 
 	lua_site_t *const new_lua_sites = (lua_site_t *)realloc(lua_sites,
@@ -3140,8 +3162,9 @@ Skip_lua_sites:
 		lerr = "Failed to allocate memory for Lua sites C array path";
 		goto invalid_handler;
 	}
-	register_lua_handler(hostconf, lua_site, "/", 2,
+	register_lua_handler(hostconf, lua_site, "/", 1,
 		luaL_ref(L, LUA_REGISTRYINDEX));
+	lua_site->generation = generation;
 
 //Skip_creating_primary_handler_structs:
 Skip_main_lua_handler:
@@ -3386,6 +3409,18 @@ After_applying_new_config:
 	conf.configured = true;
 	return 0;
 
+Apply_new_config_hot_reload:
+	;
+	unsigned idx;
+	for (idx = 0; idx < conf.lua_site_count; ++idx) {
+		const lua_site_t *const lua_site = &conf.lua_sites[idx];
+		if (lua_site->generation != generation) {
+			lerr =
+			"Not all sites were specified for reconfiguration";
+			goto invalid_handler;
+		}
+	}
+
 Apply_new_config:
 	conf.use_body_split = use_body_split;
 	conf.max_conn_per_thread = max_conn_per_thread;
@@ -3399,12 +3434,12 @@ Apply_new_config:
 	if (!is_hot_reload)
 		goto After_applying_new_config;
 
+	replace_lua_handlers(L);
+
 	conf.hot_reload_in_progress = false;
 	return 0;
 
 threads_launch_fail:
-	;
-	unsigned idx;
 	for (idx = 0; idx < thr_launch_idx; ++idx)
 		tell_thread_to_terminate(&conf.thread_ctxs[idx]);
 
@@ -3448,7 +3483,17 @@ listen_invalid:
 no_handlers:
 invalid_handler:
 invalid_sites:
-	for (idx = 0; idx < lua_site_count; ++idx) {
+	if (is_hot_reload)
+		for (idx = 0; idx < lua_site_count; ++idx) {
+			lua_site_t *const lua_site = &conf.lua_sites[idx];
+			if (lua_site->generation == generation)
+				luaL_unref(L, LUA_REGISTRYINDEX,
+					lua_site->new_lua_handler_ref);
+			else
+				lua_site->generation = generation;
+			free(lua_site->path);
+		}
+	else for (idx = 0; idx < lua_site_count; ++idx) {
 		lua_site_t *const lua_site = &lua_sites[idx];
 		if (lua_site->lua_handler_ref != LUA_REFNIL)
 			luaL_unref(L, LUA_REGISTRYINDEX,
