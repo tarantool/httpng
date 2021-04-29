@@ -114,11 +114,6 @@ g_wrong_config.test_level_invalid = function()
         http.cfg, { handler = function() end, openssl_security_level = 6 })
 end
 
-g_wrong_config.test_simple = function()
-    http.cfg( { handler = function() end } )
-    http.shutdown()
-end
-
 local g_shutdown = t.group('shutdown')
 
 g_shutdown.test_simple_shutdown = function()
@@ -146,6 +141,7 @@ g_shutdown.test_double_shutdown = function()
 end
 
 local g_bad_handlers = t.group 'bad_handlers'
+g_bad_handlers.after_each(function() pcall(http.shutdown) end)
 
 local write_handler_launched = false
 local bad_write_ok
@@ -268,7 +264,6 @@ g_bad_handlers.test_write_params = function()
     t.assert(write_bad_shuttle_ok == false,
         'io:write() with corrupt io.shuttle didn\'t fail')
     t.assert_str_matches(write_bad_shuttle_err, 'shuttle is invalid')
-    http.shutdown()
 end
 
 g_bad_handlers.test_write_header_params = function()
@@ -332,9 +327,21 @@ g_bad_handlers.test_write_header_params = function()
     t.assert(close_bad_shuttle_ok == false,
         'io:close() with corrupt io.shuttle didn\'t fail')
     t.assert_str_matches(close_bad_shuttle_err, 'shuttle is invalid')
-    http.shutdown()
 end
 
+local g_hot_reload = t.group 'hot_reload'
+g_hot_reload.after_each(function() pcall(http.shutdown) end)
+g_hot_reload.test_extra_sites = function()
+    local cfg = {
+        sites = { { path = '/write', handler = write_handler } },
+    }
+    http.cfg(cfg)
+    cfg.sites[#cfg.sites + 1] =
+        { path = '/write_header', handler = write_header_handler }
+    t.assert_error_msg_content_equals(
+        'specifying new sites[].path is not supported (yet?)', http.cfg, cfg)
+    http.shutdown()
+end
 
 --fiber.sleep(100) -- For 'external' wget etc
 

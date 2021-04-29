@@ -233,6 +233,7 @@ typedef struct {
 	int lua_handler_ref;
 	int old_lua_handler_ref;
 	int new_lua_handler_ref;
+	unsigned path_len;
 	unsigned generation;
 } lua_site_t;
 
@@ -3064,10 +3065,14 @@ Skip_inits_on_hot_reload:
 		unsigned lua_site_idx;
 		if (is_hot_reload) {
 			for (lua_site_idx = 0;
-			    lua_site_idx < conf.lua_site_count; ++lua_site_idx)
-				if (!memcmp(conf.lua_sites[lua_site_idx].path,
-				    path, path_len))
+			    lua_site_idx < conf.lua_site_count;
+			    ++lua_site_idx) {
+				const lua_site_t *const lua_site =
+					&conf.lua_sites[lua_site_idx];
+				if (path_len == lua_site->path_len &&
+				    !memcmp(lua_site->path, path, path_len))
 					goto Skip_creating_sites_structs;
+			}
 			lerr =
 			"specifying new sites[].path is not supported (yet?)";
 			goto invalid_sites;
@@ -3088,6 +3093,7 @@ Skip_inits_on_hot_reload:
 				"for Lua sites C array path";
 			goto invalid_sites;
 		}
+		lua_site->path_len = path_len;
 
 	Skip_creating_sites_structs:
 		lua_getfield(L, -2, "handler");
@@ -3116,8 +3122,11 @@ Skip_inits_on_hot_reload:
 
 Skip_lua_sites:
 	lua_getfield(L, LUA_STACK_IDX_TABLE, "handler");
-	if (lua_isnil(L, -1))
+	if (lua_isnil(L, -1)) {
+		if (is_hot_reload)
+			goto Apply_new_config_hot_reload;
 		goto Skip_main_lua_handler;
+	}
 	if (lua_type(L, -1) != LUA_TFUNCTION) {
 		lerr = "handler is not a function";
 		goto invalid_handler;
@@ -3162,6 +3171,7 @@ Skip_lua_sites:
 		lerr = "Failed to allocate memory for Lua sites C array path";
 		goto invalid_handler;
 	}
+	lua_site->path_len = 1;
 	register_lua_handler(hostconf, lua_site, "/", 1,
 		luaL_ref(L, LUA_REGISTRYINDEX));
 	lua_site->generation = generation;
@@ -3504,8 +3514,10 @@ invalid_sites:
 invalid_sites_table:
 c_desc_empty:
 register_host_failed:
-	h2o_config_dispose(&conf.globalconf);
-	free(conf.thread_ctxs);
+	if (!is_hot_reload) {
+		h2o_config_dispose(&conf.globalconf);
+		free(conf.thread_ctxs);
+	}
 thread_ctxs_alloc_failed:
 error_hot_reload_shuttle_size:
 error_hot_reload_threads:
