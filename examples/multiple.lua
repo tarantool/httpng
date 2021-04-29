@@ -253,13 +253,19 @@ local function ws_app_handler(req, io)
     webSocket = new WebSocket('wss://localhost:7890/ws_server');
     sendCounter = 0;
     sendLimit = 10;
+    stopped_sends = false;
     function sendOne() {
         ++sendCounter;
-        document.write('App: sending "', sendCounter, '" to server<br>\n');
-        webSocket.send(sendCounter);
+        /* Some old Firefox versions ignore clearInterval() due to bugs. */
         if (sendCounter >= sendLimit) {
-            clearInterval(periodicSendsTimer);
-            document.write('App: stopped sends<br>\n');
+            if (!stopped_sends) {
+                stopped_sends = true;
+                clearInterval(periodicSendsTimer);
+                document.write('App: stopped sends<br>\n');
+            }
+        } else {
+            document.write('App: sending "', sendCounter, '" to server<br>\n');
+            webSocket.send(sendCounter);
         }
     }
     function startSending() {
