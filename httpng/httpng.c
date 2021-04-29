@@ -35,6 +35,13 @@
 #define lengthof(array) (sizeof(array) / sizeof((array)[0]))
 #endif
 
+#define STATIC_ASSERT(x, desc) do { \
+		enum { \
+			/* Will trigger zero division. */ \
+			__static_assert_placeholder = 1 / !!(x), \
+		}; \
+	} while(0);
+
 #ifdef TCP_FASTOPEN
 #define H2O_DEFAULT_LENGTH_TCP_FASTOPEN_QUEUE 4096
 #else
@@ -1796,7 +1803,7 @@ static int lua_req_handler(lua_h2o_handler_t *self, h2o_req_t *req)
 	memcpy(response->un.req.buffer, req->path.base,
 		response->un.req.path_len);
 
-	static_assert(LUA_QUERY_NONE <
+	STATIC_ASSERT(LUA_QUERY_NONE <
 		(1ULL << (8 * sizeof(response->un.req.query_at))),
 		".query_at field is not large enough to store LUA_QUERY_NONE");
 	response->un.req.query_at = (req->query_at == SIZE_MAX)
@@ -2199,6 +2206,12 @@ static int open_listener_ipv4(const char *addr_str, uint16_t port)
 static SSL_CTX *setup_ssl(const char *cert_file, const char *key_file,
 	int level, long min_proto_version)
 {
+#ifndef OPENSSL_VERSION_NUMBER
+#error "OPENSSL_VERSION_NUMBER is not defined"
+#endif /* OPENSSL_VERSION_NUMBER */
+#if OPENSSL_VERSION_NUMBER < 0x1010000fL
+#error "OpenSSL 1.1.* is required"
+#endif /* OPENSSL_VERSION_NUMBER < 0x1010000fL */
 	if (!SSL_load_error_strings())
 		return NULL;
 	SSL_library_init(); /* Always succeeds */
@@ -2779,7 +2792,8 @@ static int on_shutdown_internal(lua_State *L, bool called_from_callback)
 #endif /* USE_LIBUV */
 	free(conf.listener_cfgs);
 	free(conf.thread_ctxs);
-	for (unsigned idx = 0; idx < conf.lua_site_count; ++idx)
+	unsigned idx;
+	for (idx = 0; idx < conf.lua_site_count; ++idx)
 		free(conf.lua_sites[idx].path);
 	free(conf.lua_sites);
 	conf.configured = false;
@@ -3205,7 +3219,9 @@ Skip_listen:
 			FILL_PROTO_STR(TLS1_0_STR, TLS1_VERSION),
 			FILL_PROTO_STR(TLS1_1_STR, TLS1_1_VERSION),
 			FILL_PROTO_STR(TLS1_2_STR, TLS1_2_VERSION),
+#ifdef TLS1_3_VERSION
 			FILL_PROTO_STR(TLS1_3_STR, TLS1_3_VERSION),
+#endif /* TLS1_3_VERSION */
 		};
 #undef FILL_PROTO_STR
 		unsigned idx;
