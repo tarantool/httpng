@@ -11,7 +11,7 @@ g.test_no_handlers = function()
 end
 
 g.test_c_sites = function()
-    t.assert_error_msg_content_equals('c_sites_func must be function',
+    t.assert_error_msg_content_equals('c_sites_func must be a function',
         http.cfg, { c_sites_func = 42 })
 end
 
