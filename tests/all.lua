@@ -340,7 +340,83 @@ g_hot_reload.test_extra_sites = function()
         { path = '/write_header', handler = write_header_handler }
     t.assert_error_msg_content_equals(
         'specifying new sites[].path is not supported (yet?)', http.cfg, cfg)
-    http.shutdown()
+end
+
+g_hot_reload.test_change_params = function()
+    local cfg = {
+        sites = { { path = '/write', handler = write_handler } },
+        threads = 4,
+        max_conn_per_thread = 64,
+        shuttle_size = 1024,
+        max_body_len = 16 * 1024 * 1024,
+        use_body_split = true,
+    }
+
+    http.cfg(cfg)
+
+    cfg.max_conn_per_thread = 128
+    http.cfg(cfg)
+
+    cfg.max_body_len = 32 * 1024 * 1024
+    http.cfg(cfg)
+
+    cfg.use_body_split = false
+    http.cfg(cfg)
+
+    cfg.shuttle_size = 2048
+    t.assert_error_msg_content_equals(
+        "Reconfiguration can't change shuttle_size", http.cfg, cfg)
+    cfg.shuttle_size = 1024
+
+    cfg.threads = 5
+    t.assert_error_msg_content_equals(
+        "Reconfiguration can't change number of threads (yet)",
+        http.cfg, cfg)
+end
+
+local foo_handler = function(req, io)
+    return { body = 'foo' }
+end
+
+local bar_handler = function(req, io)
+    return { body = 'bar' }
+end
+
+local alt_foo_handler = function(req, io)
+    return { body = 'FOO' }
+end
+
+local alt_bar_handler = function(req, io)
+    return { body = 'BAR' }
+end
+
+g_hot_reload.test_replace_handlers = function()
+    local cfg = {
+        handler = foo_handler,
+        sites = { { path = '/alt', handler = alt_foo_handler } },
+    }
+
+    http.cfg(cfg)
+
+    local cmd_main = 'curl -k https://localhost:8080'
+    local cmd_alt = 'curl -k https://localhost:8080/alt'
+
+    local check = function(cmd, str)
+        local ph = popen.shell(cmd, "r")
+        local output = ph:read()
+        local result = ph:wait().exit_code
+        assert(output == str)
+    end
+
+    check(cmd_main, 'foo')
+    check(cmd_alt, 'FOO')
+
+    cfg.handler = bar_handler
+    cfg.sites[1].handler = alt_bar_handler
+    http.cfg(cfg)
+
+    check(cmd_main, 'bar')
+    check(cmd_alt, 'BAR')
 end
 
 --fiber.sleep(100) -- For 'external' wget etc
