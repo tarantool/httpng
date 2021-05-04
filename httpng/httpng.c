@@ -3239,12 +3239,29 @@ Skip_lua_sites:
 		    ++lua_site_idx)
 			if (!memcmp(conf.lua_sites[lua_site_idx].path, "/", 2))
 				goto Primary_handler_found;
-		lerr = "there is no existing handler for \"/\"";
-		goto invalid_handler;
+
+		lua_site_t *const new_lua_sites =
+			(lua_site_t *)realloc(conf.lua_sites,
+				sizeof(lua_site_t) * (conf.lua_site_count +
+					hot_reload_extra_sites + 1));
+		if (new_lua_sites == NULL)
+			goto error_lua_primary_site_malloc;
+		conf.lua_sites = new_lua_sites;
+		lua_site_t *lua_site =
+			&conf.lua_sites[conf.lua_site_count +
+				hot_reload_extra_sites++];
+		lua_site->generation = generation - 1;
+
+		lua_site->lua_handler_ref = LUA_REFNIL;
+		if ((lua_site->path = (char *)malloc(1 + 1)) == NULL)
+			goto error_lua_primary_site_path_malloc;
+		lua_site->path_len = 1;
+		register_lua_handler_part_one(lua_site,
+			"/", luaL_ref(L, LUA_REGISTRYINDEX));
+		goto Apply_new_config_hot_reload;
 
 	Primary_handler_found:
-		;
-		lua_site_t *const lua_site = &conf.lua_sites[lua_site_idx];
+		lua_site = &conf.lua_sites[lua_site_idx];
 		if (lua_site->generation == generation) {
 			lerr = "duplicated site description for /";
 			goto invalid_sites;
@@ -3262,6 +3279,7 @@ Skip_lua_sites:
 	lua_site_t *const new_lua_sites = (lua_site_t *)realloc(lua_sites,
 		sizeof(lua_site_t) * (lua_site_count + 1));
 	if (new_lua_sites == NULL) {
+	error_lua_primary_site_malloc:
 		lerr = "Failed to allocate memory for Lua sites C array";
 		goto invalid_handler;
 	}
@@ -3269,6 +3287,7 @@ Skip_lua_sites:
 	lua_site_t *const lua_site = &lua_sites[lua_site_count++];
 	lua_site->lua_handler_ref = LUA_REFNIL;
 	if ((lua_site->path = (char *)malloc(1 + 1)) == NULL) {
+	error_lua_primary_site_path_malloc:
 		lerr = "Failed to allocate memory for Lua sites C array path";
 		goto invalid_handler;
 	}

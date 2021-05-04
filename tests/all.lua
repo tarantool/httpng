@@ -369,6 +369,25 @@ g_hot_reload.test_extra_sites = function()
     check_site_content(cmd_alt, 'foo')
 end
 
+g_hot_reload.test_add_primary_handler = function()
+    local cfg = {
+        sites = { { path = '/alt', handler = foo_handler } },
+        threads = 4,
+    }
+    http.cfg(cfg)
+    local cmd_main = 'curl -k https://localhost:8080'
+    local cmd_alt = 'curl -k https://localhost:8080/alt'
+
+    check_site_content(cmd_main, 'not found')
+    check_site_content(cmd_alt, 'foo')
+
+    cfg.handler = bar_handler
+
+    http.cfg(cfg)
+    check_site_content(cmd_main, 'bar')
+    check_site_content(cmd_alt, 'foo')
+end
+
 g_hot_reload.test_change_params = function()
     local cfg = {
         sites = { { path = '/write', handler = write_handler } },
