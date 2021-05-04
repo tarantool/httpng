@@ -331,15 +331,42 @@ end
 
 local g_hot_reload = t.group 'hot_reload'
 g_hot_reload.after_each(function() pcall(http.shutdown) end)
+
+local foo_handler = function(req, io)
+    return { body = 'foo' }
+end
+
+local bar_handler = function(req, io)
+    return { body = 'bar' }
+end
+
+local check_site_content = function(cmd, str)
+    local ph = popen.shell(cmd, "r")
+    local output = ph:read()
+    local result = ph:wait().exit_code
+    if (output ~= str) then
+        print('Expected: "'..str..'", actual: "'..output..'"')
+        assert(output == str)
+    end
+end
+
 g_hot_reload.test_extra_sites = function()
     local cfg = {
-        sites = { { path = '/write', handler = write_handler } },
+        sites = { { path = '/alt', handler = foo_handler } },
+        threads = 4,
     }
     http.cfg(cfg)
-    cfg.sites[#cfg.sites + 1] =
-        { path = '/write_header', handler = write_header_handler }
-    t.assert_error_msg_content_equals(
-        'specifying new sites[].path is not supported (yet?)', http.cfg, cfg)
+    local cmd_main = 'curl -k https://localhost:8080'
+    local cmd_alt = 'curl -k https://localhost:8080/alt'
+
+    check_site_content(cmd_main, 'not found')
+    check_site_content(cmd_alt, 'foo')
+
+    cfg.sites[#cfg.sites + 1] = { path = '/', handler = bar_handler }
+
+    http.cfg(cfg)
+    check_site_content(cmd_main, 'bar')
+    check_site_content(cmd_alt, 'foo')
 end
 
 g_hot_reload.test_change_params = function()
@@ -374,14 +401,6 @@ g_hot_reload.test_change_params = function()
         http.cfg, cfg)
 end
 
-local foo_handler = function(req, io)
-    return { body = 'foo' }
-end
-
-local bar_handler = function(req, io)
-    return { body = 'bar' }
-end
-
 local alt_foo_handler = function(req, io)
     return { body = 'FOO' }
 end
@@ -394,19 +413,14 @@ g_hot_reload.test_replace_handlers = function()
     local cfg = {
         handler = foo_handler,
         sites = { { path = '/alt', handler = alt_foo_handler } },
+        threads = 4,
     }
 
     http.cfg(cfg)
 
     local cmd_main = 'curl -k https://localhost:8080'
     local cmd_alt = 'curl -k https://localhost:8080/alt'
-
-    local check = function(cmd, str)
-        local ph = popen.shell(cmd, "r")
-        local output = ph:read()
-        local result = ph:wait().exit_code
-        assert(output == str)
-    end
+    local check = check_site_content
 
     check(cmd_main, 'foo')
     check(cmd_alt, 'FOO')
