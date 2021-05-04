@@ -94,7 +94,7 @@
 #define MIN_max_body_len 0
 
 /* Limits are quite relaxed for now. */
-#define MAX_threads 1024
+#define MAX_threads 16 /* More than 4 is hardly useful (Lua). */
 #define MAX_max_conn_per_thread (1024 * 1024)
 #define MAX_shuttle_size (16 * 1024 * 1024)
 #define MAX_max_body_len (64ULL * 1024 * 1024 * 1024)
@@ -126,11 +126,13 @@ typedef struct {
 } our_sock_t;
 
 typedef struct {
+	h2o_globalconf_t globalconf;
 	h2o_context_t ctx;
 	struct listener_ctx *listener_ctxs;
 	struct xtm_queue *queue_to_tx;
 	struct xtm_queue *queue_from_tx;
 	struct fiber *fiber_to_wake_on_shutdown;
+	h2o_hostconf_t *hostconf;
 #ifndef USE_LIBUV
 	h2o_socket_t *sock_from_tx;
 #endif /* USE_LIBUV */
@@ -227,9 +229,12 @@ typedef struct {
 	size_t path_len;
 } lua_h2o_handler_t;
 
+/* N. b.: must be relocatable when server is running
+ * (do not store e. g. string buffers here).
+ * It is better to not touch it from handlers at all. */
 typedef struct {
 	char *path;
-	lua_h2o_handler_t *handler;
+	lua_h2o_handler_t *(lua_handlers[MAX_threads]);
 	int lua_handler_ref;
 	int old_lua_handler_ref;
 	int new_lua_handler_ref;
@@ -324,8 +329,11 @@ typedef struct {
 	} un; /* Must be last member of struct. */
 } lua_response_t;
 
+typedef struct {
+	unsigned extra_sites;
+} add_site_t;
+
 static struct {
-	h2o_globalconf_t globalconf;
 	listener_cfg_t *listener_cfgs;
 	thread_ctx_t *thread_ctxs;
 	struct fiber **tx_fiber_ptrs;
@@ -344,6 +352,7 @@ static struct {
 	unsigned max_path_len_lua;
 	unsigned max_recv_bytes_lua_websocket;
 	unsigned generation;
+	volatile unsigned add_new_sites_counter;
 	int tfo_queues;
 	int on_shutdown_ref;
 #ifdef SPLIT_LARGE_BODY
@@ -497,6 +506,15 @@ static inline void stubborn_dispatch_thr_from_tx(
 {
 	stubborn_dispatch_uni(thread_ctx->queue_from_tx,
 		(void *)func, thread_ctx);
+}
+
+/* Called when dispatch must not fail. */
+static inline void stubborn_dispatch_to_http_add_site(
+	thread_ctx_t *thread_ctx, void (*func)(add_site_t *),
+	add_site_t *param)
+{
+	stubborn_dispatch_uni(thread_ctx->queue_from_tx,
+		(void *)func, param);
 }
 
 /* Launched in HTTP server thread. */
@@ -1934,13 +1952,17 @@ static h2o_pathconf_t *register_handler(h2o_hostconf_t *hostconf,
 	return pathconf;
 }
 
-static h2o_pathconf_t *register_lua_handler(h2o_hostconf_t *hostconf,
-	lua_site_t *lua_site,
-	const char *path, size_t path_len, int lua_handler_ref)
+static void register_lua_handler_part_one(lua_site_t *lua_site,
+	const char *path, int lua_handler_ref)
 {
-	memcpy(lua_site->path, path, path_len);
-	lua_site->path[path_len] = 0;
+	memcpy(lua_site->path, path, lua_site->path_len);
+	lua_site->path[lua_site->path_len] = 0;
+	lua_site->lua_handler_ref = lua_handler_ref;
+}
 
+static h2o_pathconf_t *register_lua_handler_part_two(h2o_hostconf_t *hostconf,
+	lua_site_t *lua_site, unsigned thread_idx)
+{
 	/* These functions never return NULL, dying instead */
 	h2o_pathconf_t *pathconf =
 		h2o_config_register_path(hostconf, lua_site->path, 0);
@@ -1948,12 +1970,21 @@ static h2o_pathconf_t *register_lua_handler(h2o_hostconf_t *hostconf,
 		h2o_create_handler(pathconf, sizeof(*handler));
 	handler->super.on_req =
 		(int (*)(h2o_handler_t *, h2o_req_t *))lua_req_handler;
-	lua_site->lua_handler_ref =
-	handler->lua_handler_ref = lua_handler_ref;
-	handler->path = path;
-	handler->path_len = path_len;
-	lua_site->handler = handler;
+	handler->lua_handler_ref = lua_site->lua_handler_ref;
+	handler->path = lua_site->path;
+	handler->path_len = lua_site->path_len;
+	lua_site->lua_handlers[thread_idx] = handler;
 	return pathconf;
+}
+
+static void register_lua_handler(lua_site_t *lua_site,
+	const char *path, int lua_handler_ref)
+{
+	register_lua_handler_part_one(lua_site, path, lua_handler_ref);
+	unsigned thread_idx;
+	for (thread_idx = 0; thread_idx < conf.num_threads; ++thread_idx)
+		register_lua_handler_part_two(conf.thread_ctxs[thread_idx]
+			.hostconf, lua_site, thread_idx);
 }
 
 /* Launched in HTTP server thread. */
@@ -2287,7 +2318,7 @@ static bool init_worker_thread(unsigned thread_idx)
 	uv_loop_init(&thread_ctx->loop);
 #ifndef INIT_CTX_IN_HTTP_THREAD
 	h2o_context_init(&thread_ctx->ctx, &thread_ctx->loop,
-		&conf.globalconf);
+		&thread_ctx->globalconf);
 #endif /* INIT_CTX_IN_HTTP_THREAD */
 #else /* USE_LIBUV */
 	/* Can't call h2o_context_init() here, this must be done
@@ -2295,7 +2326,7 @@ static bool init_worker_thread(unsigned thread_idx)
 	 * uses thread-local variables. */
 #ifndef INIT_CTX_IN_HTTP_THREAD
 	h2o_context_init(&thread_ctx->ctx, h2o_evloop_create(),
-		&conf.globalconf);
+		&thread_ctx->globalconf);
 #endif /* INIT_CTX_IN_HTTP_THREAD */
 #endif /* USE_LIBUV */
 	h2o_linklist_init_anchor(&thread_ctx->accepted_sockets);
@@ -2308,7 +2339,7 @@ static bool init_worker_thread(unsigned thread_idx)
 	listener_ctx->thread_ctx = thread_ctx;
 	listener_ctx->accept_ctx.ssl_ctx = conf.ssl_ctx;
 	listener_ctx->accept_ctx.ctx = &thread_ctx->ctx;
-	listener_ctx->accept_ctx.hosts = conf.globalconf.hosts;
+	listener_ctx->accept_ctx.hosts = thread_ctx->globalconf.hosts;
 	if (thread_idx) {
 		if ((listener_ctx->fd = dup(listener_cfg->fd)) == -1)
 			/* FIXME: Should report. */
@@ -2471,14 +2502,14 @@ static void *worker_func(void *param)
 #ifdef USE_LIBUV
 #ifdef INIT_CTX_IN_HTTP_THREAD
 	h2o_context_init(&thread_ctx->ctx, &thread_ctx->loop,
-		&conf.globalconf);
+		&thread_ctx->globalconf);
 #endif /* INIT_CTX_IN_HTTP_THREAD */
 	uv_async_init(&thread_ctx->loop, &thread_ctx->async,
 		(uv_async_cb)async_cb);
 #else /* USE_LIBUV */
 #ifdef INIT_CTX_IN_HTTP_THREAD
 	h2o_context_init(&thread_ctx->ctx, h2o_evloop_create(),
-		&conf.globalconf);
+		&thread_ctx->globalconf);
 #endif /* INIT_CTX_IN_HTTP_THREAD */
 	init_async(thread_ctx);
 #endif /* USE_LIBUV */
@@ -2785,8 +2816,8 @@ static int on_shutdown_internal(lua_State *L, bool called_from_callback)
 		free(thread_ctx->listener_ctxs);
 		xtm_delete(thread_ctx->queue_to_tx);
 		my_xtm_delete_queue_from_tx(thread_ctx);
+		h2o_config_dispose(&thread_ctx->globalconf);
 	}
-	h2o_config_dispose(&conf.globalconf);
 #ifdef USE_LIBUV
 	unsigned idx;
 	for (idx = 0; idx < conf.num_listeners; ++idx) {
@@ -2836,15 +2867,20 @@ enum {
 	LUA_STACK_IDX_LUA_SITES = -2,
 };
 
+/* Launched in TX thread. */
 static void replace_lua_handlers(lua_State *L)
 {
 	unsigned idx;
 	for (idx = 0; idx < conf.lua_site_count; ++idx) {
 		lua_site_t *const site = &conf.lua_sites[idx];
-		lua_h2o_handler_t *const handler = site->handler;
-		site->old_lua_handler_ref = handler->lua_handler_ref;
-		handler->lua_handler_ref = site->lua_handler_ref =
-			site->new_lua_handler_ref;
+		site->old_lua_handler_ref = site->lua_handler_ref;
+		site->lua_handler_ref = site->new_lua_handler_ref;
+
+		unsigned thread_idx;
+		for (thread_idx = 0; thread_idx < conf.num_threads;
+		    ++thread_idx)
+			site->lua_handlers[thread_idx]->lua_handler_ref =
+				site->new_lua_handler_ref;
 	}
 	__sync_synchronize();
 	/* Now we should call useless function in HTTP thread
@@ -2872,6 +2908,47 @@ static void replace_lua_handlers(lua_State *L)
 			conf.lua_sites[idx].old_lua_handler_ref);
 }
 
+/* Launched in TX thread.*/
+static void done_with_new_site(void *param)
+{
+	(void)param;
+	--conf.add_new_sites_counter;
+}
+
+/* Launched in HTTP server thread. */
+static void hot_reload_add_new_site(add_site_t *new_site)
+{
+	thread_ctx_t *const thread_ctx = get_curr_thread_ctx();
+	unsigned idx;
+	for (idx = conf.lua_site_count; idx < conf.lua_site_count +
+	    new_site->extra_sites; ++idx) {
+		lua_site_t *const lua_site = &conf.lua_sites[idx];
+		h2o_context_init_pathconf_context(&thread_ctx->ctx,
+			register_lua_handler_part_two(thread_ctx->hostconf,
+				lua_site, thread_ctx->idx));
+	}
+	stubborn_dispatch_uni(thread_ctx->queue_to_tx,
+		(void *)done_with_new_site, NULL);
+}
+
+/* Launched in TX thread.*/
+static void hot_reload_add_new_sites(unsigned extra_sites)
+{
+	if (extra_sites == 0)
+		return;
+
+	add_site_t new_site = (add_site_t){extra_sites};
+	conf.add_new_sites_counter = conf.num_threads;
+	__sync_synchronize();
+	unsigned idx;
+	for (idx = 0; idx < conf.num_threads; ++idx) {
+		stubborn_dispatch_to_http_add_site(&conf.thread_ctxs[idx],
+			hot_reload_add_new_site, &new_site);
+	}
+	while (conf.add_new_sites_counter != 0)
+		fiber_sleep(0.001);
+}
+
 /* Lua parameters: lua_sites, function_to_call, function_param */
 int cfg(lua_State *L)
 {
@@ -2886,8 +2963,6 @@ int cfg(lua_State *L)
 		is_hot_reload = false;
 	const char *lerr = NULL; /* Error message for caller. */
 	unsigned c_handlers = 0;
-	if (!is_hot_reload)
-		memset(&conf.globalconf, 0, sizeof(conf.globalconf));
 
 	if (lua_gettop(L) < 1) {
 		lerr = "No parameters specified";
@@ -3000,15 +3075,18 @@ Skip_c_sites:
 		goto thread_ctxs_alloc_failed;
 	}
 
-	h2o_config_init(&conf.globalconf);
-
-	/* FIXME: Should make customizable. */
-	h2o_hostconf_t *hostconf = h2o_config_register_host(&conf.globalconf,
-		h2o_iovec_init(H2O_STRLIT("default")),
-		H2O_DEFAULT_PORT_FOR_PROTOCOL_USED);
-	if (hostconf == NULL) {
-		lerr = "libh2o host registration failed";
-		goto register_host_failed;
+	unsigned thread_idx;
+	for (thread_idx = 0; thread_idx < conf.num_threads; ++thread_idx) {
+		thread_ctx_t *const thread_ctx = &conf.thread_ctxs[thread_idx];
+		h2o_config_init(&thread_ctx->globalconf);
+		/* FIXME: Should make customizable. */
+		if ((thread_ctx->hostconf =
+		    h2o_config_register_host(&thread_ctx->globalconf,
+			    h2o_iovec_init(H2O_STRLIT("default")),
+			    H2O_DEFAULT_PORT_FOR_PROTOCOL_USED)) == NULL) {
+			lerr = "libh2o host registration failed";
+			goto register_host_failed;
+		}
 	}
 
 	if (path_descs != NULL) {
@@ -3020,8 +3098,11 @@ Skip_c_sites:
 		}
 
 		do {
-			register_handler(hostconf, path_desc->path,
-				path_desc->handler);
+			for (thread_idx = 0; thread_idx < conf.num_threads;
+			    ++thread_idx)
+				register_handler(conf.thread_ctxs[thread_idx]
+					.hostconf, path_desc->path,
+					path_desc->handler);
 			++c_handlers;
 		} while ((++path_desc)->path != NULL);
 	}
@@ -3038,8 +3119,10 @@ Skip_inits_on_hot_reload:
 		lerr = "sites is not a table";
 		goto invalid_sites_table;
 	}
+	unsigned hot_reload_extra_sites = 0;
 	lua_pushnil(L); /* Start of table. */
 	while (lua_next(L, LUA_STACK_IDX_LUA_SITES)) {
+		bool is_adding_site;
 		if (!lua_istable(L, -1)) {
 			lerr = "sites is not a table of tables";
 			goto invalid_sites;
@@ -3062,6 +3145,7 @@ Skip_inits_on_hot_reload:
 			goto invalid_sites;
 		}
 
+		lua_site_t *lua_site;
 		unsigned lua_site_idx;
 		if (is_hot_reload) {
 			for (lua_site_idx = 0;
@@ -3070,23 +3154,35 @@ Skip_inits_on_hot_reload:
 				const lua_site_t *const lua_site =
 					&conf.lua_sites[lua_site_idx];
 				if (path_len == lua_site->path_len &&
-				    !memcmp(lua_site->path, path, path_len))
+				    !memcmp(lua_site->path, path, path_len)) {
+					is_adding_site = false;
 					goto Skip_creating_sites_structs;
+				}
 			}
-			lerr =
-			"specifying new sites[].path is not supported (yet?)";
-			goto invalid_sites;
+			lua_site_t *const new_lua_sites =
+				(lua_site_t *)realloc(conf.lua_sites, sizeof(lua_site_t) *
+					(conf.lua_site_count + hot_reload_extra_sites + 1));
+			if (new_lua_sites == NULL)
+				goto error_lua_sites_malloc;
+			conf.lua_sites = new_lua_sites;
+			lua_site = &conf.lua_sites[conf.lua_site_count + hot_reload_extra_sites++];
+			lua_site->generation = generation - 1;
+			is_adding_site = true;
+			goto Alloc_lua_site_path;
 		}
 		lua_site_t *const new_lua_sites =
 			(lua_site_t *)realloc(lua_sites, sizeof(lua_site_t) *
 				(lua_site_count + 1));
 		if (new_lua_sites == NULL) {
+		error_lua_sites_malloc:
 			lerr = "Failed to allocate memory "
 				"for Lua sites C array";
 			goto invalid_sites;
 		}
 		lua_sites = new_lua_sites;
-		lua_site_t *lua_site = &lua_sites[lua_site_count++];
+		lua_site = &lua_sites[lua_site_count++];
+
+	Alloc_lua_site_path:
 		lua_site->lua_handler_ref = LUA_REFNIL;
 		if ((lua_site->path = (char *)malloc(path_len + 1)) == NULL) {
 			lerr = "Failed to allocate memory "
@@ -3103,16 +3199,21 @@ Skip_inits_on_hot_reload:
 		}
 
 		if (is_hot_reload) {
-			lua_site = &conf.lua_sites[lua_site_idx];
-			if (lua_site->generation == generation) {
-				lerr = "duplicated site description";
-				goto invalid_sites;
+			if (is_adding_site)
+				register_lua_handler_part_one(lua_site,
+					path, luaL_ref(L, LUA_REGISTRYINDEX));
+			else {
+				lua_site = &conf.lua_sites[lua_site_idx];
+				if (lua_site->generation == generation) {
+					lerr = "duplicated site description";
+					goto invalid_sites;
+				}
+				lua_site->new_lua_handler_ref =
+					luaL_ref(L, LUA_REGISTRYINDEX);
 			}
-			lua_site->new_lua_handler_ref =
-				luaL_ref(L, LUA_REGISTRYINDEX);
 		} else
-			register_lua_handler(hostconf, lua_site, path,
-				path_len, luaL_ref(L, LUA_REGISTRYINDEX));
+			register_lua_handler(lua_site, path,
+				luaL_ref(L, LUA_REGISTRYINDEX));
 		lua_site->generation = generation;
 
 		/* Remove path string and site array value,
@@ -3172,7 +3273,7 @@ Skip_lua_sites:
 		goto invalid_handler;
 	}
 	lua_site->path_len = 1;
-	register_lua_handler(hostconf, lua_site, "/", 1,
+	register_lua_handler(lua_site, "/",
 		luaL_ref(L, LUA_REGISTRYINDEX));
 	lua_site->generation = generation;
 
@@ -3420,7 +3521,8 @@ After_applying_new_config:
 	return 0;
 
 Apply_new_config_hot_reload:
-	;
+	hot_reload_add_new_sites(hot_reload_extra_sites);
+
 	unsigned idx;
 	for (idx = 0; idx < conf.lua_site_count; ++idx) {
 		const lua_site_t *const lua_site = &conf.lua_sites[idx];
@@ -3439,12 +3541,15 @@ Apply_new_config:
 	if (conf.num_accepts < 8)
 		conf.num_accepts = 8;
 #endif /* USE_LIBUV */
-	conf.globalconf.max_request_entity_size = max_body_len;
+	for (thread_idx = 0; thread_idx < conf.num_threads; ++thread_idx)
+		conf.thread_ctxs[thread_idx].globalconf
+			.max_request_entity_size = max_body_len;
 
 	if (!is_hot_reload)
 		goto After_applying_new_config;
 
 	replace_lua_handlers(L);
+	conf.lua_site_count += hot_reload_extra_sites;
 
 	conf.hot_reload_in_progress = false;
 	return 0;
@@ -3493,7 +3598,7 @@ listen_invalid:
 no_handlers:
 invalid_handler:
 invalid_sites:
-	if (is_hot_reload)
+	if (is_hot_reload) {
 		for (idx = 0; idx < lua_site_count; ++idx) {
 			lua_site_t *const lua_site = &conf.lua_sites[idx];
 			if (lua_site->generation == generation)
@@ -3501,9 +3606,25 @@ invalid_sites:
 					lua_site->new_lua_handler_ref);
 			else
 				lua_site->generation = generation;
+		}
+		for (idx = conf.lua_site_count;
+		    idx < conf.lua_site_count + hot_reload_extra_sites; ++idx) {
+			lua_site_t *const lua_site = &conf.lua_sites[idx];
+			if (lua_site->lua_handler_ref != LUA_REFNIL)
+				luaL_unref(L, LUA_REGISTRYINDEX,
+					lua_site->lua_handler_ref);
 			free(lua_site->path);
 		}
-	else for (idx = 0; idx < lua_site_count; ++idx) {
+		if (hot_reload_extra_sites) {
+			lua_site_t *const new_lua_sites =
+				(lua_site_t *)realloc(conf.lua_sites,
+				sizeof(lua_site_t) * conf.lua_site_count);
+			if (new_lua_sites != NULL)
+				conf.lua_sites = new_lua_sites;
+			/* We can complain about failed realloc(smaller),
+			 * but what is the point? */
+		}
+	} else for (idx = 0; idx < lua_site_count; ++idx) {
 		lua_site_t *const lua_site = &lua_sites[idx];
 		if (lua_site->lua_handler_ref != LUA_REFNIL)
 			luaL_unref(L, LUA_REGISTRYINDEX,
@@ -3514,8 +3635,10 @@ invalid_sites:
 invalid_sites_table:
 c_desc_empty:
 register_host_failed:
+	/* N.b.: h2o currently can't "unregister" host(s). */
 	if (!is_hot_reload) {
-		h2o_config_dispose(&conf.globalconf);
+		for (thread_idx = 0; thread_idx < conf.num_threads; ++thread_idx)
+			h2o_config_dispose(&conf.thread_ctxs[thread_idx].globalconf);
 		free(conf.thread_ctxs);
 	}
 thread_ctxs_alloc_failed:
