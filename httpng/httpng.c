@@ -2758,7 +2758,8 @@ static int on_shutdown_internal(lua_State *L, bool called_from_callback)
 		return luaL_error(L, "Server is not launched");
 	if (conf.is_shutdown_in_progress) {
 		if (!called_from_callback)
-			return luaL_error(L, "on_shutdown() is already in progress");
+			return luaL_error(L,
+				"on_shutdown() is already in progress");
 		fprintf(stderr,
 			"Warning: on_shutdown() is already in progress\n");
 		return 0;
@@ -3160,12 +3161,15 @@ Skip_inits_on_hot_reload:
 				}
 			}
 			lua_site_t *const new_lua_sites =
-				(lua_site_t *)realloc(conf.lua_sites, sizeof(lua_site_t) *
-					(conf.lua_site_count + hot_reload_extra_sites + 1));
+				(lua_site_t *)realloc(conf.lua_sites,
+					sizeof(lua_site_t) *
+					(conf.lua_site_count +
+						hot_reload_extra_sites + 1));
 			if (new_lua_sites == NULL)
 				goto error_lua_sites_malloc;
 			conf.lua_sites = new_lua_sites;
-			lua_site = &conf.lua_sites[conf.lua_site_count + hot_reload_extra_sites++];
+			lua_site = &conf.lua_sites[conf.lua_site_count +
+				hot_reload_extra_sites++];
 			lua_site->generation = generation - 1;
 			is_adding_site = true;
 			goto Alloc_lua_site_path;
@@ -3656,8 +3660,10 @@ c_desc_empty:
 register_host_failed:
 	/* N.b.: h2o currently can't "unregister" host(s). */
 	if (!is_hot_reload) {
-		for (thread_idx = 0; thread_idx < conf.num_threads; ++thread_idx)
-			h2o_config_dispose(&conf.thread_ctxs[thread_idx].globalconf);
+		for (thread_idx = 0; thread_idx < conf.num_threads;
+		    ++thread_idx)
+			h2o_config_dispose(&conf.thread_ctxs[thread_idx]
+				.globalconf);
 		free(conf.thread_ctxs);
 	}
 thread_ctxs_alloc_failed:
