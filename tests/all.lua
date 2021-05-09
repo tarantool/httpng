@@ -129,7 +129,7 @@ g_wrong_config.test_many_roots_alt = function()
         http.cfg, {
             sites = { { path = '/', handler = function() end } },
             handler = function() end
-	    }
+        }
     )
 end
 
@@ -138,6 +138,16 @@ g_wrong_config.test_paths_after_root = function()
         http.cfg, {
             sites = {
                 { path = '/', handler = function() end },
+                { path = '/alt', handler = function() end },
+            }
+	})
+end
+
+g_wrong_config.test_dup_paths = function()
+    t.assert_error_msg_content_equals("Can't add duplicate paths",
+        http.cfg, {
+            sites = {
+                { path = '/alt', handler = function() end },
                 { path = '/alt', handler = function() end },
             }
 	})
@@ -454,6 +464,48 @@ g_hot_reload.test_add_intermediate_site_alt = function()
     http.cfg(cfg)
     check_site_content(cmd_main, 'foo')
     check_site_content(cmd_alt, 'bar')
+end
+
+g_hot_reload.test_add_duplicate_paths = function()
+    local cfg = {
+        sites = { { path = '/foo', handler = foo_handler } },
+        threads = 4,
+    }
+    http.cfg(cfg)
+    local cmd_main = 'curl -k https://localhost:8080/foo'
+    local cmd_alt = 'curl -k https://localhost:8080/bar'
+
+    check_site_content(cmd_main, 'foo')
+    check_site_content(cmd_alt, 'not found')
+
+    cfg.sites[#cfg.sites + 1] = { path = '/bar', handler = bar_handler }
+    cfg.sites[#cfg.sites + 1] = { path = '/bar', handler = bar_handler }
+
+    t.assert_error_msg_content_equals("Can't add duplicate paths",
+        http.cfg, cfg)
+    check_site_content(cmd_main, 'foo')
+    check_site_content(cmd_alt, 'not found')
+end
+
+g_hot_reload.test_add_duplicate_paths_alt = function()
+    local cfg = {
+        sites = { { path = '/', handler = foo_handler } },
+        threads = 4,
+    }
+    http.cfg(cfg)
+    local cmd_main = 'curl -k https://localhost:8080'
+    local cmd_alt = 'curl -k https://localhost:8080/alt'
+
+    check_site_content(cmd_main, 'foo')
+    check_site_content(cmd_alt, 'foo')
+
+    cfg.sites[#cfg.sites + 1] = { path = '/alt', handler = bar_handler }
+    cfg.sites[#cfg.sites + 1] = { path = '/alt', handler = bar_handler }
+
+    t.assert_error_msg_content_equals("Can't add duplicate paths",
+        http.cfg, cfg)
+    check_site_content(cmd_main, 'foo')
+    check_site_content(cmd_alt, 'foo')
 end
 
 g_hot_reload.test_change_params = function()

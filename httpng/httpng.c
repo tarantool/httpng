@@ -3223,8 +3223,25 @@ Skip_inits_on_hot_reload:
 					&conf.lua_sites[lua_site_idx];
 				if (path_len == lua_site->path_len &&
 				    !memcmp(lua_site->path, path, path_len)) {
+					if (lua_site->generation ==
+					    generation -
+					    ADD_NEW_SITE_GENERATION_SHIFT) {
+						lerr =
+						"Can't add duplicate paths";
+						goto invalid_sites;
+					}
 					is_adding_site = false;
 					goto Skip_creating_sites_structs;
+				}
+			}
+			for (; lua_site_idx < conf.lua_site_count +
+			    hot_reload_extra_sites; ++lua_site_idx) {
+				const lua_site_t *const lua_site =
+					&conf.lua_sites[lua_site_idx];
+				if (path_len == lua_site->path_len &&
+				    !memcmp(lua_site->path, path, path_len)) {
+					lerr = "Can't add duplicate paths";
+					goto invalid_sites;
 				}
 			}
 			lua_site_t *const new_lua_sites =
@@ -3252,18 +3269,29 @@ Skip_inits_on_hot_reload:
 			}
 			is_adding_site = true;
 			goto Alloc_lua_site_path;
+		}
+
+		if (path_len == 1 && *path == '/') {
+			if (conf.idx_of_root_site >= 0) {
+				lerr = "There can be only one \"/\"";
+				goto invalid_sites;
+			}
+			conf.idx_of_root_site = lua_site_count;
+		} else if (conf.idx_of_root_site >= 0) {
+			/* FIXME: Move root instead? */
+			lerr = "Can't add other paths after adding \"/\"";
+			goto invalid_sites;
 		} else {
-			if (path_len == 1 && *path == '/') {
-				if (conf.idx_of_root_site >= 0) {
-					lerr = "There can be only one \"/\"";
+			for (lua_site_idx = 0;
+			    lua_site_idx < lua_site_count;
+			    ++lua_site_idx) {
+				const lua_site_t *const lua_site =
+					&lua_sites[lua_site_idx];
+				if (path_len == lua_site->path_len &&
+				    !memcmp(lua_site->path, path, path_len)) {
+					lerr = "Can't add duplicate paths";
 					goto invalid_sites;
 				}
-				conf.idx_of_root_site = lua_site_count;
-			} else if (conf.idx_of_root_site >= 0) {
-				/* FIXME: Move root instead? */
-				lerr =
-				"Can't add other paths after adding \"/\"";
-				goto invalid_sites;
 			}
 		}
 		lua_site_t *const new_lua_sites =
