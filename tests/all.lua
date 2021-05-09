@@ -388,6 +388,45 @@ g_hot_reload.test_add_primary_handler = function()
     check_site_content(cmd_alt, 'foo')
 end
 
+g_hot_reload.test_add_intermediate_site = function()
+    local cfg = {
+        handler = foo_handler,
+        threads = 4,
+    }
+    http.cfg(cfg)
+    local cmd_main = 'curl -k https://localhost:8080'
+    local cmd_alt = 'curl -k https://localhost:8080/alt'
+
+    check_site_content(cmd_main, 'foo')
+    check_site_content(cmd_alt, 'foo')
+
+    cfg.sites = {}
+    cfg.sites[#cfg.sites + 1] = { path = '/alt', handler = bar_handler }
+
+    http.cfg(cfg)
+    check_site_content(cmd_main, 'foo')
+    check_site_content(cmd_alt, 'bar')
+end
+
+g_hot_reload.test_add_intermediate_site_alt = function()
+    local cfg = {
+        sites = { { path = '/', handler = foo_handler } },
+        threads = 4,
+    }
+    http.cfg(cfg)
+    local cmd_main = 'curl -k https://localhost:8080'
+    local cmd_alt = 'curl -k https://localhost:8080/alt'
+
+    check_site_content(cmd_main, 'foo')
+    check_site_content(cmd_alt, 'foo')
+
+    cfg.sites[#cfg.sites + 1] = { path = '/alt', handler = bar_handler }
+
+    http.cfg(cfg)
+    check_site_content(cmd_main, 'foo')
+    check_site_content(cmd_alt, 'bar')
+end
+
 g_hot_reload.test_change_params = function()
     local cfg = {
         sites = { { path = '/write', handler = write_handler } },
