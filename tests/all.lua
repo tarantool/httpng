@@ -114,6 +114,35 @@ g_wrong_config.test_level_invalid = function()
         http.cfg, { handler = function() end, openssl_security_level = 6 })
 end
 
+g_wrong_config.test_many_roots = function()
+    t.assert_error_msg_content_equals('There can be only one "/"',
+        http.cfg, {
+            sites = {
+                { path = '/', handler = function() end },
+                { path = '/', handler = function() end },
+            }
+	})
+end
+
+g_wrong_config.test_many_roots_alt = function()
+    t.assert_error_msg_content_equals('There can be only one "/"',
+        http.cfg, {
+            sites = { { path = '/', handler = function() end } },
+            handler = function() end
+	    }
+    )
+end
+
+g_wrong_config.test_paths_after_root = function()
+    t.assert_error_msg_content_equals('Can\'t add other paths after adding "/"',
+        http.cfg, {
+            sites = {
+                { path = '/', handler = function() end },
+                { path = '/alt', handler = function() end },
+            }
+	})
+end
+
 local g_shutdown = t.group('shutdown')
 
 g_shutdown.test_simple_shutdown = function()
