@@ -2959,13 +2959,13 @@ static void done_with_new_site(void *param)
 /* Launched in HTTP server thread.
  * Moves root to the end of list.
  * FIXME: Support all kinds of "overlapped" paths maybe? */
-static void reorder_paths(h2o_globalconf_t *globalconf)
+static void reorder_paths(thread_ctx_t *thread_ctx)
 {
 	int root_idx = -1;
 	int non_root_idx = -1;
 
 	/* FIXME: More than one. */
-	const h2o_hostconf_t *const hostconf = globalconf->hosts[0];
+	const h2o_hostconf_t *const hostconf = thread_ctx->hostconf;
 	assert(hostconf != NULL);
 
 	unsigned idx;
@@ -2994,7 +2994,7 @@ static void hot_reload_add_remove_sites_in_some_thr(thread_ctx_t *thread_ctx,
 	add_site_t *new_site, bool is_tx_thread)
 {
 	/* FIXME: More than one. */
-	h2o_hostconf_t *const hostconf = thread_ctx->globalconf.hosts[0];
+	h2o_hostconf_t *const hostconf = thread_ctx->hostconf;
 
 	const unsigned added_generation =
 		conf.generation - ADD_NEW_SITE_GENERATION_SHIFT;
@@ -3038,7 +3038,7 @@ static void hot_reload_add_remove_sites_in_some_thr(thread_ctx_t *thread_ctx,
 			register_lua_handler_part_two(thread_ctx->hostconf,
 				lua_site, thread_ctx->idx));
 	}
-	reorder_paths(&thread_ctx->globalconf);
+	reorder_paths(thread_ctx);
 	if (is_tx_thread)
 		return;
 	__sync_synchronize(); /* We have written to *lua_site. */
