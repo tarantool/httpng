@@ -508,6 +508,62 @@ g_hot_reload.test_add_duplicate_paths_alt = function()
     check_site_content(cmd_alt, 'foo')
 end
 
+g_hot_reload.test_remove_path = function()
+    local cfg = {
+        sites = {
+            { path = '/foo', handler = foo_handler },
+            { path = '/bar', handler = bar_handler },
+        },
+        threads = 4,
+    }
+    http.cfg(cfg)
+    local cmd_main = 'curl -k https://localhost:8080/foo'
+    local cmd_alt = 'curl -k https://localhost:8080/bar'
+
+    check_site_content(cmd_main, 'foo')
+    check_site_content(cmd_alt, 'bar')
+
+    cfg.sites[#cfg.sites] = nil
+
+    http.cfg(cfg)
+    check_site_content(cmd_main, 'foo')
+    check_site_content(cmd_alt, 'not found')
+end
+
+g_hot_reload.test_remove_all_paths = function()
+    local cfg = {
+        sites = {
+            { path = '/', handler = foo_handler },
+        },
+        threads = 4,
+    }
+    http.cfg(cfg)
+    local cmd_main = 'curl -k https://localhost:8080/'
+
+    check_site_content(cmd_main, 'foo')
+
+    cfg.sites = nil
+
+    http.cfg(cfg)
+    check_site_content(cmd_main, 'not found')
+end
+
+g_hot_reload.test_remove_all_paths_alt = function()
+    local cfg = {
+        handler = foo_handler,
+        threads = 4,
+    }
+    http.cfg(cfg)
+    local cmd_main = 'curl -k https://localhost:8080/'
+
+    check_site_content(cmd_main, 'foo')
+
+    cfg.handler = nil
+
+    http.cfg(cfg)
+    check_site_content(cmd_main, 'not found')
+end
+
 g_hot_reload.test_change_params = function()
     local cfg = {
         sites = { { path = '/write', handler = write_handler } },
