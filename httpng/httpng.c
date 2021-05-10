@@ -1991,7 +1991,7 @@ static void register_lua_handler(lua_site_t *lua_site,
 {
 	register_lua_handler_part_one(lua_site, path, lua_handler_ref);
 	unsigned thread_idx;
-	for (thread_idx = 0; thread_idx < conf.num_threads; ++thread_idx)
+	for (thread_idx = 0; thread_idx < MAX_threads; ++thread_idx)
 		register_lua_handler_part_two(conf.thread_ctxs[thread_idx]
 			.hostconf, lua_site, thread_idx);
 }
@@ -2885,7 +2885,7 @@ static void replace_lua_handler_ref(lua_site_t *site)
 	site->lua_handler_ref = site->new_lua_handler_ref;
 
 	unsigned thread_idx;
-	for (thread_idx = 0; thread_idx < conf.num_threads;
+	for (thread_idx = 0; thread_idx < MAX_threads;
 	    ++thread_idx)
 		site->lua_handlers[thread_idx]->lua_handler_ref =
 			site->new_lua_handler_ref;
@@ -2989,11 +2989,10 @@ static void reorder_paths(h2o_globalconf_t *globalconf)
 	hostconf->paths.entries[non_root_idx] = tmp;
 }
 
-/* Launched in HTTP server thread. */
-static void hot_reload_add_remove_sites_in_http_thr(add_site_t *new_site)
+/* Can be launched in TX thread or HTTP server thread. */
+static void hot_reload_add_remove_sites_in_some_thr(thread_ctx_t *thread_ctx,
+	add_site_t *new_site, bool is_tx_thread)
 {
-	thread_ctx_t *const thread_ctx = get_curr_thread_ctx();
-
 	/* FIXME: More than one. */
 	h2o_hostconf_t *const hostconf = thread_ctx->globalconf.hosts[0];
 
@@ -3040,9 +3039,26 @@ static void hot_reload_add_remove_sites_in_http_thr(add_site_t *new_site)
 				lua_site, thread_ctx->idx));
 	}
 	reorder_paths(&thread_ctx->globalconf);
+	if (is_tx_thread)
+		return;
 	__sync_synchronize(); /* We have written to *lua_site. */
 	stubborn_dispatch_uni(thread_ctx->queue_to_tx,
 		(void *)done_with_new_site, NULL);
+}
+
+/* Launched in HTTP server thread. */
+static void hot_reload_add_remove_sites_in_http_thr(add_site_t *new_site)
+{
+	return hot_reload_add_remove_sites_in_some_thr(get_curr_thread_ctx(),
+		new_site, false);
+}
+
+/* Launched in TX thread. */
+static void hot_reload_add_remove_sites_in_tx_thr(thread_ctx_t *thread_ctx,
+	add_site_t *new_site)
+{
+	return hot_reload_add_remove_sites_in_some_thr(thread_ctx,
+		new_site, true);
 }
 
 /* Launched in TX thread.*/
@@ -3056,9 +3072,111 @@ static void hot_reload_add_remove_sites(unsigned extra_sites)
 		stubborn_dispatch_to_http_add_site(&conf.thread_ctxs[idx],
 			hot_reload_add_remove_sites_in_http_thr, &new_site);
 	}
+	for (; idx < MAX_threads; ++idx) {
+		hot_reload_add_remove_sites_in_tx_thr(&conf.thread_ctxs[idx],
+			&new_site);
+	}
 	while (conf.add_new_sites_counter != 0)
 		fiber_sleep(0.001);
 	flush_lua_ref_handlers();
+}
+
+/* Launched in TX thread. */
+static void prepare_thread_ctx(thread_ctx_t *thread_ctx)
+{
+	thread_ctx->num_connections = 0;
+	thread_ctx->active_lua_fibers = 0;
+	thread_ctx->should_notify_tx_done = false;
+	thread_ctx->tx_fiber_should_exit = false;
+	thread_ctx->fiber_to_wake_on_shutdown = NULL;
+	thread_ctx->http_and_tx_lua_handlers_flushed = false;
+}
+
+/* Launched in TX thread. */
+static const char *hot_reload_add_threads(unsigned threads)
+{
+	const char *lerr = NULL;
+	unsigned xtm_to_tx_idx;
+	for (xtm_to_tx_idx = conf.num_threads; xtm_to_tx_idx < threads;
+	    ++xtm_to_tx_idx)
+		if ((conf.thread_ctxs[xtm_to_tx_idx].queue_to_tx =
+		    xtm_create(QUEUE_TO_TX_ITEMS)) == NULL) {
+			lerr = "Failed to create xtm queue";
+			goto add_thr_xtm_to_tx_fail;
+		}
+
+	unsigned fiber_idx;
+	for (fiber_idx = conf.num_threads; fiber_idx < threads; ++fiber_idx) {
+		prepare_thread_ctx(&conf.thread_ctxs[fiber_idx]);
+
+		char name[32];
+		sprintf(name, "tx_h2o_fiber_%u", fiber_idx);
+		if ((conf.tx_fiber_ptrs[fiber_idx] =
+		    fiber_new(name, tx_fiber_func)) == NULL) {
+			lerr = "Failed to create fiber";
+			goto add_thr_fibers_fail;
+		}
+		fiber_set_joinable(conf.tx_fiber_ptrs[fiber_idx], true);
+		fiber_start(conf.tx_fiber_ptrs[fiber_idx], fiber_idx);
+	}
+
+	unsigned thr_init_idx;
+	for (thr_init_idx = conf.num_threads; thr_init_idx < threads;
+	    ++thr_init_idx)
+		if (!init_worker_thread(thr_init_idx)) {
+			lerr = "Failed to init worker threads";
+			goto add_thr_threads_init_fail;
+		}
+
+	__sync_synchronize();
+
+	/* Start processing HTTP requests and requests from TX thread. */
+	unsigned thr_launch_idx;
+	for (thr_launch_idx = conf.num_threads; thr_launch_idx < threads;
+	    ++thr_launch_idx) {
+		thread_ctx_t *const thread_ctx =
+			&conf.thread_ctxs[thr_launch_idx];
+		httpng_sem_init(&thread_ctx->can_be_terminated, 0);
+		if (pthread_create(&thread_ctx->tid,
+		    NULL, worker_func, (void *)(uintptr_t)thr_launch_idx)) {
+			lerr = "Failed to launch worker threads";
+			goto add_thr_threads_launch_fail;
+		}
+	}
+
+	return lerr;
+
+add_thr_threads_launch_fail:
+	;
+	unsigned idx;
+	for (idx = conf.num_threads; idx < thr_launch_idx; ++idx)
+		tell_thread_to_terminate(&conf.thread_ctxs[idx]);
+
+	for (idx = conf.num_threads; idx < thr_launch_idx; ++idx)
+		pthread_join(conf.thread_ctxs[idx].tid, NULL);
+
+add_thr_threads_init_fail:
+	for (idx = conf.num_threads; idx < thr_init_idx; ++idx)
+		deinit_worker_thread(idx);
+
+add_thr_fibers_fail:
+	for (idx = conf.num_threads; idx < fiber_idx; ++idx) {
+		conf.thread_ctxs[idx].tx_fiber_should_exit = true;
+		__sync_synchronize();
+		fiber_cancel(conf.tx_fiber_ptrs[idx]);
+	}
+	for (idx = conf.num_threads; idx < fiber_idx; ++idx) {
+		const thread_ctx_t *const thread_ctx = &conf.thread_ctxs[idx];
+		while (!thread_ctx->tx_fiber_finished)
+			fiber_sleep(0.001);
+		assert(thread_ctx->tx_fiber_finished);
+	}
+
+add_thr_xtm_to_tx_fail:
+	for (idx = conf.num_threads; idx < xtm_to_tx_idx; ++idx)
+		xtm_delete(conf.thread_ctxs[idx].queue_to_tx);
+
+	return lerr;
 }
 
 /* Lua parameters: lua_sites, function_to_call, function_param */
@@ -3154,9 +3272,9 @@ Skip_c_sites:
 	 * it must >sizeof(shuttle_t) (accounting for Lua payload)
 	 * and aligned. */
 	if (is_hot_reload) {
-		if (conf.num_threads != threads) {
+		if (threads < conf.num_threads) {
 			lerr =
-			"Reconfiguration can't change number of threads (yet)";
+		"Reconfiguration can't decrease number of threads (yet)";
 			goto error_hot_reload_threads;
 		}
 		if (conf.shuttle_size != shuttle_size) {
@@ -3182,15 +3300,17 @@ Skip_c_sites:
 	if (is_hot_reload)
 		goto Skip_inits_on_hot_reload;
 
-	if ((conf.thread_ctxs = (thread_ctx_t *)malloc(conf.num_threads *
+	if ((conf.thread_ctxs = (thread_ctx_t *)malloc(MAX_threads *
 	    sizeof(thread_ctx_t))) == NULL) {
 		lerr = "Failed to allocate memory for thread contexts";
 		goto thread_ctxs_alloc_failed;
 	}
 
-	unsigned thread_idx;
-	for (thread_idx = 0; thread_idx < conf.num_threads; ++thread_idx) {
-		thread_ctx_t *const thread_ctx = &conf.thread_ctxs[thread_idx];
+	unsigned config_init_idx;
+	for (config_init_idx = 0; config_init_idx < MAX_threads;
+	    ++config_init_idx) {
+		thread_ctx_t *const thread_ctx =
+			&conf.thread_ctxs[config_init_idx];
 		h2o_config_init(&thread_ctx->globalconf);
 		/* FIXME: Should make customizable. */
 		if ((thread_ctx->hostconf =
@@ -3211,7 +3331,8 @@ Skip_c_sites:
 		}
 
 		do {
-			for (thread_idx = 0; thread_idx < conf.num_threads;
+			unsigned thread_idx;
+			for (thread_idx = 0; thread_idx < MAX_threads;
 			    ++thread_idx)
 				register_handler(conf.thread_ctxs[thread_idx]
 					.hostconf, path_desc->path,
@@ -3632,7 +3753,7 @@ Skip_openssl_security_level:
 	}
 
 	if ((conf.tx_fiber_ptrs = (struct fiber **)
-	    malloc(sizeof(struct fiber *) * conf.num_threads)) == NULL) {
+	    malloc(sizeof(struct fiber *) * MAX_threads)) == NULL) {
 		lerr = "Failed to allocate memory for fiber pointers array";
 		goto fibers_fail_alloc;
 	}
@@ -3648,14 +3769,7 @@ Skip_openssl_security_level:
 
 	unsigned fiber_idx;
 	for (fiber_idx = 0; fiber_idx < conf.num_threads; ++fiber_idx) {
-		thread_ctx_t *const thread_ctx =
-			&conf.thread_ctxs[fiber_idx];
-		thread_ctx->num_connections = 0;
-		thread_ctx->active_lua_fibers = 0;
-		thread_ctx->should_notify_tx_done = false;
-		thread_ctx->tx_fiber_should_exit = false;
-		thread_ctx->fiber_to_wake_on_shutdown = NULL;
-		thread_ctx->http_and_tx_lua_handlers_flushed = false;
+		prepare_thread_ctx(&conf.thread_ctxs[fiber_idx]);
 
 		char name[32];
 		sprintf(name, "tx_h2o_fiber_%u", fiber_idx);
@@ -3715,6 +3829,13 @@ After_applying_new_config:
 	return 0;
 
 Apply_new_config_hot_reload:
+	if (threads > conf.num_threads) {
+		lerr = hot_reload_add_threads(threads);
+		if (lerr != NULL)
+			goto failed_to_add_threads;
+		conf.num_threads = threads;
+	}
+
 	hot_reload_add_remove_sites(hot_reload_extra_sites);
 
 	unsigned removed_sites = 0;
@@ -3760,6 +3881,7 @@ Apply_new_config:
 	if (conf.num_accepts < 8)
 		conf.num_accepts = 8;
 #endif /* USE_LIBUV */
+	unsigned thread_idx;
 	for (thread_idx = 0; thread_idx < conf.num_threads; ++thread_idx)
 		conf.thread_ctxs[thread_idx].globalconf
 			.max_request_entity_size = max_body_len;
@@ -3816,6 +3938,7 @@ invalid_openssl_security_level:
 min_proto_version_invalid:
 listen_invalid:
 no_handlers:
+failed_to_add_threads:
 invalid_handler:
 invalid_sites:
 	if (is_hot_reload) {
@@ -3869,7 +3992,7 @@ c_desc_empty:
 register_host_failed:
 	/* N.b.: h2o currently can't "unregister" host(s). */
 	if (!is_hot_reload) {
-		for (thread_idx = 0; thread_idx < conf.num_threads;
+		for (thread_idx = 0; thread_idx < config_init_idx;
 		    ++thread_idx)
 			h2o_config_dispose(&conf.thread_ctxs[thread_idx]
 				.globalconf);
