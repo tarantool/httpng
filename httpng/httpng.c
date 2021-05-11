@@ -154,6 +154,7 @@ typedef struct {
 	unsigned num_connections;
 	unsigned idx;
 	volatile unsigned active_lua_fibers;
+	unsigned listeners_created;
 	pthread_t tid;
 	bool http_and_tx_lua_handlers_flushed;
 	bool shutdown_requested; /* Tarantool asked us to shut down. */
@@ -219,6 +220,7 @@ typedef struct listener_ctx {
 
 typedef struct {
 	int fd;
+	bool is_opened;
 } listener_cfg_t;
 
 typedef struct waiter {
@@ -2306,6 +2308,140 @@ static SSL_CTX *setup_ssl(const char *cert_file, const char *key_file,
 	return ssl_ctx;
 }
 
+/* Launched in TX thread. */
+static void
+register_listener_cfgs_socket(int fd, unsigned listener_idx)
+{
+	assert(listener_idx < conf.num_listeners);
+	listener_cfg_t *const listener_cfg =
+		&conf.listener_cfgs[listener_idx];
+	assert(!listener_cfg->is_opened);
+	listener_cfg->fd = fd;
+	listener_cfg->is_opened = true;
+}
+
+/* Launched in TX thread. */
+static void
+close_listener_cfgs_sockets(void)
+{
+	unsigned listener_idx;
+	for (listener_idx = 0; listener_idx < conf.num_listeners;
+	    ++listener_idx) {
+		listener_cfg_t *const listener_cfg =
+		    &conf.listener_cfgs[listener_idx];
+		if (listener_cfg->is_opened) {
+			close(listener_cfg->fd);
+			listener_cfg->is_opened = false;
+		}
+	}
+}
+
+/* Launched in TX thread. */
+static bool
+prepare_listening_sockets(thread_ctx_t *thread_ctx)
+{
+#ifdef USE_LIBUV
+#error "prepare_listening_sockets() not implemented for libuv yet"
+#else /* USE_LIBUV */
+	unsigned listener_idx;
+	for (listener_idx = 0; listener_idx < conf.num_listeners;
+	    ++listener_idx) {
+		listener_ctx_t *const listener_ctx =
+		    &thread_ctx->listener_ctxs[listener_idx];
+		const listener_cfg_t *const listener_cfg =
+		    &conf.listener_cfgs[listener_idx];
+
+		assert(listener_cfg->is_opened);
+		memset(listener_ctx, 0, sizeof(*listener_ctx));
+		listener_ctx->thread_ctx = thread_ctx;
+		listener_ctx->accept_ctx.ssl_ctx = conf.ssl_ctx;
+		listener_ctx->accept_ctx.ctx = &thread_ctx->ctx;
+		listener_ctx->accept_ctx.hosts = thread_ctx->globalconf.hosts;
+		listener_ctx->sock = NULL;
+
+		if (thread_ctx->idx) {
+			if ((listener_ctx->fd = dup(listener_cfg->fd)) < 0)
+				/* FIXME: Should report. */
+				return false;
+		} else
+			listener_ctx->fd = listener_cfg->fd;
+		set_cloexec(listener_ctx->fd);
+		thread_ctx->listeners_created++;
+	}
+	return true;
+#endif /* USE_LIBUV */
+}
+
+/* Can be launched in TX thread or HTTP server thread. */
+static void
+close_listening_sockets(thread_ctx_t *thread_ctx)
+{
+#ifdef USE_LIBUV
+#error "close_listening_sockets() not implemented for libuv yet"
+#else /* USE_LIBUV */
+	listener_ctx_t *const listener_ctxs =
+			thread_ctx->listener_ctxs;
+
+	unsigned listener_idx;
+	for (listener_idx = 0; listener_idx < thread_ctx->listeners_created;
+	    ++listener_idx) {
+		listener_ctx_t *const listener_ctx =
+		    &listener_ctxs[listener_idx];
+		close(listener_ctx->fd);
+	}
+	thread_ctx->listeners_created = 0;
+	if (thread_ctx->idx == 0) {
+		for (listener_idx = 0; listener_idx < conf.num_listeners;
+		    ++listener_idx) {
+			listener_cfg_t *const listener_cfg =
+			    &conf.listener_cfgs[listener_idx];
+			listener_cfg->is_opened = false;
+		}
+	}
+#endif /* USE_LIBUV */
+}
+
+/* Launched in HTTP server thread. */
+static void
+listening_sockets_stop_read(thread_ctx_t *thread_ctx)
+{
+#ifdef USE_LIBUV
+#error "listening_sockets_stop_read() not implemented for libuv yet"
+#else /* USE_LIBUV */
+	unsigned listener_idx;
+	for (listener_idx = 0; listener_idx < thread_ctx->listeners_created;
+	    ++listener_idx) {
+		listener_ctx_t *const listener_ctx =
+		    &thread_ctx->listener_ctxs[listener_idx];
+		h2o_socket_read_stop(listener_ctx->sock);
+		h2o_socket_close(listener_ctx->sock);
+		listener_ctx->sock = NULL;
+	}
+	thread_ctx->listeners_created = 0;
+#endif /* USE_LIBUV */
+}
+
+/* Launched in HTTP server thread. */
+static void
+listening_sockets_start_read(thread_ctx_t *thread_ctx)
+{
+#ifdef USE_LIBUV
+#error "listening_sockets_start_read() not implemented for libuv yet"
+#else /* USE_LIBUV */
+	unsigned listener_idx;
+	for (listener_idx = 0; listener_idx < thread_ctx->listeners_created;
+	    ++listener_idx) {
+		listener_ctx_t *const listener_ctx =
+		   &thread_ctx->listener_ctxs[listener_idx];
+		listener_ctx->sock = h2o_evloop_socket_create(
+				thread_ctx->ctx.loop,
+				listener_ctx->fd, H2O_SOCKET_FLAG_DONT_READ);
+		listener_ctx->sock->data = listener_ctx;
+		h2o_socket_read_start(listener_ctx->sock, on_accept);
+	}
+#endif /* USE_LIBUV */
+}
+
 /* Returns false in case of error. */
 static bool init_worker_thread(unsigned thread_idx)
 {
@@ -2314,6 +2450,7 @@ static bool init_worker_thread(unsigned thread_idx)
 #endif /* USE_LIBUV */
 	thread_ctx_t *const thread_ctx = &conf.thread_ctxs[thread_idx];
 	thread_ctx->idx = thread_idx;
+	thread_ctx->listeners_created = 0;
 #ifndef USE_LIBUV
 	thread_ctx->queue_from_tx_fd_consumed = false;
 #endif /* USE_LIBUV */
@@ -2345,23 +2482,8 @@ static bool init_worker_thread(unsigned thread_idx)
 #endif /* USE_LIBUV */
 	h2o_linklist_init_anchor(&thread_ctx->accepted_sockets);
 
-	/* FIXME: Need more than one. */
-	listener_ctx_t *listener_ctx = &thread_ctx->listener_ctxs[0];
-	listener_cfg_t *listener_cfg = &conf.listener_cfgs[0];
-
-	memset(listener_ctx, 0, sizeof(*listener_ctx));
-	listener_ctx->thread_ctx = thread_ctx;
-	listener_ctx->accept_ctx.ssl_ctx = conf.ssl_ctx;
-	listener_ctx->accept_ctx.ctx = &thread_ctx->ctx;
-	listener_ctx->accept_ctx.hosts = thread_ctx->globalconf.hosts;
-	if (thread_idx) {
-		if ((listener_ctx->fd = dup(listener_cfg->fd)) == -1)
-			/* FIXME: Should report. */
-			goto dup_failed;
-		set_cloexec(listener_ctx->fd);
-	} else {
-		listener_ctx->fd = listener_cfg->fd;
-	}
+	if (!prepare_listening_sockets(thread_ctx))
+		goto prepare_listening_sockets_failed;
 
 #ifdef USE_LIBUV
 	if (uv_tcp_init(thread_ctx->ctx.loop, &listener_ctx->uv_tcp_listener))
@@ -2407,7 +2529,8 @@ uv_tcp_init_failed:
 		close(listener_ctx->fd);
 #endif /* USE_LIBUV */
 
-dup_failed:
+prepare_listening_sockets_failed:
+	close_listening_sockets(thread_ctx);
 #ifdef USE_LIBUV
 	uv_loop_close(&thread_ctx->loop);
 #ifndef INIT_CTX_IN_HTTP_THREAD
@@ -2581,14 +2704,6 @@ static void *worker_func(void *param)
 	assert(thread_ctx->tx_done_notification_received);
 	handle_graceful_shutdown(thread_ctx);
 #else /* USE_LIBUV */
-
-	/* FIXME: Need more than one. */
-	listener_ctx_t *listener_ctx = &thread_ctx->listener_ctxs[0];
-
-	listener_ctx->sock = h2o_evloop_socket_create(thread_ctx->ctx.loop,
-		listener_ctx->fd, H2O_SOCKET_FLAG_DONT_READ);
-	listener_ctx->sock->data = listener_ctx;
-
 	thread_ctx->sock_from_tx =
 		h2o_evloop_socket_create(thread_ctx->ctx.loop,
 			xtm_fd(thread_ctx->queue_from_tx),
@@ -2596,13 +2711,13 @@ static void *worker_func(void *param)
 
 	h2o_socket_read_start(thread_ctx->sock_from_tx, on_call_from_tx);
 	thread_ctx->queue_from_tx_fd_consumed = true;
-	h2o_socket_read_start(listener_ctx->sock, on_accept);
+	listening_sockets_start_read(thread_ctx);
 	h2o_evloop_t *loop = thread_ctx->ctx.loop;
 	while (!thread_ctx->shutdown_requested)
 		h2o_evloop_run(loop, INT32_MAX);
 
-	h2o_socket_read_stop(listener_ctx->sock);
-	h2o_socket_close(listener_ctx->sock);
+	listening_sockets_stop_read(thread_ctx);
+	close_listening_sockets(thread_ctx);
 
 	prepare_for_shutdown(thread_ctx);
 
@@ -3860,7 +3975,7 @@ Skip_openssl_security_level:
 	 * IPv4/IPv6, several IPs etc.) */
 	conf.num_listeners = 1; /* FIXME: Make customizable. */
 	if ((conf.listener_cfgs = (listener_cfg_t *)
-	    malloc(conf.num_listeners * sizeof(listener_cfg_t))) == NULL) {
+	    calloc(conf.num_listeners, sizeof(listener_cfg_t))) == NULL) {
 		lerr = "Failed to allocate memory for listener cfgs";
 		goto listeners_alloc_fail;
 	}
@@ -3869,14 +3984,15 @@ Skip_openssl_security_level:
 		unsigned listener_idx;
 
 		for (listener_idx = 0; listener_idx < conf.num_listeners;
-		    ++listener_idx)
-			if ((conf.listener_cfgs[listener_idx].fd =
-
-			    /* FIXME: Make customizable. */
-			    open_listener_ipv4("0.0.0.0", port)) == -1) {
+		    ++listener_idx) {
+			/* FIXME: Make customizable. */
+			const int fd = open_listener_ipv4("0.0.0.0", port);
+			if (fd < 0) {
 				lerr = "Failed to listen";
 				goto listeners_fail;
 			}
+			register_listener_cfgs_socket(fd, 0);
+		}
 	}
 
 	if ((conf.tx_fiber_ptrs = (struct fiber **)
@@ -4055,9 +4171,8 @@ xtm_to_tx_fail:
 	free(conf.tx_fiber_ptrs);
 
 fibers_fail_alloc:
-	for (idx = 0; idx < conf.num_listeners; ++idx)
-		close(conf.listener_cfgs[idx].fd);
 listeners_fail:
+	close_listener_cfgs_sockets();
 	free(conf.listener_cfgs);
 listeners_alloc_fail:
 	SSL_CTX_free(ssl_ctx);
