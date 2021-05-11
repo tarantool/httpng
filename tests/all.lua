@@ -590,12 +590,19 @@ g_hot_reload.test_change_params = function()
         "Reconfiguration can't change shuttle_size", http.cfg, cfg)
     cfg.shuttle_size = 1024
 
-    cfg.threads = 3
-    t.assert_error_msg_content_equals(
-        "Reconfiguration can't decrease number of threads (yet)",
-        http.cfg, cfg)
-
     cfg.threads = 5
+    http.cfg(cfg)
+end
+
+g_hot_reload.test_decrease_threads = function()
+    local cfg = {
+        handler = foo_handler,
+        threads = 4,
+    }
+
+    http.cfg(cfg)
+
+    cfg.threads = 3
     http.cfg(cfg)
 end
 
