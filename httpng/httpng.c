@@ -153,15 +153,17 @@ typedef struct {
 	httpng_sem_t can_be_terminated;
 	unsigned num_connections;
 	unsigned idx;
-	unsigned active_lua_fibers;
+	volatile unsigned active_lua_fibers;
 	pthread_t tid;
 	bool http_and_tx_lua_handlers_flushed;
 	bool shutdown_requested; /* Tarantool asked us to shut down. */
+	bool use_graceful_shutdown;
+	bool do_not_exit_tx_fiber;
 	bool should_notify_tx_done;
 	bool tx_done_notification_received;
 	bool tx_fiber_should_exit;
-	bool tx_fiber_finished;
-	bool thread_finished;
+	volatile bool tx_fiber_finished;
+	volatile bool thread_finished;
 #ifndef USE_LIBUV
 	bool queue_from_tx_fd_consumed;
 #endif /* USE_LIBUV */
@@ -350,6 +352,7 @@ static struct {
 	unsigned num_accepts;
 #endif /* USE_LIBUV */
 	unsigned max_conn_per_thread;
+	unsigned num_desired_threads;
 	unsigned num_threads;
 	unsigned max_headers_lua;
 	unsigned max_path_len_lua;
@@ -1634,6 +1637,8 @@ static void tx_done(thread_ctx_t *thread_ctx)
 	uv_stop(&thread_ctx->loop);
 #endif /* USE_LIBUV */
 	thread_ctx->tx_done_notification_received = true;
+	if (thread_ctx->do_not_exit_tx_fiber)
+		return;
 	stubborn_dispatch_thr_to_tx(thread_ctx, exit_tx_fiber);
 }
 
@@ -2492,13 +2497,45 @@ static void prepare_for_shutdown(thread_ctx_t *thread_ctx)
 	 * connections, should do it now (accepts are already
 	 * blocked). */
 
-	close_existing_connections(thread_ctx);
+	if (thread_ctx->use_graceful_shutdown)
+		/* FIXME: Modify libh2o to be even more graceful?
+		 * Force it to close all connections w/o active requests,
+		 * not just ignore keep-alive flag.
+		 * FIXME: Can't use h2o_context_request_shutdown() because it
+		 * activates timeout which we do not cancel thus causing
+		 * assert. */
+		thread_ctx->ctx.shutdown_requested = 1;
+	else
+		close_existing_connections(thread_ctx);
+	thread_ctx->do_not_exit_tx_fiber = thread_ctx->use_graceful_shutdown;
 
 	fprintf(stderr, "Thread #%u: shutdown request received, "
 		"waiting for TX processing to complete...\n",
 		thread_ctx->idx);
 	stubborn_dispatch_thr_to_tx(thread_ctx,
 		&finish_processing_lua_reqs_in_tx);
+}
+
+/* Launched in HTTP server thread. */
+static void handle_graceful_shutdown(thread_ctx_t *thread_ctx)
+{
+	if (!thread_ctx->use_graceful_shutdown)
+		return;
+
+	close_existing_connections(thread_ctx);
+
+	/* There can still be requests in flight. */
+	thread_ctx->tx_done_notification_received = false;
+	thread_ctx->do_not_exit_tx_fiber = false;
+	stubborn_dispatch_thr_to_tx(thread_ctx,
+		&finish_processing_lua_reqs_in_tx);
+#ifdef USE_LIBUV
+	uv_run(&thread_ctx->loop, UV_RUN_DEFAULT);
+#else /* USE_LIBUV */
+	h2o_evloop_t *const loop = thread_ctx->ctx.loop;
+	while (!thread_ctx->tx_done_notification_received)
+		h2o_evloop_run(loop, 1);
+#endif /* USE_LIBUV */
 }
 
 /* This is HTTP server thread main function. */
@@ -2532,11 +2569,17 @@ static void *worker_func(void *param)
 
 	assert(thread_ctx->shutdown_requested);
 
+	/* FIXME: Need more than one. */
+	listener_ctx_t *const listener_ctx = &thread_ctx->listener_ctxs[0];
+	uv_read_stop((uv_stream_t *)&listener_ctx->uv_tcp_listener);
+	uv_close((uv_handle_t *)&listener_ctx->uv_tcp_listener, NULL);
+
 	prepare_for_shutdown(thread_ctx);
 
 	/* Process remaining requests from TX thread. */
 	uv_run(&thread_ctx->loop, UV_RUN_DEFAULT);
 	assert(thread_ctx->tx_done_notification_received);
+	handle_graceful_shutdown(thread_ctx);
 #else /* USE_LIBUV */
 
 	/* FIXME: Need more than one. */
@@ -2566,6 +2609,8 @@ static void *worker_func(void *param)
 	/* Process remaining requests from TX thread. */
 	while (!thread_ctx->tx_done_notification_received)
 		h2o_evloop_run(loop, 1);
+	handle_graceful_shutdown(thread_ctx);
+
 	h2o_socket_read_stop(thread_ctx->sock_from_tx);
 	h2o_socket_close(thread_ctx->sock_from_tx);
 #endif /* USE_LIBUV */
@@ -2578,6 +2623,7 @@ static void *worker_func(void *param)
 	httpng_sem_destroy(&thread_ctx->can_be_terminated);
 
 	thread_ctx->thread_finished = true;
+	__sync_synchronize();
 	return NULL;
 }
 
@@ -2698,8 +2744,10 @@ static void close_async(thread_ctx_t *thread_ctx)
 }
 
 /* Launched in TX thread. */
-static void tell_thread_to_terminate(thread_ctx_t *thread_ctx)
+static void tell_thread_to_terminate_internal(thread_ctx_t *thread_ctx,
+	bool use_graceful_shutdown)
 {
+	thread_ctx->use_graceful_shutdown = use_graceful_shutdown;
 	httpng_sem_wait(&thread_ctx->can_be_terminated);
 #ifdef USE_LIBUV
 	uv_async_send(&thread_ctx->async);
@@ -2708,6 +2756,19 @@ static void tell_thread_to_terminate(thread_ctx_t *thread_ctx)
 	    && errno == EINTR)
 		;
 #endif /* USE_LIBUV */
+}
+
+/* Launched in TX thread. */
+static inline void tell_thread_to_terminate(thread_ctx_t *thread_ctx)
+{
+	tell_thread_to_terminate_internal(thread_ctx, false);
+}
+
+/* Launched in TX thread. */
+static inline void tell_thread_to_terminate_gracefully(
+	thread_ctx_t *thread_ctx)
+{
+	tell_thread_to_terminate_internal(thread_ctx, true);
 }
 
 static void configure_shutdown_callback(lua_State *L, bool setup)
@@ -2761,10 +2822,91 @@ static void setup_on_shutdown(lua_State *L, bool setup,
 }
 
 /* Launched in TX thread. */
+static void reap_finished_thread(thread_ctx_t *thread_ctx)
+{
+	pthread_join(thread_ctx->tid, NULL);
+
+#ifdef USE_LIBUV
+	uv_close((uv_handle_t *)&thread_ctx->uv_poll_from_tx, NULL);
+	uv_loop_close(&thread_ctx->loop);
+#ifndef INIT_CTX_IN_HTTP_THREAD
+	h2o_context_dispose(&thread_ctx->ctx);
+#endif /* INIT_CTX_IN_HTTP_THREAD */
+#else /* USE_LIBUV */
+#ifndef INIT_CTX_IN_HTTP_THREAD
+	h2o_context_dispose(&thread_ctx->ctx);
+#endif /* INIT_CTX_IN_HTTP_THREAD */
+	h2o_evloop_destroy(thread_ctx->ctx.loop);
+#endif /* USE_LIBUV */
+
+	if (!thread_ctx->tx_fiber_finished)
+		fiber_yield();
+	assert(thread_ctx->tx_fiber_finished);
+
+	free(thread_ctx->listener_ctxs);
+	xtm_delete(thread_ctx->queue_to_tx);
+	my_xtm_delete_queue_from_tx(thread_ctx);
+	h2o_config_dispose(&thread_ctx->globalconf);
+}
+
+/* Launched in TX thread.
+ * Returns error message in case of error. */
+static const char *reap_gracefully_terminating_threads(void)
+{
+	unsigned thr_idx;
+	for (thr_idx = conf.num_threads - 1;
+	    thr_idx >= conf.num_desired_threads; --thr_idx) {
+		thread_ctx_t *const thread_ctx = &conf.thread_ctxs[thr_idx];
+		if (!thread_ctx->thread_finished) {
+			conf.num_threads = thr_idx + 1;
+		return "Unable to reconfigure until threads will shut down";
+		}
+		reap_finished_thread(thread_ctx);
+	}
+	conf.num_threads = conf.num_desired_threads;
+	return NULL;
+}
+
+/* Launched in HTTP server thread.
+ * N. b.: It may never be launched if thread terminates. */
+static void become_ungraceful(thread_ctx_t *thread_ctx)
+{
+	close_existing_connections(thread_ctx);
+}
+
+/* Launched in TX thread. */
+static void reap_terminating_threads_ungracefully(void)
+{
+	if (reap_gracefully_terminating_threads() == NULL)
+		return;
+
+	unsigned thr_idx;
+	for (thr_idx = conf.num_threads - 1;
+	    thr_idx >= conf.num_desired_threads; --thr_idx) {
+		thread_ctx_t *const thread_ctx = &conf.thread_ctxs[thr_idx];
+		if (thread_ctx->thread_finished)
+			continue;
+		stubborn_dispatch_thr_from_tx(thread_ctx, &become_ungraceful);
+	}
+
+	for (thr_idx = conf.num_threads - 1;
+	    thr_idx >= conf.num_desired_threads; --thr_idx) {
+		thread_ctx_t *const thread_ctx = &conf.thread_ctxs[thr_idx];
+		while (thread_ctx->active_lua_fibers ||
+		    !thread_ctx->thread_finished)
+			fiber_sleep(0.001);
+	}
+
+	const char *const err = reap_gracefully_terminating_threads();
+	assert(err == NULL);
+}
+
+/* Launched in TX thread. */
 static int on_shutdown_internal(lua_State *L, bool called_from_callback)
 {
 	if (!conf.configured)
 		return luaL_error(L, "Server is not launched");
+	reap_terminating_threads_ungracefully();
 	if (conf.is_shutdown_in_progress) {
 		if (!called_from_callback)
 			return luaL_error(L,
@@ -2781,18 +2923,6 @@ static int on_shutdown_internal(lua_State *L, bool called_from_callback)
 		thread_ctx_t *const thread_ctx =
 			&conf.thread_ctxs[thr_idx];
 		thread_ctx->fiber_to_wake_on_shutdown = fiber_self();
-
-#ifdef USE_LIBUV
-		/* FIXME: Need more than one. */
-		listener_ctx_t *const listener_ctx =
-			&thread_ctx->listener_ctxs[0];
-
-		uv_read_stop((uv_stream_t *)
-			&listener_ctx->uv_tcp_listener);
-		uv_close((uv_handle_t *)&listener_ctx->uv_tcp_listener,
-			NULL);
-#endif /* USE_LIBUV */
-
 		tell_thread_to_terminate(thread_ctx);
 	}
 
@@ -2803,33 +2933,10 @@ static int on_shutdown_internal(lua_State *L, bool called_from_callback)
 		while (thread_ctx->active_lua_fibers ||
 		    !thread_ctx->thread_finished)
 			fiber_sleep(0.001);
-		pthread_join(thread_ctx->tid, NULL);
-
-#ifdef USE_LIBUV
-		uv_close((uv_handle_t *)&thread_ctx->uv_poll_from_tx,
-			NULL);
-		uv_loop_close(&thread_ctx->loop);
-#ifndef INIT_CTX_IN_HTTP_THREAD
-		h2o_context_dispose(&thread_ctx->ctx);
-#endif /* INIT_CTX_IN_HTTP_THREAD */
-#else /* USE_LIBUV */
-#ifndef INIT_CTX_IN_HTTP_THREAD
-		h2o_context_dispose(&thread_ctx->ctx);
-#endif /* INIT_CTX_IN_HTTP_THREAD */
-		h2o_evloop_destroy(thread_ctx->ctx.loop);
-#endif /* USE_LIBUV */
-
-		if (!thread_ctx->tx_fiber_finished)
-			fiber_yield();
-		assert(thread_ctx->tx_fiber_finished);
-
-		free(thread_ctx->listener_ctxs);
-		xtm_delete(thread_ctx->queue_to_tx);
-		my_xtm_delete_queue_from_tx(thread_ctx);
-		h2o_config_dispose(&thread_ctx->globalconf);
+		reap_finished_thread(thread_ctx);
 	}
-#ifdef USE_LIBUV
 	unsigned idx;
+#ifdef USE_LIBUV
 	for (idx = 0; idx < conf.num_listeners; ++idx) {
 		close(conf.listener_cfgs[idx].fd);
 		for (thr_idx = 1; thr_idx < conf.num_threads; ++thr_idx)
@@ -2838,7 +2945,6 @@ static int on_shutdown_internal(lua_State *L, bool called_from_callback)
 #endif /* USE_LIBUV */
 	free(conf.listener_cfgs);
 	free(conf.thread_ctxs);
-	unsigned idx;
 	for (idx = 0; idx < conf.lua_site_count; ++idx)
 		free(conf.lua_sites[idx].path);
 	free(conf.lua_sites);
@@ -3179,19 +3285,31 @@ add_thr_xtm_to_tx_fail:
 	return lerr;
 }
 
+/* Launched in TX thread. */
+static void hot_reload_remove_threads(unsigned threads)
+{
+	unsigned thr_idx;
+	for (thr_idx = threads; thr_idx < conf.num_threads; ++thr_idx) {
+		thread_ctx_t *const thread_ctx = &conf.thread_ctxs[thr_idx];
+		tell_thread_to_terminate_gracefully(thread_ctx);
+	}
+}
+
 /* Lua parameters: lua_sites, function_to_call, function_param */
 int cfg(lua_State *L)
 {
+	const char *lerr = NULL; /* Error message for caller. */
 	bool is_hot_reload;
 	if (conf.configured) {
 		if (conf.hot_reload_in_progress)
 			return luaL_error(L,
 				"Reconfiguration is already in progress");
+		if ((lerr = reap_gracefully_terminating_threads()) != NULL)
+			return luaL_error(L, lerr);
 		conf.hot_reload_in_progress = true;
 		is_hot_reload = true;
 	} else
 		is_hot_reload = false;
-	const char *lerr = NULL; /* Error message for caller. */
 	unsigned c_handlers = 0;
 	const int prev_idx_of_root_site = conf.idx_of_root_site;
 
@@ -3272,17 +3390,12 @@ Skip_c_sites:
 	 * it must >sizeof(shuttle_t) (accounting for Lua payload)
 	 * and aligned. */
 	if (is_hot_reload) {
-		if (threads < conf.num_threads) {
-			lerr =
-		"Reconfiguration can't decrease number of threads (yet)";
-			goto error_hot_reload_threads;
-		}
 		if (conf.shuttle_size != shuttle_size) {
 			lerr = "Reconfiguration can't change shuttle_size";
 			goto error_hot_reload_shuttle_size;
 		}
 	} else {
-		conf.num_threads = threads;
+		conf.num_desired_threads = conf.num_threads = threads;
 		conf.shuttle_size = shuttle_size;
 	}
 
@@ -3833,7 +3946,7 @@ Apply_new_config_hot_reload:
 		lerr = hot_reload_add_threads(threads);
 		if (lerr != NULL)
 			goto failed_to_add_threads;
-		conf.num_threads = threads;
+		conf.num_desired_threads = conf.num_threads = threads;
 	}
 
 	hot_reload_add_remove_sites(hot_reload_extra_sites);
@@ -3892,6 +4005,10 @@ Apply_new_config:
 	replace_lua_handlers(L, prev_idx_of_root_site);
 	conf.lua_site_count += hot_reload_extra_sites;
 	conf.lua_site_count -= removed_sites;
+	if (threads < conf.num_threads) {
+		conf.num_desired_threads = threads;
+		hot_reload_remove_threads(threads);
+	}
 
 	conf.hot_reload_in_progress = false;
 	return 0;
@@ -4000,7 +4117,6 @@ register_host_failed:
 	}
 thread_ctxs_alloc_failed:
 error_hot_reload_shuttle_size:
-error_hot_reload_threads:
 error_parameter_not_a_number:
 error_c_sites_func_wrong_return:
 error_c_sites_func_failed:
