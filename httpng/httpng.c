@@ -2678,8 +2678,11 @@ tx_fiber_func(va_list ap)
 		}
 	}
 	thread_ctx->tx_fiber_finished = true;
-	if (thread_ctx->fiber_to_wake_on_shutdown != NULL)
-		fiber_wakeup(thread_ctx->fiber_to_wake_on_shutdown);
+	if (thread_ctx->fiber_to_wake_on_shutdown != NULL) {
+		struct fiber *const fiber = thread_ctx->fiber_to_wake_on_shutdown;
+		thread_ctx->fiber_to_wake_on_shutdown = NULL;
+		fiber_wakeup(fiber);
+	}
 	return 0;
 }
 
@@ -2747,6 +2750,7 @@ static void close_async(thread_ctx_t *thread_ctx)
 static void tell_thread_to_terminate_internal(thread_ctx_t *thread_ctx,
 	bool use_graceful_shutdown)
 {
+	thread_ctx->fiber_to_wake_on_shutdown = fiber_self();
 	thread_ctx->use_graceful_shutdown = use_graceful_shutdown;
 	httpng_sem_wait(&thread_ctx->can_be_terminated);
 #ifdef USE_LIBUV
@@ -2922,7 +2926,6 @@ static int on_shutdown_internal(lua_State *L, bool called_from_callback)
 	for (thr_idx = 0; thr_idx < conf.num_threads; ++thr_idx) {
 		thread_ctx_t *const thread_ctx =
 			&conf.thread_ctxs[thr_idx];
-		thread_ctx->fiber_to_wake_on_shutdown = fiber_self();
 		tell_thread_to_terminate(thread_ctx);
 	}
 
