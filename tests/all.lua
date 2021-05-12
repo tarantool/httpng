@@ -606,6 +606,31 @@ g_hot_reload.test_decrease_threads = function()
     http.cfg(cfg)
 end
 
+g_hot_reload.test_FLAKY_after_decrease_threads = function()
+    local cfg = {
+        handler = foo_handler,
+        threads = 4,
+    }
+
+    http.cfg(cfg)
+
+    cfg.threads = 3
+    http.cfg(cfg)
+
+    cfg.threads = 4
+    local counter = 0
+::retry::
+    local ok, err = pcall(http.cfg, cfg)
+    if (not ok) then
+        print('counter=', counter, ' , error =', err)
+        counter = counter + 1
+        assert(err == 'Unable to reconfigure until threads will shut down')
+        assert(counter < 100)
+        fiber.sleep(0.1)
+        goto retry
+    end
+end
+
 local alt_foo_handler = function(req, io)
     return { body = 'FOO' }
 end

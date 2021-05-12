@@ -2850,7 +2850,6 @@ static void reap_finished_thread(thread_ctx_t *thread_ctx)
 	free(thread_ctx->listener_ctxs);
 	xtm_delete(thread_ctx->queue_to_tx);
 	my_xtm_delete_queue_from_tx(thread_ctx);
-	h2o_config_dispose(&thread_ctx->globalconf);
 }
 
 /* Launched in TX thread.
@@ -2947,6 +2946,9 @@ static int on_shutdown_internal(lua_State *L, bool called_from_callback)
 	}
 #endif /* USE_LIBUV */
 	free(conf.listener_cfgs);
+	for (thr_idx = 0; thr_idx < MAX_threads;
+	    ++thr_idx)
+		h2o_config_dispose(&conf.thread_ctxs[thr_idx].globalconf);
 	free(conf.thread_ctxs);
 	for (idx = 0; idx < conf.lua_site_count; ++idx)
 		free(conf.lua_sites[idx].path);
