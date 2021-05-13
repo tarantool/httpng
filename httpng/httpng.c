@@ -2661,6 +2661,7 @@ static void deinit_worker_thread(unsigned thread_idx)
 	free(thread_ctx->listener_ctxs);
 }
 
+/* Launched in TX thread. */
 static int
 tx_fiber_func(va_list ap)
 {
@@ -2750,7 +2751,8 @@ static void close_async(thread_ctx_t *thread_ctx)
 static void tell_thread_to_terminate_internal(thread_ctx_t *thread_ctx,
 	bool use_graceful_shutdown)
 {
-	thread_ctx->fiber_to_wake_on_shutdown = fiber_self();
+	thread_ctx->fiber_to_wake_on_shutdown =
+		use_graceful_shutdown ? NULL : fiber_self();
 	thread_ctx->use_graceful_shutdown = use_graceful_shutdown;
 	httpng_sem_wait(&thread_ctx->can_be_terminated);
 #ifdef USE_LIBUV
@@ -2843,8 +2845,10 @@ static void reap_finished_thread(thread_ctx_t *thread_ctx)
 	h2o_evloop_destroy(thread_ctx->ctx.loop);
 #endif /* USE_LIBUV */
 
-	if (!thread_ctx->tx_fiber_finished)
+	if (!thread_ctx->tx_fiber_finished) {
+		thread_ctx->fiber_to_wake_on_shutdown = fiber_self();
 		fiber_yield();
+	}
 	assert(thread_ctx->tx_fiber_finished);
 
 	free(thread_ctx->listener_ctxs);
