@@ -3,6 +3,17 @@ local http = require 'httpng'
 --local http_client = require 'http.client'
 local fiber = require 'fiber'
 local popen = require 'popen'
+
+local stubborn_handler = function(req, io)
+::again::
+    local closed = io:write('foobar')
+    if closed then
+        -- Connection has already been closed
+        return
+    end
+    goto again
+end
+
 local g_shuttle_size = t.group('shuttle_size')
 
 --[[ There is no point testing other values - parameters are automatically
@@ -629,6 +640,54 @@ g_hot_reload.test_FLAKY_after_decrease_threads = function()
         fiber.sleep(0.1)
         goto retry
     end
+end
+
+local curls
+local g_hot_reload_with_curls = t.group 'hot_reload_with_curls'
+g_hot_reload_with_curls.after_each(function()
+    pcall(http.shutdown)
+    if (curls == nil) then
+        return
+    end
+    local k, curl
+    for k, curl in pairs(curls) do
+        curl:kill()
+    end
+end)
+
+g_hot_reload_with_curls.test_FLAKY_decrease_stubborn_threads = function()
+    local cfg = {
+        handler = stubborn_handler,
+        threads = 2,
+    }
+
+    http.cfg(cfg)
+
+    curls = {}
+    local curl_count = 4
+    local i
+    for i = 1, curl_count do
+        curls[#curls + 1] =
+            popen.shell('curl -k -o /dev/null https://localhost:8080', "r")
+    end
+    fiber.sleep(1)
+
+    cfg.threads = 1
+    http.cfg(cfg)
+
+    cfg.threads = 2
+    local counter = 0
+::retry::
+    local ok, err = pcall(http.cfg, cfg)
+    assert(not ok, 'httpng.cfg() should fail')
+    assert(err == 'Unable to reconfigure until threads will shut down')
+    counter = counter + 1
+    if (counter > 50) then
+        -- We have waited long enough, this is as it should be.
+        return
+    end
+    fiber.sleep(0.1)
+    goto retry
 end
 
 local alt_foo_handler = function(req, io)
