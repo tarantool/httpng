@@ -4151,9 +4151,23 @@ unsigned get_shuttle_size(void)
 	return conf.shuttle_size;
 }
 
+/* Launched in TX thread. */
+static int
+force_decrease_threads(lua_State *L)
+{
+	if (!conf.configured) {
+		return luaL_error(L,
+			"Not configured, nothing to terminate");
+	}
+
+	reap_terminating_threads_ungracefully();
+	return 0;
+}
+
 static const struct luaL_Reg mylib[] = {
 	{"cfg", cfg},
 	{"shutdown", on_shutdown_for_user},
+	{"force_decrease_threads", force_decrease_threads},
 	{NULL, NULL}
 };
 

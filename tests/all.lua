@@ -684,6 +684,8 @@ g_hot_reload_with_curls.test_FLAKY_decrease_stubborn_threads = function()
     counter = counter + 1
     if (counter > 50) then
         -- We have waited long enough, this is as it should be.
+        http.force_decrease_threads()
+        http.cfg(cfg)
         return
     end
     fiber.sleep(0.1)
@@ -722,5 +724,7 @@ g_hot_reload.test_replace_handlers = function()
     check(cmd_alt, 'BAR')
 end
 
---fiber.sleep(100) -- For 'external' wget etc
-
+g_hot_reload.test_force_decrease_threads = function()
+    t.assert_error_msg_content_equals(
+        'Not configured, nothing to terminate', http.force_decrease_threads)
+end
