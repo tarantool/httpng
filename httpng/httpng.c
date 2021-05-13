@@ -3297,6 +3297,11 @@ add_thr_xtm_to_tx_fail:
 /* Launched in TX thread. */
 static void hot_reload_remove_threads(unsigned threads)
 {
+	if (threads >= conf.num_threads)
+		return;
+
+	conf.num_desired_threads = threads;
+
 	unsigned thr_idx;
 	for (thr_idx = threads; thr_idx < conf.num_threads; ++thr_idx) {
 		thread_ctx_t *const thread_ctx = &conf.thread_ctxs[thr_idx];
@@ -4014,10 +4019,7 @@ Apply_new_config:
 	replace_lua_handlers(L, prev_idx_of_root_site);
 	conf.lua_site_count += hot_reload_extra_sites;
 	conf.lua_site_count -= removed_sites;
-	if (threads < conf.num_threads) {
-		conf.num_desired_threads = threads;
-		hot_reload_remove_threads(threads);
-	}
+	hot_reload_remove_threads(threads);
 
 	conf.hot_reload_in_progress = false;
 	return 0;
