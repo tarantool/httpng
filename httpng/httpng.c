@@ -2711,7 +2711,7 @@ static void on_async_read(h2o_socket_t *sock, const char *err)
 	async_cb(&thread_ctx->async);
 }
 
-/* Launched in TX thread. */
+/* Launched in HTTP server thread. */
 static void init_async(thread_ctx_t *thread_ctx)
 {
 	h2o_loop_t *const loop = thread_ctx->ctx.loop;
