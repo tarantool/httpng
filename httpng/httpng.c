@@ -2686,6 +2686,7 @@ static void *worker_func(void *param)
 	__sync_synchronize();
 	httpng_sem_post(&thread_ctx->can_be_terminated);
 #ifdef USE_LIBUV
+#error "multilisten code doesn't support Libuv now"
 	/* Process incoming connections/data and requests
 	 * from TX thread. */
 	uv_run(&thread_ctx->loop, UV_RUN_DEFAULT);
@@ -2747,6 +2748,7 @@ static void deinit_worker_thread(unsigned thread_idx)
 	thread_ctx_t *const thread_ctx = &conf.thread_ctxs[thread_idx];
 
 #ifdef USE_LIBUV
+#error "multilisten code doesn't support Libuv now"
 	/* FIXME: Need more than one. */
 	listener_ctx_t *const listener_ctx = &thread_ctx->listener_ctxs[0];
 
