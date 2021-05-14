@@ -2946,7 +2946,7 @@ static int on_shutdown_internal(lua_State *L, bool called_from_callback)
 	for (idx = 0; idx < conf.num_listeners; ++idx) {
 		close(conf.listener_cfgs[idx].fd);
 		for (thr_idx = 1; thr_idx < conf.num_threads; ++thr_idx)
-			close(conf.thread_ctxs[thr_idx].listener_ctxs[0].fd);
+			close(conf.thread_ctxs[thr_idx].listener_ctxs[idx].fd);
 	}
 #endif /* USE_LIBUV */
 	free(conf.listener_cfgs);
