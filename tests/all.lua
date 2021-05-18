@@ -288,6 +288,7 @@ local write_header_handler = function(req, io)
 end
 
 local function cfg_bad_handlers()
+    write_handler_launched = false
     http.cfg({ sites = {
         { path = '/write', handler = write_handler },
         { path = '/write_header', handler = write_header_handler },
@@ -406,8 +407,8 @@ g_hot_reload.test_extra_sites = function()
         threads = 4,
     }
     http.cfg(cfg)
-    local cmd_main = 'curl -k https://localhost:8080'
-    local cmd_alt = 'curl -k https://localhost:8080/alt'
+    local cmd_main = 'curl -k -s https://localhost:8080'
+    local cmd_alt = 'curl -k -s https://localhost:8080/alt'
 
     check_site_content(cmd_main, 'not found')
     check_site_content(cmd_alt, 'foo')
@@ -642,6 +643,11 @@ g_hot_reload.test_FLAKY_after_decrease_threads = function()
     end
 end
 
+g_hot_reload.test_combo1 = function()
+    g_hot_reload.test_extra_sites()
+    g_bad_handlers.test_write_params()
+end
+
 local curls
 local g_hot_reload_with_curls = t.group 'hot_reload_with_curls'
 g_hot_reload_with_curls.after_each(function()
@@ -664,11 +670,11 @@ g_hot_reload_with_curls.test_FLAKY_decrease_stubborn_threads = function()
     http.cfg(cfg)
 
     curls = {}
-    local curl_count = 4
+    local curl_count = 16
     local i
     for i = 1, curl_count do
         curls[#curls + 1] =
-            popen.shell('curl -k -o /dev/null https://localhost:8080', "r")
+            popen.shell('curl -k -s -o /dev/null https://localhost:8080', "r")
     end
     fiber.sleep(1)
 
@@ -692,6 +698,11 @@ g_hot_reload_with_curls.test_FLAKY_decrease_stubborn_threads = function()
     goto retry
 end
 
+g_hot_reload_with_curls.test_FLAKY_decrease_stubborn_threads_combo2 = function()
+	g_hot_reload.test_extra_sites()
+	g_hot_reload_with_curls.test_FLAKY_decrease_stubborn_threads()
+end
+
 local alt_foo_handler = function(req, io)
     return { body = 'FOO' }
 end
@@ -709,8 +720,8 @@ g_hot_reload.test_replace_handlers = function()
 
     http.cfg(cfg)
 
-    local cmd_main = 'curl -k https://localhost:8080'
-    local cmd_alt = 'curl -k https://localhost:8080/alt'
+    local cmd_main = 'curl -k -s https://localhost:8080'
+    local cmd_alt = 'curl -k -s https://localhost:8080/alt'
     local check = check_site_content
 
     check(cmd_main, 'foo')
