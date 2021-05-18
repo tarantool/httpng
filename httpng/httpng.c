@@ -2442,6 +2442,21 @@ listening_sockets_start_read(thread_ctx_t *thread_ctx)
 #endif /* USE_LIBUV */
 }
 
+/* Launched in TX thread. */
+static void
+reset_thread_ctx(thread_ctx_t *thread_ctx)
+{
+	thread_ctx->should_notify_tx_done = false;
+	thread_ctx->tx_fiber_should_exit = false;
+	thread_ctx->shutdown_requested = false;
+	thread_ctx->tx_done_notification_received = false;
+	thread_ctx->tx_fiber_finished = false;
+	thread_ctx->thread_finished = false;
+#ifndef USE_LIBUV
+	thread_ctx->queue_from_tx_fd_consumed = false;
+#endif /* USE_LIBUV */
+}
+
 /* Returns false in case of error. */
 static bool init_worker_thread(unsigned thread_idx)
 {
@@ -2449,11 +2464,7 @@ static bool init_worker_thread(unsigned thread_idx)
 	int fd_consumed = 0;
 #endif /* USE_LIBUV */
 	thread_ctx_t *const thread_ctx = &conf.thread_ctxs[thread_idx];
-	thread_ctx->idx = thread_idx;
-	thread_ctx->listeners_created = 0;
-#ifndef USE_LIBUV
-	thread_ctx->queue_from_tx_fd_consumed = false;
-#endif /* USE_LIBUV */
+	reset_thread_ctx(thread_ctx);
 	if ((thread_ctx->queue_from_tx = xtm_create(QUEUE_FROM_TX_ITEMS))
 	    == NULL)
 		/* FIXME: Report. */
@@ -2507,12 +2518,6 @@ static bool init_worker_thread(unsigned thread_idx)
 	    on_call_from_tx))
 		goto uv_poll_start_failed;
 #endif /* USE_LIBUV */
-
-	thread_ctx->active_lua_fibers = 0;
-	thread_ctx->shutdown_requested = false;
-	thread_ctx->tx_done_notification_received = false;
-	thread_ctx->tx_fiber_finished = false;
-	thread_ctx->thread_finished = false;
 
 	return true;
 
@@ -2868,8 +2873,6 @@ static void close_async(thread_ctx_t *thread_ctx)
 static void tell_thread_to_terminate_internal(thread_ctx_t *thread_ctx,
 	bool use_graceful_shutdown)
 {
-	thread_ctx->fiber_to_wake_on_shutdown =
-		use_graceful_shutdown ? NULL : fiber_self();
 	thread_ctx->use_graceful_shutdown = use_graceful_shutdown;
 	httpng_sem_wait(&thread_ctx->can_be_terminated);
 #ifdef USE_LIBUV
@@ -2963,6 +2966,7 @@ static void reap_finished_thread(thread_ctx_t *thread_ctx)
 #endif /* USE_LIBUV */
 
 	if (!thread_ctx->tx_fiber_finished) {
+		assert(thread_ctx->fiber_to_wake_on_shutdown == NULL);
 		thread_ctx->fiber_to_wake_on_shutdown = fiber_self();
 		fiber_yield();
 	}
@@ -3113,6 +3117,7 @@ enum {
 /* Launched in TX thread. */
 static void replace_lua_handler_ref(lua_site_t *site)
 {
+	assert(site->lua_handler_ref != site->new_lua_handler_ref);
 	site->old_lua_handler_ref = site->lua_handler_ref;
 	site->lua_handler_ref = site->new_lua_handler_ref;
 
@@ -3163,7 +3168,8 @@ static void replace_lua_handlers(lua_State *L, int prev_idx_of_root_site)
 		lua_site_t *const new_root =
 			&conf.lua_sites[conf.idx_of_root_site];
 		if (new_root->generation == conf.generation) {
-			replace_lua_handler_ref(new_root);
+			if (conf.idx_of_root_site >= conf.lua_site_count)
+				replace_lua_handler_ref(new_root);
 			should_unref_moved_root = true;
 		}
 	}
@@ -3314,12 +3320,14 @@ static void hot_reload_add_remove_sites(unsigned extra_sites)
 }
 
 /* Launched in TX thread. */
-static void prepare_thread_ctx(thread_ctx_t *thread_ctx)
+static void
+prepare_thread_ctx(unsigned thread_idx)
 {
+	thread_ctx_t *const thread_ctx = &conf.thread_ctxs[thread_idx];
+	thread_ctx->idx = thread_idx;
+	thread_ctx->listeners_created = 0;
 	thread_ctx->num_connections = 0;
 	thread_ctx->active_lua_fibers = 0;
-	thread_ctx->should_notify_tx_done = false;
-	thread_ctx->tx_fiber_should_exit = false;
 	thread_ctx->fiber_to_wake_on_shutdown = NULL;
 	thread_ctx->http_and_tx_lua_handlers_flushed = false;
 }
@@ -3339,7 +3347,7 @@ static const char *hot_reload_add_threads(unsigned threads)
 
 	unsigned fiber_idx;
 	for (fiber_idx = conf.num_threads; fiber_idx < threads; ++fiber_idx) {
-		prepare_thread_ctx(&conf.thread_ctxs[fiber_idx]);
+		reset_thread_ctx(&conf.thread_ctxs[fiber_idx]);
 
 		char name[32];
 		sprintf(name, "tx_h2o_fiber_%u", fiber_idx);
@@ -3550,6 +3558,11 @@ Skip_c_sites:
 		goto thread_ctxs_alloc_failed;
 	}
 
+	unsigned idx;
+	for (idx = 0; idx < MAX_threads; ++idx) {
+		prepare_thread_ctx(idx);
+	}
+
 	unsigned config_init_idx;
 	for (config_init_idx = 0; config_init_idx < MAX_threads;
 	    ++config_init_idx) {
@@ -3676,7 +3689,8 @@ Skip_inits_on_hot_reload:
 				*lua_site = tmp;
 				lua_site = old_root;
 				conf.idx_of_root_site = created_entry_idx;
-			}
+			} else if (path_len == 1 && *path == '/')
+				conf.idx_of_root_site = created_entry_idx;
 			is_adding_site = true;
 			goto Alloc_lua_site_path;
 		}
@@ -4014,8 +4028,6 @@ Skip_openssl_security_level:
 
 	unsigned fiber_idx;
 	for (fiber_idx = 0; fiber_idx < conf.num_threads; ++fiber_idx) {
-		prepare_thread_ctx(&conf.thread_ctxs[fiber_idx]);
-
 		char name[32];
 		sprintf(name, "tx_h2o_fiber_%u", fiber_idx);
 		if ((conf.tx_fiber_ptrs[fiber_idx] =
@@ -4084,27 +4096,28 @@ Apply_new_config_hot_reload:
 	hot_reload_add_remove_sites(hot_reload_extra_sites);
 
 	unsigned removed_sites = 0;
-	unsigned idx;
-	for (idx = 0; idx < conf.lua_site_count + hot_reload_extra_sites;
-	    ++idx) {
+	for (idx = 0; idx < conf.lua_site_count + hot_reload_extra_sites -
+	    removed_sites;) {
 		lua_site_t *const lua_site = &conf.lua_sites[idx];
 		if (lua_site->generation != generation &&
 		    lua_site->generation != generation -
 			    ADD_NEW_SITE_GENERATION_SHIFT) {
+			if (conf.idx_of_root_site == idx)
+				conf.idx_of_root_site = -1;
 			free(lua_site->path);
 			luaL_unref(L, LUA_REGISTRYINDEX,
 				lua_site->lua_handler_ref);
 			memmove(lua_site, lua_site + 1, (conf.lua_site_count
-				+ hot_reload_extra_sites - idx - 1)
+				+ hot_reload_extra_sites - ++removed_sites - idx)
 				* sizeof(*lua_site));
-			++removed_sites;
 			if (conf.idx_of_root_site >= 0) {
 				if (conf.idx_of_root_site > idx)
 					--conf.idx_of_root_site;
 				else if (conf.idx_of_root_site == idx)
 					conf.idx_of_root_site = -1;
 			}
-		}
+		} else
+			++idx;
 	}
 	if (removed_sites > 0) {
 		size_t new_size = (conf.lua_site_count
