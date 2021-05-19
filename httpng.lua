@@ -405,4 +405,6 @@ end
 
 return {
 	cfg = cfg,
+	shutdown = httpng_c.shutdown,
+	force_decrease_threads = httpng_c.force_decrease_threads,
 }
