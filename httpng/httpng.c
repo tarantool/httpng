@@ -241,7 +241,7 @@ typedef struct st_sni_map {
 
 	struct {
 		const char  *hostname;
-		SSL_CTX     *ssl_ctx;
+		SSL_CTX *ssl_ctx;
 	} *sni_fields;
 	size_t sni_fields_size;
 	size_t sni_fields_capacity;
@@ -446,6 +446,7 @@ static void init_async(thread_ctx_t *thread_ctx);
 static void close_async(thread_ctx_t *thread_ctx);
 static void async_cb(void *param);
 static int on_shutdown_callback(lua_State *L);
+static int multilisten_get_listen_from_lua(lua_State *L, int LUA_STACK_IDX_TABLE, const char **lerr);
 
 static inline void my_xtm_delete_queue_from_tx(thread_ctx_t *thread_ctx)
 {
@@ -3479,8 +3480,6 @@ static void configure_and_start_reaper_fiber(void)
 	conf.reaping_flags = 0;
 	fiber_start(conf.reaper_fiber);
 }
-
-int multilisten_get_listen_from_lua(lua_State *L, int LUA_STACK_IDX_TABLE, const char **lerr);
 
 /* Lua parameters: lua_sites, function_to_call, function_param */
 int cfg(lua_State *L)
