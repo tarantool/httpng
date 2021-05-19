@@ -122,7 +122,8 @@
 		(typeof( &((type *)0)->member  ))(ptr); \
 	(type *)( (char *)__mptr - offsetof(type,member)  );})
 
-#define DEFAULT_MIN_TLS_PROTO_VERSION TLS1_2_VERSION
+#define DEFAULT_MIN_TLS_PROTO_VERSION_NUM TLS1_2_VERSION
+#define DEFAULT_MIN_TLS_PROTO_VERSION_STR TLS1_2_STR
 #define DEFAULT_OPENSSL_SECURITY_LEVEL 1
 
 struct listener_ctx;
@@ -390,7 +391,7 @@ static struct {
 	unsigned generation;
 	volatile unsigned add_new_sites_counter;
 	uint64_t openssl_security_level;
-	long     min_tls_proto_version;
+	long min_tls_proto_version;
 	int tfo_queues;
 	int on_shutdown_ref;
 	int idx_of_root_site; /* ...in lua_sites; < 0 means none. */
@@ -410,8 +411,6 @@ static struct {
 	.tfo_queues = H2O_DEFAULT_LENGTH_TCP_FASTOPEN_QUEUE,
 	.on_shutdown_ref = LUA_REFNIL,
 	.idx_of_root_site = -1,
-	.min_tls_proto_version = DEFAULT_MIN_TLS_PROTO_VERSION,
-	.openssl_security_level = DEFAULT_OPENSSL_SECURITY_LEVEL
 };
 
 __thread thread_ctx_t *curr_thread_ctx;
@@ -3940,7 +3939,9 @@ Skip_main_lua_handler:
 	lua_getfield(L, LUA_STACK_IDX_TABLE, "min_proto_version");
 	if (lua_isnil(L, -1)) {
 		/* FIXME: min_proto_version report */
-		fprintf(stderr, "Using default min_proto_version=tls1.2\n");
+		conf.min_tls_proto_version = DEFAULT_MIN_TLS_PROTO_VERSION_NUM;
+		fprintf(stderr, "Using default min_proto_version="
+			DEFAULT_MIN_TLS_PROTO_VERSION_STR "\n");
 		goto Skip_min_proto_version;
 	}
 
@@ -3994,18 +3995,20 @@ Skip_main_lua_handler:
 Skip_min_proto_version:
 	lua_getfield(L, LUA_STACK_IDX_TABLE, "openssl_security_level");
 	if (lua_isnil(L, -1)) {
+		conf.openssl_security_level = DEFAULT_OPENSSL_SECURITY_LEVEL;
+		fprintf(stderr, "Using default openssl_security_level=%d\n",
+			DEFAULT_OPENSSL_SECURITY_LEVEL);
 		goto Skip_openssl_security_level;
 	}
-	long openssl_security_level = my_lua_tointegerx(L, -1, &is_integer);
+	conf.openssl_security_level = my_lua_tointegerx(L, -1, &is_integer);
 	if (!is_integer) {
 		lerr = "openssl_security_level is not a number";
 		goto invalid_openssl_security_level;
 	}
-	if (openssl_security_level > 5) {
+	if (conf.openssl_security_level > 5) {
 		lerr = "openssl_security_level is invalid";
 		goto invalid_openssl_security_level;
 	}
-	conf.openssl_security_level = openssl_security_level;
 
 Skip_openssl_security_level:
 	;
