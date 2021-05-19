@@ -2,6 +2,7 @@
 #include <pthread.h>
 #include <stdio.h>
 #include <sys/socket.h>
+#include <sys/epoll.h>
 #include <sys/eventfd.h>
 #include <unistd.h>
 
@@ -95,6 +96,16 @@ int spying_accept(int sockfd, struct sockaddr *addr, socklen_t *addrlen)
 int spying_accept4(int sockfd, struct sockaddr *addr, socklen_t *addrlen, int flags)
 {
 	IMPL(accept4, (sockfd, addr, addrlen, flags))
+}
+
+int spying_epoll_create(int size)
+{
+	IMPL(epoll_create, (size))
+}
+
+int spying_epoll_create1(int flags)
+{
+	IMPL(epoll_create1, (flags))
 }
 
 int spying_close(int fd)
