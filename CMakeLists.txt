@@ -89,6 +89,8 @@ if (HTTPNG_USE_LIBUV)
     add_definitions(-DUSE_LIBUV)
 endif (HTTPNG_USE_LIBUV)
 
+
+# set(HEADERS include/tarantool-httpng/httpng.h httpng/openssl_utils.h)
 set(HEADERS httpng/openssl_utils.h)
 
 #set_source_files_properties(httpng/httpng.c PROPERTIES LANGUAGE CXX)
