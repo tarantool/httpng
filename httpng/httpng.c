@@ -2228,153 +2228,15 @@ static inline void set_cloexec(int fd)
 }
 
 /* Launched in TX thread. */
-static void register_listener_cfgs_socket(int fd, SSL_CTX *ssl_ctx, unsigned listener_idx)
-{
-	assert(listener_idx < conf.num_listeners);
-	listener_cfg_t * const listener_cfg = 
-			&conf.listener_cfgs[listener_idx];
-	assert(!listener_cfg->is_opened);
-	listener_cfg->fd = fd;
-	listener_cfg->ssl_ctx = ssl_ctx;
-	listener_cfg->is_opened = true;
-}
-
-/* Launched in TX thread. */
-static void close_listener_cfgs_sockets(void)
-{
-	puts("IN close_listener_cfgs_sockets");
-	unsigned listener_idx;
-	for (listener_idx = 0; listener_idx < conf.num_listeners;
-	    ++listener_idx) {
-		listener_cfg_t * const listener_cfg =
-				&conf.listener_cfgs[listener_idx];
-		if (listener_cfg->is_opened) {
-			close(listener_cfg->fd);
-			listener_cfg->is_opened = false;
-			if (listener_cfg->ssl_ctx != NULL) {
-				SSL_CTX_free(listener_cfg->ssl_ctx);
-				listener_cfg->ssl_ctx = NULL;
-			}
-		}
-	}
-}
-
-/* Launched in TX thread. */
-static bool prepare_listening_sockets(thread_ctx_t *thread_ctx)
-{
-#ifdef USE_LIBUV
-#error "prepare_listening_sockets() not implemented for libuv yet"
-#else /* USE_LIBUV */
-	unsigned listener_idx;
-	for (listener_idx = 0; listener_idx < conf.num_listeners;
-	    ++listener_idx) {
-		listener_ctx_t * const listener_ctx =
-				&thread_ctx->listener_ctxs[listener_idx];
-		const listener_cfg_t * const listener_cfg =
-				&conf.listener_cfgs[listener_idx];
-
-		assert(listener_cfg->is_opened);
-		memset(listener_ctx, 0, sizeof(*listener_ctx));
-		listener_ctx->thread_ctx = thread_ctx;
-		listener_ctx->accept_ctx.ssl_ctx = listener_cfg->ssl_ctx;
-		listener_ctx->accept_ctx.ctx = &thread_ctx->ctx;
-		listener_ctx->accept_ctx.hosts = thread_ctx->globalconf.hosts;
-		listener_ctx->sock = NULL;
-
-		if (thread_ctx->idx) {
-			if ((listener_ctx->fd = dup(listener_cfg->fd)) == -1)
-				/* FIXME: Should report. */
-				return false;
-		} else
-			listener_ctx->fd = listener_cfg->fd;
-		set_cloexec(listener_ctx->fd);
-		thread_ctx->listeners_created++;
-	}
-	return true;
-#endif /* USE_LIBUV */
-}
-
-/* Can be launched in TX thread or HTTP server thread. */
-static void close_listening_sockets(thread_ctx_t *thread_ctx)
-{
-	puts("IN close_listening_sockets");
-#ifdef USE_LIBUV
-#error "close_listening_sockets() not implemented for libuv yet"
-#else /* USE_LIBUV */
-	listener_ctx_t * const listener_ctxs =
-			thread_ctx->listener_ctxs;
-
-	unsigned listener_idx;
-	for (listener_idx = 0; listener_idx < thread_ctx->listeners_created;
-	    ++listener_idx) {
-		listener_ctx_t * const listener_ctx =
-				&listener_ctxs[listener_idx];
-		close(listener_ctx->fd);
-	}
-	thread_ctx->listeners_created = 0;
-	
-	if (thread_ctx->idx == 0) {
-		listener_cfg_t * const listener_cfg = 
-				&conf.listener_cfgs[listener_idx];
-		for (listener_idx = 0; listener_idx < conf.num_listeners;
-		    ++listener_idx) {
-			listener_cfg->is_opened = false;
-			if (listener_cfg->ssl_ctx != NULL) {
-				SSL_CTX_free(listener_cfg->ssl_ctx);
-				listener_cfg->ssl_ctx = NULL;
-			}
-		}
-	}
-#endif /* USE_LIBUV */
-}
-
-/* Launched in HTTP server thread. */
-static void listening_sockets_stop_read(thread_ctx_t *thread_ctx)
-{
-#ifdef USE_LIBUV
-#error "listening_sockets_stop_read() not implemented for libuv yet"
-#else /* USE_LIBUV */
-	unsigned listener_idx;
-	for (listener_idx = 0; listener_idx < thread_ctx->listeners_created;
-	    ++listener_idx) {
-		listener_ctx_t * const listener_ctx =
-			&thread_ctx->listener_ctxs[listener_idx];
-		h2o_socket_read_stop(listener_ctx->sock);
-		h2o_socket_close(listener_ctx->sock);
-		listener_ctx->sock = NULL;
-	}
-	thread_ctx->listeners_created = 0;
-#endif /* USE_LIBUV */
-}
-
-/* Launched in HTTP server thread. */
-static void listening_sockets_start_read(thread_ctx_t *thread_ctx)
-{
-#ifdef USE_LIBUV
-#error "listening_sockets_start_read() not implemented for libuv yet"
-#endif /* USE_LIBUV */
-	unsigned listener_idx;
-	for (listener_idx = 0; listener_idx < thread_ctx->listeners_created;
-	    ++listener_idx) {
-		listener_ctx_t * const listener_ctx =
-				&thread_ctx->listener_ctxs[listener_idx];
-		listener_ctx->sock = h2o_evloop_socket_create(
-				thread_ctx->ctx.loop,
-				listener_ctx->fd, H2O_SOCKET_FLAG_DONT_READ);
-		listener_ctx->sock->data = listener_ctx;
-		h2o_socket_read_start(listener_ctx->sock, on_accept);
-	}
-}
-
-/* Launched in TX thread. */
 static void
-register_listener_cfgs_socket(int fd, unsigned listener_idx)
+register_listener_cfgs_socket(int fd, SSL_CTX *ssl_ctx, unsigned listener_idx)
 {
 	assert(listener_idx < conf.num_listeners);
 	listener_cfg_t *const listener_cfg =
 		&conf.listener_cfgs[listener_idx];
 	assert(!listener_cfg->is_opened);
 	listener_cfg->fd = fd;
+	listener_cfg->ssl_ctx = ssl_ctx;
 	listener_cfg->is_opened = true;
 }
 
@@ -2390,6 +2252,10 @@ close_listener_cfgs_sockets(void)
 		if (listener_cfg->is_opened) {
 			close(listener_cfg->fd);
 			listener_cfg->is_opened = false;
+		}
+		if (listener_cfg->ssl_ctx != NULL) {
+			SSL_CTX_free(listener_cfg->ssl_ctx);
+			listener_cfg->ssl_ctx = NULL;
 		}
 	}
 }
@@ -2412,7 +2278,7 @@ prepare_listening_sockets(thread_ctx_t *thread_ctx)
 		assert(listener_cfg->is_opened);
 		memset(listener_ctx, 0, sizeof(*listener_ctx));
 		listener_ctx->thread_ctx = thread_ctx;
-		listener_ctx->accept_ctx.ssl_ctx = conf.ssl_ctx;
+		listener_ctx->accept_ctx.ssl_ctx = listener_cfg->ssl_ctx;
 		listener_ctx->accept_ctx.ctx = &thread_ctx->ctx;
 		listener_ctx->accept_ctx.hosts = thread_ctx->globalconf.hosts;
 		listener_ctx->sock = NULL;
@@ -2449,11 +2315,15 @@ close_listening_sockets(thread_ctx_t *thread_ctx)
 	}
 	thread_ctx->listeners_created = 0;
 	if (thread_ctx->idx == 0) {
+		listener_cfg_t * const listener_cfg = 
+			&conf.listener_cfgs[listener_idx];
 		for (listener_idx = 0; listener_idx < conf.num_listeners;
 		    ++listener_idx) {
-			listener_cfg_t *const listener_cfg =
-			    &conf.listener_cfgs[listener_idx];
 			listener_cfg->is_opened = false;
+			if (listener_cfg->ssl_ctx != NULL) {
+				SSL_CTX_free(listener_cfg->ssl_ctx);
+				listener_cfg->ssl_ctx = NULL;
+			}
 		}
 	}
 #endif /* USE_LIBUV */
@@ -2728,7 +2598,7 @@ static void handle_graceful_shutdown(thread_ctx_t *thread_ctx)
 /* This is HTTP server thread main function. */
 static void *worker_func(void *param)
 {
-	puts("START worker_func");
+	// puts("START worker_func");
 	/* FIXME: SIGTERM should terminate loop. */
 	const unsigned thread_idx = (unsigned)(uintptr_t)param;
 	thread_ctx_t *const thread_ctx = &conf.thread_ctxs[thread_idx];
@@ -2779,7 +2649,7 @@ static void *worker_func(void *param)
 	thread_ctx->queue_from_tx_fd_consumed = true;
 	listening_sockets_start_read(thread_ctx);
 	h2o_evloop_t *loop = thread_ctx->ctx.loop;
-	puts("BEFORE THE LOOP");
+	// puts("BEFORE THE LOOP");
 	while (!thread_ctx->shutdown_requested)
 		h2o_evloop_run(loop, INT32_MAX);
 
@@ -4139,10 +4009,10 @@ Skip_min_proto_version:
 
 Skip_openssl_security_level:
 	;
-	puts("BEFORE MULTILISTEN");
+	// puts("BEFORE MULTILISTEN");
 	if (multilisten_get_listen_from_lua(L, LUA_STACK_IDX_TABLE, &lerr) != 0)
 		goto listen_invalid;
-	puts("AFTER MULTILISTEN");
+	// puts("AFTER MULTILISTEN");
 
 #if 0
 	/* FIXME: Should make customizable. */

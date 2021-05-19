@@ -431,7 +431,7 @@ int multilisten_get_listen_from_lua(lua_State *L, int LUA_STACK_IDX_TABLE, const
 
 		lua_pop(L, 1); /* pop "clear" listen cfg */
 		--need_to_pop;
-		printf("listener_cfg[%zu] configured\nnum_listeners = %u\n", listener_idx, conf.num_listeners);
+		// printf("listener_cfg[%zu] configured\nnum_listeners = %u\n", listener_idx, conf.num_listeners);
 		++listener_idx;
 	}
 
