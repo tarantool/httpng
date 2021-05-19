@@ -2314,10 +2314,10 @@ close_listening_sockets(thread_ctx_t *thread_ctx)
 	}
 	thread_ctx->listeners_created = 0;
 	if (thread_ctx->idx == 0) {
-		listener_cfg_t * const listener_cfg = 
-			&conf.listener_cfgs[listener_idx];
 		for (listener_idx = 0; listener_idx < conf.num_listeners;
 		    ++listener_idx) {
+			listener_cfg_t * const listener_cfg = 
+				&conf.listener_cfgs[listener_idx];
 			listener_cfg->is_opened = false;
 			if (listener_cfg->ssl_ctx != NULL) {
 				SSL_CTX_free(listener_cfg->ssl_ctx);
