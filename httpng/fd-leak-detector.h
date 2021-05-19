@@ -6,6 +6,8 @@
 #define dup(a) spying_dup(a)
 #define accept(a, b, c) spying_accept(a, b, c)
 #define accept4(a, b, c, d) spying_accept4(a, b, c, d)
+#define epoll_create(a) spying_epoll_create(a)
+#define epoll_create1(a) spying_epoll_create1(a)
 
 #include <arpa/inet.h>
 
@@ -23,6 +25,8 @@ extern int spying_eventfd(unsigned int initval, int flags) __THROW;
 extern int spying_dup(int oldfd) __THROW __wur;
 extern int spying_accept(int sockfd, struct sockaddr *addr, socklen_t *addrlen);
 extern int spying_accept4(int sockfd, struct sockaddr *addr, socklen_t *addrlen, int flags);
+extern int spying_epoll_create(int size);
+extern int spying_epoll_create1(int flags);
 
 #ifdef __cplusplus
 } /* extern "C" */
