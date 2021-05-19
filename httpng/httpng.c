@@ -2598,7 +2598,6 @@ static void handle_graceful_shutdown(thread_ctx_t *thread_ctx)
 /* This is HTTP server thread main function. */
 static void *worker_func(void *param)
 {
-	// puts("START worker_func");
 	/* FIXME: SIGTERM should terminate loop. */
 	const unsigned thread_idx = (unsigned)(uintptr_t)param;
 	thread_ctx_t *const thread_ctx = &conf.thread_ctxs[thread_idx];
@@ -2649,7 +2648,6 @@ static void *worker_func(void *param)
 	thread_ctx->queue_from_tx_fd_consumed = true;
 	listening_sockets_start_read(thread_ctx);
 	h2o_evloop_t *loop = thread_ctx->ctx.loop;
-	// puts("BEFORE THE LOOP");
 	while (!thread_ctx->shutdown_requested)
 		h2o_evloop_run(loop, INT32_MAX);
 
@@ -4011,10 +4009,8 @@ Skip_min_proto_version:
 
 Skip_openssl_security_level:
 	;
-	// puts("BEFORE MULTILISTEN");
 	if (multilisten_get_listen_from_lua(L, LUA_STACK_IDX_TABLE, &lerr) != 0)
 		goto listen_invalid;
-	// puts("AFTER MULTILISTEN");
 
 #if 0
 	/* FIXME: Should make customizable. */
