@@ -26,8 +26,8 @@ open_listener(const char *addr_str, uint16_t port, const char **lerr)
 	memset(&hints, 0, sizeof(hints));
 
 	int ai_family = ip_version(addr_str);
-	if (ai_family == -1) {
-		*lerr = "Can't detect IP address";
+	if (ai_family < 0) {
+		*lerr = "Can't parse IP address";
 		goto ip_detection_fail;
 	}
 
@@ -48,7 +48,7 @@ open_listener(const char *addr_str, uint16_t port, const char **lerr)
 #endif /* SOCK_CLOEXEC */
 	int fd;
 	if ((fd = socket(res->ai_family, flags, 0)) == -1) {
-		*lerr = "create socket(2) failed";
+		*lerr = "create socket failed";
 		goto socket_create_fail;
 	}
 #ifndef SOCK_CLOEXEC
@@ -148,7 +148,7 @@ sni_map_create(int certs_num, const char **lerr)
 		goto ssl_ctxs_alloc_fail;
 	}
 	sni_map->ssl_ctxs_capacity = certs_num;
-	sni_map->sni_fields = calloc(certs_num, sizeof(*sni_map->ssl_ctxs));
+	sni_map->sni_fields = calloc(certs_num, sizeof(*sni_map->sni_fields));
 	if (sni_map->sni_fields == NULL) {
 		*lerr = "memory allocation failed for sni_fields in sni map";
 		goto sni_fields_alloc_fail;
@@ -262,7 +262,10 @@ get_ssl_ctx_not_uses_sni(lua_State *L, unsigned listener_idx,
 
 #ifndef NDEBUG
 	unsigned certs_num = lua_objlen(L, -1);
-	assert(certs_num == 1);
+	if (certs_num != 1) {
+		*lerr = "certs num must be 1 when not using sni";
+		goto certs_num_fail;
+	}
 #endif /* NDEBUG */
 	conf.sni_maps[listener_idx] = NULL;
 
@@ -284,6 +287,7 @@ get_ssl_ctx_not_uses_sni(lua_State *L, unsigned listener_idx,
 
 ssl_ctx_create_fail:
 required_field_fail:
+certs_num_fail:
 	assert(*lerr != NULL);
 	return NULL;
 }
