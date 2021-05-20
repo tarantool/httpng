@@ -361,6 +361,7 @@ end
 
 local httpng_lib = require 'httpng'
 local init_func = httpng_lib.cfg
+dofile('examples/load_ssl_source.lua')
 
 local lua_sites = {
     {path = '/hello',       handler = hello_handler},
@@ -373,10 +374,6 @@ local lua_sites = {
     {path = '/post_test',   handler = post_test_handler},
     {path = '/put',         handler = put_handler},
 }
-
-local testdir = fio.dirname(fio.abspath(arg[0]))
-local foo_cert_path = fio.pathjoin(testdir, '../tests/foo.tarantool.io_cert.pem')
-local foo_key_path = fio.pathjoin(testdir, '../tests/foo.tarantool.io_key.pem')
 
 print '\n\n\nFilling in test spaces completed, launching HTTP server...\n\n'
 ::restart::

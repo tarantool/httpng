@@ -1,5 +1,6 @@
 #!/usr/bin/env tarantool
 
+local box = require 'box'
 local http = require 'httpng'
 local fio = require 'fio'
 

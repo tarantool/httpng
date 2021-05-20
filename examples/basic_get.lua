@@ -1,9 +1,5 @@
 local http = require 'httpng'
-local fio = require 'fio'
-
-local testdir = fio.dirname(fio.abspath(arg[0]))
-local foo_cert_path = fio.pathjoin(testdir, '../tests/foo.tarantool.io_cert.pem')
-local foo_key_path = fio.pathjoin(testdir, '../tests/foo.tarantool.io_key.pem')
+dofile('examples/load_ssl_source.lua')
 
 http.cfg{
     --[[ -- Not yet implemented

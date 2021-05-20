@@ -1,5 +1,6 @@
 local http = require 'httpng'
-local fiber = require 'fiber'
+dofile('examples/load_ssl_source.lua')
+
 
 local foo_handler = function(req, io)
     return {
@@ -17,7 +18,12 @@ end
 
 local config = {
     threads = 4,
-    listen =  { { port = 8080 } },
+    listen = {
+        port = 8080,
+        tls = {
+          { certificate_file = foo_cert_path, certificate_key_file = foo_key_path }
+        },
+    },
 }
 
 ::again::
