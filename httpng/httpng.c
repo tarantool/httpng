@@ -71,8 +71,6 @@
 #define SPLIT_LARGE_BODY
 //#undef SPLIT_LARGE_BODY
 
-#define USE_HTTPS 1
-//#define USE_HTTPS 0
 
 
 #define H2O_DEFAULT_PORT_FOR_PROTOCOL_USED 65535
@@ -2314,8 +2312,8 @@ close_listening_sockets(thread_ctx_t *thread_ctx)
 	if (thread_ctx->idx == 0) {
 		for (listener_idx = 0; listener_idx < conf.num_listeners;
 		    ++listener_idx) {
-			listener_cfg_t * const listener_cfg = 
-				&conf.listener_cfgs[listener_idx];
+			listener_cfg_t * const listener_cfg =
+			    &conf.listener_cfgs[listener_idx];
 			listener_cfg->is_opened = false;
 			if (listener_cfg->ssl_ctx != NULL) {
 				SSL_CTX_free(listener_cfg->ssl_ctx);
@@ -4200,9 +4198,10 @@ xtm_to_tx_fail:
 	free(conf.tx_fiber_ptrs);
 
 fibers_fail_alloc:
+	close_listener_cfgs_sockets();
+listen_invalid:
 invalid_openssl_security_level:
 min_proto_version_invalid:
-listen_invalid:
 no_handlers:
 failed_to_add_threads:
 invalid_handler:
