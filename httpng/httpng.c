@@ -74,9 +74,6 @@
 #define USE_HTTPS 1
 //#define USE_HTTPS 0
 
-/* For debugging. FIXME: Make runtime configurable from Lua. */
-#define DISABLE_HTTP2
-#undef DISABLE_HTTP2
 
 #define H2O_DEFAULT_PORT_FOR_PROTOCOL_USED 65535
 #define H2O_CONTENT_LENGTH_UNSPECIFIED SIZE_MAX

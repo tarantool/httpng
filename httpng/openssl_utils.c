@@ -4,54 +4,55 @@
 #include <stdio.h>
 
 /* NOTE: only PEM format certificate is allowed */
-X509 *get_X509_from_certificate_path(const char *cert_path, const char **lerr) {
+X509 *
+get_X509_from_certificate_path(const char *cert_path, const char **lerr)
+{
 	X509 *cert = NULL;
 	FILE *fp = NULL;
 
-	if (cert_path == NULL) {
-		*lerr = "cert_path = NULL in get_X509_from_certificate_path";
-		goto end;
-		return NULL;
-	}
+	assert(cert_path != NULL);
 
 	fp = fopen(cert_path, "r");
-	if (!fp) {
+	if (fp == NULL) {
 		*lerr = "unable to open certificate file";
-		goto end;
+		goto fopen_fail;
 	}
 	cert = PEM_read_X509(fp, NULL, NULL, NULL);
-	if (!cert) {
+	if (cert == NULL) {
 		*lerr = "unable to parse certificate: only PEM format is allowed";
-		goto fopen_close;
+		goto read_X509_fail;
 	}
 
-fopen_close:
+read_X509_fail:
 	fclose(fp);
-end:
+fopen_fail:
 	if (cert == NULL)
 		assert(*lerr != NULL);
 	return cert;
 }
 
-const char *get_subject_common_name(X509 *cert) {
-	if (cert == NULL) {
-		return NULL;
-	}
+const char *
+get_subject_common_name(X509 *cert)
+{
+	assert(cert != NULL);
 	X509_NAME *subj = X509_get_subject_name(cert);
 
 	int length = X509_NAME_get_text_by_NID(subj, NID_commonName, NULL, 0);
 	char *common_name = calloc(length + 1, sizeof(*common_name));
-	int retval = X509_NAME_get_text_by_NID(subj, NID_commonName, common_name, length + 1);
+	int retval = X509_NAME_get_text_by_NID(subj, NID_commonName,
+		common_name, length + 1);
 	if (retval < 0) {
-		free((char *)common_name);
+		free(common_name);
 		return NULL;
 	}
 	return common_name;
 }
 
 /* NOTE: only PEM format is allowed */
-SSL_CTX *make_ssl_ctx(const char *certificate_file, const char *key_file,
-						int level, long min_proto_version, const char **lerr) {
+SSL_CTX *
+make_ssl_ctx(const char *certificate_file, const char *key_file,
+	     int level, long min_proto_version, const char **lerr)
+{
 	SSL_CTX *ssl_ctx = SSL_CTX_new(SSLv23_server_method());
 	if (ssl_ctx == NULL) {
 		*lerr = "memory allocation for ssl context failed";
@@ -63,12 +64,13 @@ SSL_CTX *make_ssl_ctx(const char *certificate_file, const char *key_file,
 	SSL_CTX_set_security_level(ssl_ctx, level);
 
 	if (certificate_file != NULL && key_file != NULL) {
-		if (SSL_CTX_use_certificate_chain_file(ssl_ctx, certificate_file) != 1) {
+		if (SSL_CTX_use_certificate_chain_file(ssl_ctx,
+		    certificate_file) != 1) {
 			*lerr = "can't bind certificate file to ssl_ctx";
-			fprintf(stderr, "certificate file: %s\n", certificate_file);
 			goto make_ssl_ctx_error;
 		}
-		if (SSL_CTX_use_PrivateKey_file(ssl_ctx, key_file, SSL_FILETYPE_PEM) != 1) {
+		if (SSL_CTX_use_PrivateKey_file(ssl_ctx,
+		    key_file, SSL_FILETYPE_PEM) != 1) {
 			*lerr = "can't bind private key to ssl_ctx";
 			goto make_ssl_ctx_error;
 		}
@@ -90,7 +92,6 @@ SSL_CTX *make_ssl_ctx(const char *certificate_file, const char *key_file,
 	};
 	h2o_ssl_register_alpn_protocols(ssl_ctx, my_alpn_protocols);
 #else /* DISABLE_HTTP2 */
-
 	h2o_ssl_register_alpn_protocols(ssl_ctx, h2o_http2_alpn_protocols);
 #endif /* DISABLE_HTTP2 */
 #endif /* H2O_USE_ALPN */

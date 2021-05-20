@@ -123,6 +123,10 @@ if (ENABLE_FD_LEAK_DETECTOR)
 endif (ENABLE_FD_LEAK_DETECTOR)
 
 target_link_libraries(httpng_c ${LIBS})
+# FIXME: Make runtime configurable from Lua.
+if (DISABLE_HTTP2)
+    target_compile_definitions(httpng_c PRIVATE "DISABLE_HTTP2")
+endif(DISABLE_HTTP2)
 
 if (NOT(ENABLE_ASAN))
     # Just test
