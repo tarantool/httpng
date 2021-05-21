@@ -384,10 +384,8 @@ init_func({
     max_body_len = 16 * 1024 * 1024,
     use_body_split = true,
     listen = {
-        { port = 7890, tls = {
-            { certificate_file = foo_cert_path, certificate_key_file = foo_key_path }
-          }
-        },
+        port = 7890,
+        tls = dofile("examples/paste_foo_ssl_pair.lua"),
     },
     sites = lua_sites,
 })

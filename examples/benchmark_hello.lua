@@ -1,14 +1,11 @@
 local http = require 'httpng'
-dofile('examples/load_ssl_source.lua')
 
 
 http.cfg{
     listen = {
         {
             port = 8080,
-            tls = {
-              { certificate_file = foo_cert_path, certificate_key_file = foo_key_path }
-            },
+            tls = dofile("examples/paste_foo_ssl_pair.lua"),
         },
     },
     threads = 7,

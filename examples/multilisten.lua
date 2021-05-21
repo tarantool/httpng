@@ -1,9 +1,8 @@
 #!/usr/bin/env tarantool
 
+local box = require 'box'
 local http = require 'httpng'
-dofile('examples/load_ssl_source.lua')
-
--- box.cfg {log_level = 7}
+box.cfg {log_level = 7}
 
 http.cfg{
     listen = {
@@ -13,18 +12,17 @@ http.cfg{
         -- https://[::1]:8443
         {
             -- uses_sni = false (by default)
-            addr = '::1', port = 8443, tls = {
-                { certificate_file = foo_cert_path, certificate_key_file = foo_key_path },
-            }
+            addr = '::1',
+            port = 8443,
+            tls = dofile("examples/paste_foo_ssl_pair.lua"),
         },
 
         -- https://foo.tarantool.io:8443 or https://bar.tarantool.io:8443 (in /etc/hosts uri should ref to 127.0.0.1)
         -- https://127.0.0.1:8443 is blocked due to SNI.
         {
-            addr = '127.0.0.1', port = 8443, tls = {
-                { certificate_file = foo_cert_path, certificate_key_file = foo_key_path }, -- hostname1
-                { certificate_file = bar_cert_path, certificate_key_file = bar_key_path }, -- hostname2
-            },
+            addr = '127.0.0.1',
+            port = 8443,
+            tls = dofile("examples/paste_foo_bar_ssl_pair.lua"),
             uses_sni = true
         }
     },
