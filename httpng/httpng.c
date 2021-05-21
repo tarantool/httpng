@@ -441,7 +441,7 @@ static void init_async(thread_ctx_t *thread_ctx);
 static void close_async(thread_ctx_t *thread_ctx);
 static void async_cb(void *param);
 static int on_shutdown_callback(lua_State *L);
-static int multilisten_get_listen_from_lua(lua_State *L, int LUA_STACK_IDX_TABLE, const char **lerr);
+static int multilisten_get_listen_from_lua(lua_State *L, int lua_stack_idx_table, const char **lerr);
 
 static inline void my_xtm_delete_queue_from_tx(thread_ctx_t *thread_ctx)
 {
@@ -2312,7 +2312,7 @@ close_listening_sockets(thread_ctx_t *thread_ctx)
 	if (thread_ctx->idx == 0) {
 		for (listener_idx = 0; listener_idx < conf.num_listeners;
 		    ++listener_idx) {
-			listener_cfg_t * const listener_cfg =
+			listener_cfg_t *const listener_cfg =
 			    &conf.listener_cfgs[listener_idx];
 			listener_cfg->is_opened = false;
 			if (listener_cfg->ssl_ctx != NULL) {
