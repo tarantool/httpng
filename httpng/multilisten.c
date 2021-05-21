@@ -201,9 +201,13 @@ sni_map_insert(sni_map_t *sni_map, const char *certificate_file,
 	if (ssl_ctx == NULL)
 		goto make_ssl_ctx_fail;
 	sni_map->ssl_ctxs[sni_map->ssl_ctxs_size++] = ssl_ctx;
-	sni_map->sni_fields[sni_map->sni_fields_size].hostname = common_name;
+	sni_map->sni_fields[sni_map->sni_fields_size].hostname.base =
+		(char *)common_name;
+	sni_map->sni_fields[sni_map->sni_fields_size].hostname.len =
+		strlen(common_name);
 	sni_map->sni_fields[sni_map->sni_fields_size++].ssl_ctx = ssl_ctx;
 
+	X509_free(X509_cert);
 	return 0;
 
 make_ssl_ctx_fail:
@@ -223,12 +227,12 @@ sni_map_deinit(sni_map_t *sni_map)
 	for (size_t i = 0; i < sni_map->ssl_ctxs_size; ++i)
 		SSL_CTX_free(sni_map->ssl_ctxs[i]);
 	for (size_t i = 0; i < sni_map->sni_fields_size; ++i)
-		free((char *)sni_map->sni_fields[i].hostname);
+		free((char *)sni_map->sni_fields[i].hostname.base);
 	free(sni_map);
 }
 
 static void
-conf_sni_map_cleanup()
+conf_sni_map_cleanup(void)
 {
 	if (conf.sni_maps == NULL)
 		return;
@@ -260,20 +264,21 @@ get_ssl_ctx_not_uses_sni(lua_State *L, unsigned listener_idx,
 {
 	SSL_CTX *ssl_ctx = NULL;
 
-#ifndef NDEBUG
 	unsigned certs_num = lua_objlen(L, -1);
 	if (certs_num != 1) {
 		*lerr = "certs num must be 1 when not using sni";
 		goto certs_num_fail;
 	}
-#endif /* NDEBUG */
 	conf.sni_maps[listener_idx] = NULL;
 
 	const char *certificate_file = NULL;
 	const char *certificate_key_file = NULL;
 
 	lua_rawgeti(L, -1, 1);
-	assert(lua_istable(L, -1));
+	if (!lua_istable(L, -1)) {
+		*lerr = "element of `tls` table isn't a table";
+		goto tls_pair_not_a_table;
+	}
 	GET_REQUIRED_LISTENER_FIELD(certificate_file, LUA_TSTRING, string);
 	GET_REQUIRED_LISTENER_FIELD(certificate_key_file, LUA_TSTRING, string);
 	lua_pop(L, 1);
@@ -286,6 +291,7 @@ get_ssl_ctx_not_uses_sni(lua_State *L, unsigned listener_idx,
 	return ssl_ctx;
 
 ssl_ctx_create_fail:
+tls_pair_not_a_table:
 required_field_fail:
 certs_num_fail:
 	assert(*lerr != NULL);
@@ -309,13 +315,16 @@ servername_callback(SSL *s, int *al, void *arg)
 		/* FIXME: think maybe return SSL_TLSEXT_ERR_NOACK */
 		goto get_servername_fail;
 	}
-
+	size_t servername_len = strlen(servername);
+	
 	/* FIXME: make hash table for sni_fields, not an array */
-	for (size_t i = 0; i < sni_map->sni_fields_size; ++i) {
-		if (strcasecmp(servername,
-		    sni_map->sni_fields[i].hostname) == 0) {
+	size_t i;
+	for (i = 0; i < sni_map->sni_fields_size; ++i) {
+		if (servername_len == sni_map->sni_fields[i].hostname.len &&
+		    memcmp(servername, sni_map->sni_fields[i].hostname.base,
+		    servername_len) == 0) {
 			SSL_CTX *ssl_ctx = sni_map->sni_fields[i].ssl_ctx;
-			if (SSL_set_SSL_CTX(s, ssl_ctx) != ssl_ctx) {
+			if (SSL_set_SSL_CTX(s, ssl_ctx) == NULL) {
 				fprintf(stderr, "Error while switching SSL "
 					"context after scanning TLS SNI\n");
 				goto set_ssl_ctx_fail;
@@ -357,12 +366,12 @@ get_ssl_ctx_uses_sni(lua_State *L, unsigned listener_idx, const char **lerr)
 	}
 
 	ssl_ctx = make_ssl_ctx(NULL, NULL, conf.openssl_security_level,
-		conf.min_tls_proto_version ,lerr);
+		conf.min_tls_proto_version, lerr);
 	if (ssl_ctx == NULL)
 		goto ssl_ctx_create_fail;
 	SSL_CTX_set_tlsext_servername_callback(ssl_ctx, servername_callback);
 	SSL_CTX_set_tlsext_servername_arg(ssl_ctx,
-		(servername_callback_arg_t *) sni_map);
+		(servername_callback_arg_t *)sni_map);
 	conf.sni_maps[listener_idx] = sni_map;
 	return ssl_ctx;
 
@@ -379,13 +388,23 @@ static SSL_CTX *
 get_tls_field_from_lua(lua_State *L, unsigned listener_idx,
 		       bool uses_sni, const char **lerr)
 {
-	assert(lua_istable(L, -1));
-#ifndef NDEBUG
+	if (!lua_istable(L, -1)) {
+		*lerr = "`tls` isn't a table";
+		goto tls_not_a_table;
+	}
 	unsigned certs_num = lua_objlen(L, -1);
-	assert((!uses_sni && certs_num == 1) || uses_sni);
-#endif /* NDEBUG */
+	if (!uses_sni && certs_num != 1) {
+		*lerr = "certificates number and `uses_sni` contradict "
+			"each other";
+		goto wrong_cert_num_and_uses_sni;
+	}
 	return uses_sni ? get_ssl_ctx_uses_sni(L, listener_idx, lerr)
 			: get_ssl_ctx_not_uses_sni(L, listener_idx, lerr);
+
+wrong_cert_num_and_uses_sni:
+tls_not_a_table:
+	assert(*lerr != NULL);
+	return NULL;
 }
 
 static int
@@ -426,12 +445,12 @@ multilisten_get_listen_from_lua(lua_State *L, int lua_stack_idx_table,
 	while (lua_next(L, -2)) {
 		++need_to_pop;
 		if (!lua_istable(L, -1)) {
-			*lerr = "clear <listen-conf> isn't a table";
-			goto clear_listen_conf_fail;
+			*lerr = "listeners are bad parsed";
+			goto failed_parsing_clean_listen_conf;
 		}
 
-		const char  *addr;
-		uint16_t    port;
+		const char *addr;
+		uint16_t port;
 
 		GET_REQUIRED_LISTENER_FIELD(addr, LUA_TSTRING, string);
 		GET_REQUIRED_LISTENER_FIELD(port, LUA_TNUMBER, integer);
@@ -453,14 +472,14 @@ multilisten_get_listen_from_lua(lua_State *L, int lua_stack_idx_table,
 
 			ssl_ctx = get_tls_field_from_lua(L, listener_idx,
 				uses_sni, lerr);
-			if (ssl_ctx == NULL) {
-				goto clear_listen_conf_fail;
-			}
+			if ((ssl_ctx = get_tls_field_from_lua(L, listener_idx,
+			    uses_sni, lerr)) == NULL)
+				goto failed_parsing_clean_listen_conf;
 		} else {
-			*lerr = "tls isn't table or nil";
-			goto clear_listen_conf_fail;
+			*lerr = "`tls` isn't table or nil";
+			goto failed_parsing_clean_listen_conf;
 		}
-		/* pop "tls" and "clear" listen cfg */
+		/* pop "tls" and "clean" listen cfg */
 		lua_pop(L, 2);
 		need_to_pop -= 2;
 
@@ -478,7 +497,7 @@ multilisten_get_listen_from_lua(lua_State *L, int lua_stack_idx_table,
 
 open_listener_fail:
 required_field_fail:
-clear_listen_conf_fail:
+failed_parsing_clean_listen_conf:
 	conf_sni_map_cleanup();
 	close_listener_cfgs_sockets();
 	conf.sni_maps = NULL;

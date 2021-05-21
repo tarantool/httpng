@@ -235,7 +235,7 @@ typedef struct st_sni_map {
 	size_t ssl_ctxs_size;
 
 	struct {
-		const char  *hostname;
+		h2o_iovec_t hostname;
 		SSL_CTX *ssl_ctx;
 	} *sni_fields;
 	size_t sni_fields_size;
