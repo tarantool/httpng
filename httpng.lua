@@ -9,6 +9,13 @@ local httpng_c = require("httpng_c")
 --                      local support functions.                             --
 -- ========================================================================= --
 
+-- Copies table @t with its metatable.
+function table.copy(t)
+    local u = {}
+    for k, v in pairs(t) do u[k] = v end
+    return setmetatable(u, getmetatable(t))
+end
+
 --- Make contents of `tbl` in string representation, with indentation.
 -- Returns string if table type passed, nil otherwise.
 local function print_table_to_string(tbl)
@@ -312,7 +319,9 @@ local function get_clean_listen_confs_from_string(listen_conf)
             table.insert(res, get_clean_listen_conf({addr = ip_addrs[i], port = port}))
         end
     end
+
 ::return_get_clean_lc_from_str:: return res
+
 end
 
 local function get_clean_listen_confs_from_table(listen_conf)
@@ -399,8 +408,14 @@ local function check_for_duplicate_listeners(listen)
     end
 end
 
+
+-- ========================================================================= --
+--                      Methods of main `export` table.                      --
+-- ========================================================================= --
+local export = table.copy(httpng_c)
+
 -- Main cfg function.
-local function cfg(config)
+export.cfg = function (config)
     local prepared_listen = prepare_listen_for_c(config.listen)
     check_for_duplicate_listeners(prepared_listen)
     config.listen = prepared_listen
@@ -409,8 +424,4 @@ local function cfg(config)
     httpng_c.cfg(config)
 end
 
-return {
-    cfg = cfg,
-    shutdown = httpng_c.shutdown,
-    force_decrease_threads = httpng_c.force_decrease_threads,
-}
+return export
