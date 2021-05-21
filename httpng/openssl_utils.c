@@ -11,6 +11,7 @@ get_X509_from_certificate_path(const char *cert_path, const char **lerr)
 	FILE *fp = NULL;
 
 	assert(cert_path != NULL);
+	assert(lerr != NULL);
 
 	fp = fopen(cert_path, "r");
 	if (fp == NULL) {
@@ -26,8 +27,7 @@ get_X509_from_certificate_path(const char *cert_path, const char **lerr)
 read_X509_fail:
 	fclose(fp);
 fopen_fail:
-	if (cert == NULL)
-		assert(*lerr != NULL);
+	assert(cert != NULL || *lerr != NULL);
 	return cert;
 }
 
@@ -39,6 +39,8 @@ get_subject_common_name(X509 *cert)
 
 	int length = X509_NAME_get_text_by_NID(subj, NID_commonName, NULL, 0);
 	char *common_name = calloc(length + 1, sizeof(*common_name));
+	if (common_name == NULL)
+		return NULL;
 	int retval = X509_NAME_get_text_by_NID(subj, NID_commonName,
 		common_name, length + 1);
 	if (retval < 0) {
