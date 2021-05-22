@@ -2444,8 +2444,10 @@ listening_sockets_start_read(thread_ctx_t *thread_ctx)
 
 /* Launched in TX thread. */
 static void
-reset_thread_ctx(thread_ctx_t *thread_ctx)
+reset_thread_ctx(unsigned idx)
 {
+	thread_ctx_t *const thread_ctx = &conf.thread_ctxs[idx];
+
 	thread_ctx->should_notify_tx_done = false;
 	thread_ctx->tx_fiber_should_exit = false;
 	thread_ctx->shutdown_requested = false;
@@ -2464,7 +2466,6 @@ static bool init_worker_thread(unsigned thread_idx)
 	int fd_consumed = 0;
 #endif /* USE_LIBUV */
 	thread_ctx_t *const thread_ctx = &conf.thread_ctxs[thread_idx];
-	reset_thread_ctx(thread_ctx);
 	if ((thread_ctx->queue_from_tx = xtm_create(QUEUE_FROM_TX_ITEMS))
 	    == NULL)
 		/* FIXME: Report. */
@@ -3347,7 +3348,7 @@ static const char *hot_reload_add_threads(unsigned threads)
 
 	unsigned fiber_idx;
 	for (fiber_idx = conf.num_threads; fiber_idx < threads; ++fiber_idx) {
-		reset_thread_ctx(&conf.thread_ctxs[fiber_idx]);
+		reset_thread_ctx(fiber_idx);
 
 		char name[32];
 		sprintf(name, "tx_h2o_fiber_%u", fiber_idx);
@@ -4035,6 +4036,7 @@ Skip_openssl_security_level:
 			lerr = "Failed to create fiber";
 			goto fibers_fail;
 		}
+		reset_thread_ctx(fiber_idx);
 		fiber_set_joinable(conf.tx_fiber_ptrs[fiber_idx], true);
 		fiber_start(conf.tx_fiber_ptrs[fiber_idx], fiber_idx);
 	}
