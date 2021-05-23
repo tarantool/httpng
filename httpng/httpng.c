@@ -3155,24 +3155,14 @@ static void flush_lua_ref_handlers(void)
 }
 
 /* Launched in TX thread. */
-static void replace_lua_handlers(lua_State *L, int prev_idx_of_root_site)
+static void
+replace_lua_handlers(lua_State *L)
 {
 	unsigned idx;
 	for (idx = 0; idx < conf.lua_site_count; ++idx) {
 		lua_site_t *const site = &conf.lua_sites[idx];
 		if (site->generation == conf.generation)
 			replace_lua_handler_ref(site);
-	}
-	bool should_unref_moved_root = false;
-	if (prev_idx_of_root_site != conf.idx_of_root_site &&
-	    conf.idx_of_root_site >= 0) {
-		lua_site_t *const new_root =
-			&conf.lua_sites[conf.idx_of_root_site];
-		if (new_root->generation == conf.generation) {
-			if (conf.idx_of_root_site >= conf.lua_site_count)
-				replace_lua_handler_ref(new_root);
-			should_unref_moved_root = true;
-		}
 	}
 
 	flush_lua_ref_handlers();
@@ -3183,9 +3173,6 @@ static void replace_lua_handlers(lua_State *L, int prev_idx_of_root_site)
 			luaL_unref(L, LUA_REGISTRYINDEX,
 				site->old_lua_handler_ref);
 	}
-	if (should_unref_moved_root)
-		luaL_unref(L, LUA_REGISTRYINDEX, conf.lua_sites[
-				conf.idx_of_root_site].old_lua_handler_ref);
 }
 
 /* Launched in TX thread.*/
@@ -4149,9 +4136,9 @@ Apply_new_config:
 	if (!is_hot_reload)
 		goto After_applying_new_config;
 
-	replace_lua_handlers(L, prev_idx_of_root_site);
 	conf.lua_site_count += hot_reload_extra_sites;
 	conf.lua_site_count -= removed_sites;
+	replace_lua_handlers(L);
 	hot_reload_remove_threads(threads);
 
 	conf.hot_reload_in_progress = false;
