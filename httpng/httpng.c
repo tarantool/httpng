@@ -368,6 +368,7 @@ static struct {
 	bool use_body_split;
 #endif /* SPLIT_LARGE_BODY */
 	bool configured;
+	bool cfg_in_progress;
 	bool hot_reload_in_progress;
 	bool is_on_shutdown_setup;
 	bool is_shutdown_in_progress;
@@ -3033,9 +3034,10 @@ static void reap_terminating_threads_ungracefully(void)
 /* Launched in TX thread. */
 static int on_shutdown_internal(lua_State *L, bool called_from_callback)
 {
+	while (conf.cfg_in_progress)
+		fiber_sleep(0.001);
 	if (!conf.configured)
 		return luaL_error(L, "Server is not launched");
-	reap_terminating_threads_ungracefully();
 	if (conf.is_shutdown_in_progress) {
 		if (!called_from_callback)
 			return luaL_error(L,
@@ -3045,6 +3047,7 @@ static int on_shutdown_internal(lua_State *L, bool called_from_callback)
 		return 0;
 	}
 	conf.is_shutdown_in_progress = true;
+	reap_terminating_threads_ungracefully();
 	if (conf.is_on_shutdown_setup)
 		setup_on_shutdown(L, false, called_from_callback);
 	unsigned thr_idx;
@@ -3427,12 +3430,19 @@ int cfg(lua_State *L)
 {
 	const char *lerr = NULL; /* Error message for caller. */
 	bool is_hot_reload;
+	assert(!conf.cfg_in_progress);
+	conf.cfg_in_progress = true;
+	if (conf.is_shutdown_in_progress) {
+		lerr = "shutdown is in progress";
+		goto error_something;
+	}
 	if (conf.configured) {
-		if (conf.hot_reload_in_progress)
-			return luaL_error(L,
-				"Reconfiguration is already in progress");
+		if (conf.hot_reload_in_progress) {
+			lerr = "Reconfiguration is already in progress";
+			goto error_something;
+		}
 		if ((lerr = reap_gracefully_terminating_threads()) != NULL)
-			return luaL_error(L, lerr);
+			goto error_something;
 		conf.hot_reload_in_progress = true;
 		is_hot_reload = true;
 	} else
@@ -4072,6 +4082,7 @@ After_applying_new_config:
 	if (!conf.is_on_shutdown_setup)
 		setup_on_shutdown(L, true, false);
 	conf.configured = true;
+	conf.cfg_in_progress = false;
 	return 0;
 
 Apply_new_config_hot_reload:
@@ -4142,6 +4153,7 @@ Apply_new_config:
 	hot_reload_remove_threads(threads);
 
 	conf.hot_reload_in_progress = false;
+	conf.cfg_in_progress = false;
 	return 0;
 
 threads_launch_fail:
@@ -4260,6 +4272,8 @@ error_no_parameters:
 	}
 	assert(lerr != NULL);
 	conf.hot_reload_in_progress = false;
+error_something:
+	conf.cfg_in_progress = false;
 	return luaL_error(L, lerr);
 }
 
