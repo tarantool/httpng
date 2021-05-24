@@ -361,7 +361,6 @@ end
 
 local httpng_lib = require 'httpng'
 local init_func = httpng_lib.cfg
-dofile('examples/load_ssl_source.lua')
 
 local lua_sites = {
     {path = '/hello',       handler = hello_handler},
@@ -385,7 +384,7 @@ init_func({
     use_body_split = true,
     listen = {
         port = 7890,
-        tls = dofile("examples/paste_foo_ssl_pair.lua"),
+        tls = { require 'examples.ssl_pairs'.foo },
     },
     sites = lua_sites,
 })

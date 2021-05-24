@@ -60,7 +60,7 @@ local config = {
     threads = 4,
     listen = {
         port = 8080,
-        tls = dofile("examples/paste_foo_ssl_pair.lua"),
+        tls = { require 'examples.ssl_pairs'.foo },
     },
 }
 

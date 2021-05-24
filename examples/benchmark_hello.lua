@@ -5,7 +5,7 @@ http.cfg{
     listen = {
         {
             port = 8080,
-            tls = dofile("examples/paste_foo_ssl_pair.lua"),
+            tls = { require 'examples.ssl_pairs'.foo },
         },
     },
     threads = 7,

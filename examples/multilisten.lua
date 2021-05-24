@@ -2,6 +2,7 @@
 
 local box = require 'box'
 local http = require 'httpng'
+local ssl_pairs = require 'examples.ssl_pairs'
 box.cfg {log_level = 7}
 
 http.cfg{
@@ -14,7 +15,7 @@ http.cfg{
             -- uses_sni = false (by default)
             addr = '::1',
             port = 8443,
-            tls = dofile("examples/paste_foo_ssl_pair.lua"),
+            tls = { ssl_pairs['foo'] },
         },
 
         -- https://foo.tarantool.io:8443 or https://bar.tarantool.io:8443 (in /etc/hosts uri should ref to 127.0.0.1)
@@ -22,7 +23,7 @@ http.cfg{
         {
             addr = '127.0.0.1',
             port = 8443,
-            tls = dofile("examples/paste_foo_bar_ssl_pair.lua"),
+            tls = { ssl_pairs['foo'], ssl_pairs['bar'] },
             uses_sni = true
         }
     },
