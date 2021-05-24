@@ -3072,6 +3072,7 @@ static void reap_terminating_threads_ungracefully(void)
 		assert(!(conf.reaping_flags & REAPING_GRACEFUL));
 	}
 	const char *const err = reap_gracefully_terminating_threads();
+	(void)err;
 	assert(err == NULL);
 	conf.reaping_flags &= ~REAPING_UNGRACEFUL;
 }
@@ -3578,6 +3579,11 @@ static void configure_and_start_reaper_fiber(void)
 int cfg(lua_State *L)
 {
 	const char *lerr = NULL; /* Error message for caller. */
+	SSL_CTX *ssl_ctx = NULL;
+	unsigned removed_sites = 0;
+	unsigned thr_init_idx = 0;
+	unsigned fiber_idx = 0;
+	unsigned xtm_to_tx_idx = 0;
 	bool is_hot_reload;
 	assert(!conf.cfg_in_progress);
 	conf.cfg_in_progress = true;
@@ -3776,7 +3782,7 @@ Skip_inits_on_hot_reload:
 	}
 	lua_pushnil(L); /* Start of table. */
 	while (lua_next(L, LUA_STACK_IDX_LUA_SITES)) {
-		bool is_adding_site;
+		bool is_adding_site = false;
 		if (!lua_istable(L, -1)) {
 			lerr = "sites is not a table of tables";
 			goto invalid_sites;
@@ -3805,8 +3811,7 @@ Skip_inits_on_hot_reload:
 			for (lua_site_idx = 0;
 			    lua_site_idx < conf.lua_site_count;
 			    ++lua_site_idx) {
-				const lua_site_t *const lua_site =
-					&conf.lua_sites[lua_site_idx];
+				lua_site = &conf.lua_sites[lua_site_idx];
 				if (path_len == lua_site->path_len &&
 				    !memcmp(lua_site->path, path, path_len)) {
 					if (lua_site->generation ==
@@ -3816,7 +3821,6 @@ Skip_inits_on_hot_reload:
 						"Can't add duplicate paths";
 						goto invalid_sites;
 					}
-					is_adding_site = false;
 					goto Skip_creating_sites_structs;
 				}
 			}
@@ -3914,7 +3918,6 @@ Skip_inits_on_hot_reload:
 				register_lua_handler_part_one(lua_site,
 					path, luaL_ref(L, LUA_REGISTRYINDEX));
 			else {
-				lua_site = &conf.lua_sites[lua_site_idx];
 				if (lua_site->generation == generation) {
 					lerr = "duplicated site description";
 					goto invalid_sites;
@@ -4128,8 +4131,6 @@ Skip_min_proto_version:
 	}
 
 Skip_openssl_security_level:
-	;
-	SSL_CTX *ssl_ctx;
 	/* FIXME: Should use customizable file names. */
 	if (USE_HTTPS) {
 		if ((ssl_ctx = setup_ssl("examples/cert.pem",
@@ -4138,8 +4139,7 @@ Skip_openssl_security_level:
 			lerr = "setup_ssl() failed (cert/key files not found?)";
 			goto ssl_fail;
 		}
-	} else
-		ssl_ctx = NULL;
+	}
 
 #if 0
 	/* FIXME: Should make customizable. */
@@ -4180,17 +4180,14 @@ Skip_openssl_security_level:
 		goto fibers_fail_alloc;
 	}
 
-	unsigned xtm_to_tx_idx;
-	for (xtm_to_tx_idx = 0; xtm_to_tx_idx < conf.num_threads;
-	    ++xtm_to_tx_idx)
+	for (; xtm_to_tx_idx < conf.num_threads; ++xtm_to_tx_idx)
 		if ((conf.thread_ctxs[xtm_to_tx_idx].queue_to_tx =
 		    xtm_create(QUEUE_TO_TX_ITEMS)) == NULL) {
 			lerr = "Failed to create xtm queue";
 			goto xtm_to_tx_fail;
 		}
 
-	unsigned fiber_idx;
-	for (fiber_idx = 0; fiber_idx < conf.num_threads; ++fiber_idx) {
+	for (; fiber_idx < conf.num_threads; ++fiber_idx) {
 		char name[32];
 		sprintf(name, "tx_h2o_fiber_%u", fiber_idx);
 		if ((conf.tx_fiber_ptrs[fiber_idx] =
@@ -4222,9 +4219,7 @@ Skip_openssl_security_level:
 		} while ((++path_desc)->path != NULL);
 	}
 
-	unsigned thr_init_idx;
-	for (thr_init_idx = 0; thr_init_idx < conf.num_threads;
-	    ++thr_init_idx)
+	for (; thr_init_idx < conf.num_threads; ++thr_init_idx)
 		if (!init_worker_thread(thr_init_idx)) {
 			lerr = "Failed to init worker threads";
 			goto threads_init_fail;
@@ -4267,7 +4262,6 @@ Apply_new_config_hot_reload:
 
 	hot_reload_add_remove_sites(hot_reload_extra_sites);
 
-	unsigned removed_sites = 0;
 	for (idx = 0; idx < conf.lua_site_count + hot_reload_extra_sites -
 	    removed_sites;) {
 		lua_site_t *const lua_site = &conf.lua_sites[idx];
