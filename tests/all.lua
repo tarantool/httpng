@@ -3,12 +3,27 @@ local http = require 'httpng'
 --local http_client = require 'http.client'
 local fiber = require 'fiber'
 local popen = require 'popen'
+local curl_bin = 'curl'
 
 local stubborn_handler = function(req, io)
 ::again::
     local closed = io:write('foobar')
     if closed then
         -- Connection has already been closed
+        return
+    end
+    goto again
+end
+
+local stubborn2_handler = function(req, io)
+    local start = fiber.clock()
+::again::
+    local closed = io:write('foobar')
+    if closed then
+        -- Connection has already been closed
+        return
+    end
+    if (fiber.clock() - start >= 2) then
         return
     end
     goto again
@@ -407,8 +422,8 @@ g_hot_reload.test_extra_sites = function()
         threads = 4,
     }
     http.cfg(cfg)
-    local cmd_main = 'curl -k -s https://localhost:8080'
-    local cmd_alt = 'curl -k -s https://localhost:8080/alt'
+    local cmd_main = curl_bin..' -k -s https://localhost:8080'
+    local cmd_alt = curl_bin..' -k -s https://localhost:8080/alt'
 
     check_site_content(cmd_main, 'not found')
     check_site_content(cmd_alt, 'foo')
@@ -426,8 +441,8 @@ g_hot_reload.test_add_primary_handler = function()
         threads = 4,
     }
     http.cfg(cfg)
-    local cmd_main = 'curl -k https://localhost:8080'
-    local cmd_alt = 'curl -k https://localhost:8080/alt'
+    local cmd_main = curl_bin..' -k -s https://localhost:8080'
+    local cmd_alt = curl_bin..' -k -s https://localhost:8080/alt'
 
     check_site_content(cmd_main, 'not found')
     check_site_content(cmd_alt, 'foo')
@@ -445,8 +460,8 @@ g_hot_reload.test_add_intermediate_site = function()
         threads = 4,
     }
     http.cfg(cfg)
-    local cmd_main = 'curl -k https://localhost:8080'
-    local cmd_alt = 'curl -k https://localhost:8080/alt'
+    local cmd_main = curl_bin..' -k -s https://localhost:8080'
+    local cmd_alt = curl_bin..' -k -s https://localhost:8080/alt'
 
     check_site_content(cmd_main, 'foo')
     check_site_content(cmd_alt, 'foo')
@@ -465,8 +480,8 @@ g_hot_reload.test_add_intermediate_site_alt = function()
         threads = 4,
     }
     http.cfg(cfg)
-    local cmd_main = 'curl -k https://localhost:8080'
-    local cmd_alt = 'curl -k https://localhost:8080/alt'
+    local cmd_main = curl_bin..' -k -s https://localhost:8080'
+    local cmd_alt = curl_bin..' -k -s https://localhost:8080/alt'
 
     check_site_content(cmd_main, 'foo')
     check_site_content(cmd_alt, 'foo')
@@ -484,8 +499,8 @@ g_hot_reload.test_add_duplicate_paths = function()
         threads = 4,
     }
     http.cfg(cfg)
-    local cmd_main = 'curl -k https://localhost:8080/foo'
-    local cmd_alt = 'curl -k https://localhost:8080/bar'
+    local cmd_main = curl_bin..' -k -s https://localhost:8080/foo'
+    local cmd_alt = curl_bin..' -k -s https://localhost:8080/bar'
 
     check_site_content(cmd_main, 'foo')
     check_site_content(cmd_alt, 'not found')
@@ -505,8 +520,8 @@ g_hot_reload.test_add_duplicate_paths_alt = function()
         threads = 4,
     }
     http.cfg(cfg)
-    local cmd_main = 'curl -k https://localhost:8080'
-    local cmd_alt = 'curl -k https://localhost:8080/alt'
+    local cmd_main = curl_bin..' -k -s https://localhost:8080'
+    local cmd_alt = curl_bin..' -k -s https://localhost:8080/alt'
 
     check_site_content(cmd_main, 'foo')
     check_site_content(cmd_alt, 'foo')
@@ -529,8 +544,8 @@ g_hot_reload.test_remove_path = function()
         threads = 4,
     }
     http.cfg(cfg)
-    local cmd_main = 'curl -k https://localhost:8080/foo'
-    local cmd_alt = 'curl -k https://localhost:8080/bar'
+    local cmd_main = curl_bin..' -k -s https://localhost:8080/foo'
+    local cmd_alt = curl_bin..' -k -s https://localhost:8080/bar'
 
     check_site_content(cmd_main, 'foo')
     check_site_content(cmd_alt, 'bar')
@@ -550,7 +565,7 @@ g_hot_reload.test_remove_all_paths = function()
         threads = 4,
     }
     http.cfg(cfg)
-    local cmd_main = 'curl -k https://localhost:8080/'
+    local cmd_main = curl_bin..' -k -s https://localhost:8080/'
 
     check_site_content(cmd_main, 'foo')
 
@@ -566,7 +581,7 @@ g_hot_reload.test_remove_all_paths_alt = function()
         threads = 4,
     }
     http.cfg(cfg)
-    local cmd_main = 'curl -k https://localhost:8080/'
+    local cmd_main = curl_bin..' -k -s https://localhost:8080/'
 
     check_site_content(cmd_main, 'foo')
 
@@ -650,16 +665,17 @@ end
 
 local curls
 local g_hot_reload_with_curls = t.group 'hot_reload_with_curls'
-g_hot_reload_with_curls.after_each(function()
+function shutdown_and_kill_curls()
     pcall(http.shutdown)
     if (curls == nil) then
         return
     end
     local k, curl
     for k, curl in pairs(curls) do
-        curl:kill()
+        curl:close()
     end
-end)
+end
+g_hot_reload_with_curls.after_each(shutdown_and_kill_curls)
 
 g_hot_reload_with_curls.test_FLAKY_decrease_stubborn_threads = function()
     local cfg = {
@@ -674,7 +690,8 @@ g_hot_reload_with_curls.test_FLAKY_decrease_stubborn_threads = function()
     local i
     for i = 1, curl_count do
         curls[#curls + 1] =
-            popen.shell('curl -k -s -o /dev/null https://localhost:8080', "r")
+            popen.shell(curl_bin..' -k -s -o /dev/null https://localhost:8080',
+                "r")
     end
     fiber.sleep(1)
 
@@ -699,8 +716,87 @@ g_hot_reload_with_curls.test_FLAKY_decrease_stubborn_threads = function()
 end
 
 g_hot_reload_with_curls.test_FLAKY_decrease_stubborn_threads_combo2 = function()
-	g_hot_reload.test_extra_sites()
-	g_hot_reload_with_curls.test_FLAKY_decrease_stubborn_threads()
+    g_hot_reload.test_extra_sites()
+    g_hot_reload_with_curls.test_FLAKY_decrease_stubborn_threads()
+end
+
+g_hot_reload_with_curls.test_FLAKY_decrease_stubborn_threads_with_timeout =
+        function()
+    local cfg = {
+        handler = stubborn_handler,
+        threads = 2,
+        thread_termination_timeout = 3,
+    }
+
+    http.cfg(cfg)
+
+    curls = {}
+    local curl_count = 16
+    local i
+    for i = 1, curl_count do
+        curls[#curls + 1] =
+            popen.shell(curl_bin..' -k -s -o /dev/null https://localhost:8080',
+                "r")
+    end
+    fiber.sleep(1)
+
+    cfg.threads = 1
+    local start = fiber.clock()
+    http.cfg(cfg)
+
+    cfg.threads = 2
+::retry::
+    local ok, err = pcall(http.cfg, cfg)
+    if (ok) then
+        assert(fiber.clock() - start >= cfg.thread_termination_timeout,
+            'threads have terminated too early');
+        return
+    end
+    assert(err == 'Unable to reconfigure until threads will shut down')
+    assert(fiber.clock() - start < cfg.thread_termination_timeout + 3)
+    fiber.sleep(0.1)
+    goto retry
+end
+
+g_hot_reload_with_curls.test_FLAKY_decrease_not_so_stubborn_thr_with_timeout =
+        function()
+    local cfg = {
+        handler = stubborn2_handler,
+        threads = 2,
+        thread_termination_timeout = 3,
+    }
+
+    http.cfg(cfg)
+
+    curls = {}
+    local curl_count = 16
+    local i
+    for i = 1, curl_count do
+        curls[#curls + 1] =
+            popen.shell(curl_bin..' -k -s -o /dev/null https://localhost:8080',
+                "r")
+    end
+    assert(cfg.thread_termination_timeout > 0.5)
+    fiber.sleep(0.5)
+
+    cfg.threads = 1
+    local start = fiber.clock()
+    http.cfg(cfg)
+
+    cfg.threads = 2
+::retry::
+    local ok, err = pcall(http.cfg, cfg)
+    if (ok) then
+        assert(fiber.clock() - start >= 0.5,
+            'threads have terminated too early');
+        assert(fiber.clock() - start < cfg.thread_termination_timeout,
+            'threads have terminated too late');
+        return
+    end
+    assert(err == 'Unable to reconfigure until threads will shut down')
+    assert(fiber.clock() - start < cfg.thread_termination_timeout + 3)
+    fiber.sleep(0.1)
+    goto retry
 end
 
 local alt_foo_handler = function(req, io)
@@ -720,8 +816,8 @@ g_hot_reload.test_replace_handlers = function()
 
     http.cfg(cfg)
 
-    local cmd_main = 'curl -k -s https://localhost:8080'
-    local cmd_alt = 'curl -k -s https://localhost:8080/alt'
+    local cmd_main = curl_bin..' -k -s https://localhost:8080'
+    local cmd_alt = curl_bin..' -k -s https://localhost:8080/alt'
     local check = check_site_content
 
     check(cmd_main, 'foo')

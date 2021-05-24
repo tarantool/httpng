@@ -86,6 +86,7 @@
 #define DEFAULT_max_conn_per_thread 65536
 #define DEFAULT_shuttle_size 65536
 #define DEFAULT_max_body_len (1024 * 1024)
+#define DEFAULT_thread_termination_timeout 60
 
 /* Limits are quite relaxed for now. */
 #define MIN_threads 1
@@ -110,6 +111,9 @@
 #define TLS1_3_STR "tls1.3"
 
 #define ADD_NEW_SITE_GENERATION_SHIFT 2
+
+#define REAPING_GRACEFUL (1 << 0)
+#define REAPING_UNGRACEFUL (1 << 1)
 
 #define my_container_of(ptr, type, member) ({ \
 	const typeof( ((type *)0)->member  ) *__mptr = \
@@ -344,8 +348,13 @@ static struct {
 	listener_cfg_t *listener_cfgs;
 	thread_ctx_t *thread_ctxs;
 	struct fiber **tx_fiber_ptrs;
+	struct fiber *reaper_fiber;
+	struct fiber *fiber_to_wake_by_reaper_fiber;
+	struct fiber *fiber_to_wake_on_reaping_done;
 	SSL_CTX *ssl_ctx;
 	lua_site_t *lua_sites;
+	double thread_termination_timeout;
+	double thr_timeout_start;
 	unsigned lua_site_count;
 	unsigned shuttle_size;
 	unsigned recv_data_size;
@@ -364,6 +373,7 @@ static struct {
 	int tfo_queues;
 	int on_shutdown_ref;
 	int idx_of_root_site; /* ...in lua_sites; < 0 means none. */
+	unsigned char reaping_flags;
 #ifdef SPLIT_LARGE_BODY
 	bool use_body_split;
 #endif /* SPLIT_LARGE_BODY */
@@ -372,6 +382,9 @@ static struct {
 	bool hot_reload_in_progress;
 	bool is_on_shutdown_setup;
 	bool is_shutdown_in_progress;
+	bool reaper_should_exit;
+	bool reaper_exited;
+	bool is_thr_term_timeout_active;
 } conf = {
 	.tfo_queues = H2O_DEFAULT_LENGTH_TCP_FASTOPEN_QUEUE,
 	.on_shutdown_ref = LUA_REFNIL,
@@ -379,6 +392,9 @@ static struct {
 };
 
 __thread thread_ctx_t *curr_thread_ctx;
+
+static const char msg_cant_reap[] =
+	"Unable to reconfigure until threads will shut down";
 
 /* Must be called in HTTP server thread.
  * Should only be called if disposed==true
@@ -470,6 +486,13 @@ static inline void stubborn_dispatch(struct xtm_queue *queue,
 static inline lua_Integer my_lua_tointegerx(lua_State *L, int idx, int *ok)
 {
 	return (*ok = lua_isnumber(L, idx)) ? lua_tointeger(L, idx) : 0;
+}
+
+/* FIXME: Use lua_tonumberx() when we would no longer care about
+ * older Tarantool versions. */
+static inline lua_Number my_lua_tonumberx(lua_State *L, int idx, int *ok)
+{
+	return (*ok = lua_isnumber(L, idx)) ? lua_tonumber(L, idx) : 0;
 }
 
 static inline shuttle_t *get_shuttle_from_generator_lua(
@@ -2983,18 +3006,30 @@ static void reap_finished_thread(thread_ctx_t *thread_ctx)
  * Returns error message in case of error. */
 static const char *reap_gracefully_terminating_threads(void)
 {
+	const char *result;
+	assert(!(conf.reaping_flags & REAPING_GRACEFUL));
+	conf.reaping_flags |= REAPING_GRACEFUL;
 	unsigned thr_idx;
 	for (thr_idx = conf.num_threads - 1;
 	    thr_idx >= conf.num_desired_threads; --thr_idx) {
 		thread_ctx_t *const thread_ctx = &conf.thread_ctxs[thr_idx];
 		if (!thread_ctx->thread_finished) {
 			conf.num_threads = thr_idx + 1;
-		return "Unable to reconfigure until threads will shut down";
+			result = msg_cant_reap;
+			goto Exit;
 		}
 		reap_finished_thread(thread_ctx);
 	}
 	conf.num_threads = conf.num_desired_threads;
-	return NULL;
+	result = NULL;
+Exit:
+	conf.reaping_flags &= ~REAPING_GRACEFUL;
+	if (conf.fiber_to_wake_on_reaping_done != NULL) {
+		struct fiber *const fiber = conf.fiber_to_wake_on_reaping_done;
+		conf.fiber_to_wake_on_reaping_done = NULL;
+		fiber_wakeup(fiber);
+	}
+	return result;
 }
 
 /* Launched in HTTP server thread.
@@ -3007,9 +3042,12 @@ static void become_ungraceful(thread_ctx_t *thread_ctx)
 /* Launched in TX thread. */
 static void reap_terminating_threads_ungracefully(void)
 {
-	if (reap_gracefully_terminating_threads() == NULL)
+	assert(!(conf.reaping_flags & REAPING_UNGRACEFUL));
+	if (!(conf.reaping_flags & REAPING_GRACEFUL) &&
+	    reap_gracefully_terminating_threads() == NULL)
 		return;
 
+	conf.reaping_flags |= REAPING_UNGRACEFUL;
 	unsigned thr_idx;
 	for (thr_idx = conf.num_threads - 1;
 	    thr_idx >= conf.num_desired_threads; --thr_idx) {
@@ -3027,8 +3065,37 @@ static void reap_terminating_threads_ungracefully(void)
 			fiber_sleep(0.001);
 	}
 
+	if (conf.reaping_flags & REAPING_GRACEFUL) {
+		assert(conf.fiber_to_wake_on_reaping_done == NULL);
+		conf.fiber_to_wake_on_reaping_done = fiber_self();
+		fiber_yield();
+		assert(!(conf.reaping_flags & REAPING_GRACEFUL));
+	}
 	const char *const err = reap_gracefully_terminating_threads();
 	assert(err == NULL);
+	conf.reaping_flags &= ~REAPING_UNGRACEFUL;
+}
+
+/* Launched in TX thread. */
+static void terminate_reaper_fiber(void)
+{
+	if (conf.reaper_fiber == NULL)
+		return;
+	if (conf.reaper_exited) {
+		fiber_join(conf.reaper_fiber);
+		conf.reaper_fiber = NULL;
+		return;
+	}
+	assert(conf.fiber_to_wake_by_reaper_fiber == NULL);
+	conf.fiber_to_wake_by_reaper_fiber = fiber_self();
+	conf.reaper_should_exit = true;
+	fiber_wakeup(conf.reaper_fiber);
+	if (!conf.reaper_exited) {
+		fiber_yield();
+		assert(conf.reaper_exited);
+	}
+	fiber_join(conf.reaper_fiber);
+	conf.reaper_fiber = NULL;
 }
 
 /* Launched in TX thread. */
@@ -3047,6 +3114,7 @@ static int on_shutdown_internal(lua_State *L, bool called_from_callback)
 		return 0;
 	}
 	conf.is_shutdown_in_progress = true;
+	terminate_reaper_fiber();
 	reap_terminating_threads_ungracefully();
 	if (conf.is_on_shutdown_setup)
 		setup_on_shutdown(L, false, called_from_callback);
@@ -3412,6 +3480,62 @@ add_thr_xtm_to_tx_fail:
 }
 
 /* Launched in TX thread. */
+static int
+reaper_fiber_func(va_list ap)
+{
+	(void)ap;
+
+	while (1) {
+		const double now = fiber_clock();
+		if (conf.reaping_flags == 0 && !conf.cfg_in_progress &&
+		    !conf.is_shutdown_in_progress) {
+			if (reap_gracefully_terminating_threads() == NULL)
+				conf.is_thr_term_timeout_active = false;
+			else if (conf.is_thr_term_timeout_active &&
+			    now - conf.thr_timeout_start >=
+				    conf.thread_termination_timeout &&
+			    conf.reaping_flags == 0 &&
+			    !conf.cfg_in_progress &&
+			    !conf.is_shutdown_in_progress) {
+				conf.is_thr_term_timeout_active = false;
+				reap_terminating_threads_ungracefully();
+			}
+		}
+
+		if (conf.fiber_to_wake_by_reaper_fiber != NULL) {
+			struct fiber *const fiber =
+				conf.fiber_to_wake_by_reaper_fiber;
+			conf.fiber_to_wake_by_reaper_fiber = NULL;
+			fiber_wakeup(fiber);
+		}
+		if (conf.reaper_should_exit) {
+			conf.reaper_exited = true;
+			return 0;
+		}
+
+		if (conf.is_thr_term_timeout_active) {
+			const double remain = conf.thr_timeout_start +
+				conf.thread_termination_timeout - now;
+			if (remain >= 0)
+				fiber_sleep(remain);
+			else {
+				/* Should not really happen, but... */
+				conf.thr_timeout_start = now;
+				fiber_sleep(conf.thread_termination_timeout);
+			}
+		} else
+			fiber_yield();
+	}
+}
+
+/* Launched in TX thread. */
+static void deactivate_reaper_fiber(void)
+{
+	conf.is_thr_term_timeout_active = false;
+	/* There is no point in awaking it. */
+}
+
+/* Launched in TX thread. */
 static void hot_reload_remove_threads(unsigned threads)
 {
 	if (threads >= conf.num_threads)
@@ -3424,6 +3548,30 @@ static void hot_reload_remove_threads(unsigned threads)
 		thread_ctx_t *const thread_ctx = &conf.thread_ctxs[thr_idx];
 		tell_thread_to_terminate_gracefully(thread_ctx);
 	}
+
+	if (conf.thread_termination_timeout <= 0) {
+		deactivate_reaper_fiber();
+		return;
+	}
+
+	const double now = fiber_clock();
+	conf.thr_timeout_start = now;
+	conf.is_thr_term_timeout_active = true;
+	assert(conf.reaper_fiber != NULL);
+	fiber_wakeup(conf.reaper_fiber);
+}
+
+/* Launched in TX thread. */
+static void configure_and_start_reaper_fiber(void)
+{
+	fiber_set_joinable(conf.reaper_fiber, true);
+	conf.reaper_exited = false;
+	conf.reaper_should_exit = false;
+	conf.fiber_to_wake_by_reaper_fiber = NULL;
+	conf.fiber_to_wake_on_reaping_done = NULL;
+	conf.is_thr_term_timeout_active = false;
+	conf.reaping_flags = 0;
+	fiber_start(conf.reaper_fiber);
 }
 
 /* Lua parameters: lua_sites, function_to_call, function_param */
@@ -3442,6 +3590,8 @@ int cfg(lua_State *L)
 			lerr = "Reconfiguration is already in progress";
 			goto error_something;
 		}
+		while (conf.reaping_flags != 0)
+			fiber_sleep(0.001);
 		if ((lerr = reap_gracefully_terminating_threads()) != NULL)
 			goto error_something;
 		conf.hot_reload_in_progress = true;
@@ -3517,6 +3667,20 @@ Skip_c_sites:
 	PROCESS_OPTIONAL_PARAM(max_body_len);
 
 #undef PROCESS_OPTIONAL_PARAM
+
+	lua_getfield(L, LUA_STACK_IDX_TABLE, "thread_termination_timeout");
+	double thread_termination_timeout;
+	if (lua_isnil(L, -1))
+		thread_termination_timeout = DEFAULT_thread_termination_timeout;
+	else {
+		int is_number;
+		thread_termination_timeout =
+			my_lua_tonumberx(L, -1, &is_number);
+		if (!is_number) {
+		lerr = "parameter thread_termination_timeout is not a number";
+			goto error_parameter_not_a_number;
+		}
+	}
 
 #ifdef SPLIT_LARGE_BODY
 	lua_getfield(L, LUA_STACK_IDX_TABLE, "use_body_split");
@@ -4039,6 +4203,13 @@ Skip_openssl_security_level:
 		fiber_start(conf.tx_fiber_ptrs[fiber_idx], fiber_idx);
 	}
 
+	if ((conf.reaper_fiber =
+	    fiber_new("reaper fiber", reaper_fiber_func)) == NULL) {
+		lerr = "Failed to create reaper fiber";
+		goto reaper_fiber_fail;
+	}
+	configure_and_start_reaper_fiber();
+
 	if (path_descs != NULL) {
 		const path_desc_t *path_desc = path_descs;
 		do {
@@ -4145,6 +4316,8 @@ Apply_new_config:
 		conf.thread_ctxs[thread_idx].globalconf
 			.max_request_entity_size = max_body_len;
 
+	conf.thread_termination_timeout = thread_termination_timeout;
+
 	if (!is_hot_reload)
 		goto After_applying_new_config;
 
@@ -4168,6 +4341,8 @@ threads_init_fail:
 	for (idx = 0; idx < thr_init_idx; ++idx)
 		deinit_worker_thread(idx);
 userdata_init_fail:
+	terminate_reaper_fiber();
+reaper_fiber_fail:
 fibers_fail:
 	for (idx = 0; idx < fiber_idx; ++idx) {
 		conf.thread_ctxs[idx].tx_fiber_should_exit = true;
@@ -4294,6 +4469,15 @@ force_decrease_threads(lua_State *L)
 			"Not configured, nothing to terminate");
 	}
 
+	deactivate_reaper_fiber();
+	while (conf.reaping_flags & REAPING_UNGRACEFUL)
+		/* This can be done more efficiently
+		 * but would require more logic. */
+		fiber_sleep(0.001);
+
+	if (conf.is_shutdown_in_progress)
+		return luaL_error(L, "Shutdown is in progress");
+	deactivate_reaper_fiber();
 	reap_terminating_threads_ungracefully();
 	return 0;
 }
