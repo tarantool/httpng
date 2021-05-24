@@ -302,12 +302,24 @@ local write_header_handler = function(req, io)
     io:close()
 end
 
+
+local ssl_pairs = require 'tests.ssl_pairs'
+local listen_with_single_ssl_pair = {
+    port = 8080,
+    tls = {
+        ssl_pairs['foo'],
+    }
+}
+
 local function cfg_bad_handlers()
     write_handler_launched = false
-    http.cfg({ sites = {
-        { path = '/write', handler = write_handler },
-        { path = '/write_header', handler = write_header_handler },
-    }})
+    http.cfg({
+        sites = {
+            { path = '/write', handler = write_handler },
+            { path = '/write_header', handler = write_header_handler },
+        },
+        listen = listen_with_single_ssl_pair,
+    })
 end
 
 g_bad_handlers.test_write_params = function()
@@ -420,6 +432,7 @@ g_hot_reload.test_extra_sites = function()
     local cfg = {
         sites = { { path = '/alt', handler = foo_handler } },
         threads = 4,
+        listen = listen_with_single_ssl_pair,
     }
     http.cfg(cfg)
     local cmd_main = curl_bin..' -k -s https://localhost:8080'
@@ -439,6 +452,7 @@ g_hot_reload.test_add_primary_handler = function()
     local cfg = {
         sites = { { path = '/alt', handler = foo_handler } },
         threads = 4,
+        listen = listen_with_single_ssl_pair,
     }
     http.cfg(cfg)
     local cmd_main = curl_bin..' -k -s https://localhost:8080'
@@ -458,6 +472,7 @@ g_hot_reload.test_add_intermediate_site = function()
     local cfg = {
         handler = foo_handler,
         threads = 4,
+        listen = listen_with_single_ssl_pair,
     }
     http.cfg(cfg)
     local cmd_main = curl_bin..' -k -s https://localhost:8080'
@@ -478,6 +493,7 @@ g_hot_reload.test_add_intermediate_site_alt = function()
     local cfg = {
         sites = { { path = '/', handler = foo_handler } },
         threads = 4,
+        listen = listen_with_single_ssl_pair,
     }
     http.cfg(cfg)
     local cmd_main = curl_bin..' -k -s https://localhost:8080'
@@ -497,6 +513,7 @@ g_hot_reload.test_add_duplicate_paths = function()
     local cfg = {
         sites = { { path = '/foo', handler = foo_handler } },
         threads = 4,
+        listen = listen_with_single_ssl_pair,
     }
     http.cfg(cfg)
     local cmd_main = curl_bin..' -k -s https://localhost:8080/foo'
@@ -518,6 +535,7 @@ g_hot_reload.test_add_duplicate_paths_alt = function()
     local cfg = {
         sites = { { path = '/', handler = foo_handler } },
         threads = 4,
+        listen = listen_with_single_ssl_pair,
     }
     http.cfg(cfg)
     local cmd_main = curl_bin..' -k -s https://localhost:8080'
@@ -542,6 +560,7 @@ g_hot_reload.test_remove_path = function()
             { path = '/bar', handler = bar_handler },
         },
         threads = 4,
+        listen = listen_with_single_ssl_pair,
     }
     http.cfg(cfg)
     local cmd_main = curl_bin..' -k -s https://localhost:8080/foo'
@@ -563,6 +582,7 @@ g_hot_reload.test_remove_all_paths = function()
             { path = '/', handler = foo_handler },
         },
         threads = 4,
+        listen = listen_with_single_ssl_pair,
     }
     http.cfg(cfg)
     local cmd_main = curl_bin..' -k -s https://localhost:8080/'
@@ -579,6 +599,7 @@ g_hot_reload.test_remove_all_paths_alt = function()
     local cfg = {
         handler = foo_handler,
         threads = 4,
+        listen = listen_with_single_ssl_pair,
     }
     http.cfg(cfg)
     local cmd_main = curl_bin..' -k -s https://localhost:8080/'
@@ -681,6 +702,7 @@ g_hot_reload_with_curls.test_FLAKY_decrease_stubborn_threads = function()
     local cfg = {
         handler = stubborn_handler,
         threads = 2,
+        listen = listen_with_single_ssl_pair,
     }
 
     http.cfg(cfg)
@@ -812,6 +834,7 @@ g_hot_reload.test_replace_handlers = function()
         handler = foo_handler,
         sites = { { path = '/alt', handler = alt_foo_handler } },
         threads = 4,
+        listen = listen_with_single_ssl_pair,
     }
 
     http.cfg(cfg)
