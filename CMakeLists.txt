@@ -89,10 +89,17 @@ if (HTTPNG_USE_LIBUV)
     add_definitions(-DUSE_LIBUV)
 endif (HTTPNG_USE_LIBUV)
 
-set(HEADERS include/tarantool-httpng/httpng.h)
+set(HEADERS httpng/openssl_utils.h)
 
 #set_source_files_properties(httpng/httpng.c PROPERTIES LANGUAGE CXX)
-build_module(httpng httpng/httpng.c ${HEADERS})
+set (HTTPNG_C_SRC
+                  httpng/multilisten.c
+                  httpng/openssl_utils.c
+)
+
+set(HTTPNG_SRC ${HTTPNG_C_SRC} ${HEADERS})
+
+build_module(httpng_c "${HTTPNG_SRC}")
 
 set(LIBS wslay xtm_api_static)
 
@@ -113,7 +120,7 @@ if (ENABLE_FD_LEAK_DETECTOR)
     set(LIBS ${LIBS} fd-leak-detector)
 endif (ENABLE_FD_LEAK_DETECTOR)
 
-target_link_libraries(httpng ${LIBS})
+target_link_libraries(httpng_c ${LIBS})
 
 if (NOT(ENABLE_ASAN))
     # Just test
@@ -122,4 +129,5 @@ if (NOT(ENABLE_ASAN))
 endif (NOT(ENABLE_ASAN))
 
 # Install library
-install(TARGETS httpng LIBRARY DESTINATION ${TARANTOOL_INSTALL_LIBDIR})
+install(TARGETS httpng_c LIBRARY DESTINATION ${TARANTOOL_INSTALL_LIBDIR})
+install(FILES httpng.lua DESTINATION ${TARANTOOL_INSTALL_LUADIR})

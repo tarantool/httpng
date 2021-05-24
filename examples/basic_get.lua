@@ -11,6 +11,7 @@ http.cfg{
     listen = {
         { port = 8080 },
     },
+
     threads = 4,
     handler = function(req, io)
         print(req.headers['content-type'])

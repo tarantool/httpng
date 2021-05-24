@@ -374,6 +374,10 @@ local lua_sites = {
     {path = '/put',         handler = put_handler},
 }
 
+local TESTDIR = fio.dirname(fio.abspath(arg[0]))
+local foo_cert_path = fio.pathjoin(TESTDIR, '../tests/foo.tarantool.io_cert.pem')
+local foo_key_path = fio.pathjoin(TESTDIR, '../tests/foo.tarantool.io_key.pem')
+
 print '\n\n\nFilling in test spaces completed, launching HTTP server...\n\n'
 ::restart::
 init_func({
@@ -383,7 +387,10 @@ init_func({
     max_body_len = 16 * 1024 * 1024,
     use_body_split = true,
     listen = {
-        { port = 7890 },
+        { port = 7890, tls = {
+            { certificate_file = foo_cert_path, certificate_key_file = foo_key_path }
+          }
+        },
     },
     sites = lua_sites,
 })

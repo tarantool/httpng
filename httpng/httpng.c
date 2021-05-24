@@ -4,6 +4,7 @@
 #include <lauxlib.h>
 #include <module.h>
 #include <semaphore.h>
+#include <string.h>
 
 #include <xtm/xtm_api.h>
 
@@ -17,6 +18,8 @@
 #include <h2o/websocket.h>
 #include "../third_party/h2o/deps/cloexec/cloexec.h"
 #include "httpng_sem.h"
+#include <openssl/err.h>
+#include "openssl_utils.h"
 
 #ifdef USE_LIBUV
 #include <uv.h>
@@ -100,7 +103,6 @@
 #define MAX_shuttle_size (16 * 1024 * 1024)
 #define MAX_max_body_len (64ULL * 1024 * 1024 * 1024)
 
-#define DEFAULT_LISTEN_PORT 8080
 
 /* N.b.: for SSL3 to work you should probably use custom OpenSSL build. */
 #define SSL3_STR "ssl3"
@@ -119,6 +121,9 @@
 	const typeof( ((type *)0)->member  ) *__mptr = \
 		(typeof( &((type *)0)->member  ))(ptr); \
 	(type *)( (char *)__mptr - offsetof(type,member)  );})
+
+#define DEFAULT_MIN_TLS_PROTO_VERSION TLS1_2_VERSION
+#define DEFAULT_OPENSSL_SECURITY_LEVEL 1
 
 struct listener_ctx;
 
@@ -224,8 +229,22 @@ typedef struct listener_ctx {
 
 typedef struct {
 	int fd;
+	SSL_CTX *ssl_ctx;
 	bool is_opened;
 } listener_cfg_t;
+
+typedef struct st_sni_map {
+	SSL_CTX **ssl_ctxs; /* Set of all ctxs for listener */
+	size_t ssl_ctxs_capacity;
+	size_t ssl_ctxs_size;
+
+	struct {
+		const char  *hostname;
+		SSL_CTX     *ssl_ctx;
+	} *sni_fields;
+	size_t sni_fields_size;
+	size_t sni_fields_capacity;
+} sni_map_t;
 
 typedef struct waiter {
 	struct waiter *next;
@@ -351,11 +370,11 @@ static struct {
 	struct fiber *reaper_fiber;
 	struct fiber *fiber_to_wake_by_reaper_fiber;
 	struct fiber *fiber_to_wake_on_reaping_done;
-	SSL_CTX *ssl_ctx;
 	lua_site_t *lua_sites;
 	double thread_termination_timeout;
 	double thr_timeout_start;
 	unsigned lua_site_count;
+	sni_map_t **sni_maps;
 	unsigned shuttle_size;
 	unsigned recv_data_size;
 	unsigned num_listeners;
@@ -370,6 +389,8 @@ static struct {
 	unsigned max_recv_bytes_lua_websocket;
 	unsigned generation;
 	volatile unsigned add_new_sites_counter;
+	uint64_t openssl_security_level;
+	long     min_tls_proto_version;
 	int tfo_queues;
 	int on_shutdown_ref;
 	int idx_of_root_site; /* ...in lua_sites; < 0 means none. */
@@ -389,6 +410,8 @@ static struct {
 	.tfo_queues = H2O_DEFAULT_LENGTH_TCP_FASTOPEN_QUEUE,
 	.on_shutdown_ref = LUA_REFNIL,
 	.idx_of_root_site = -1,
+	.min_tls_proto_version = DEFAULT_MIN_TLS_PROTO_VERSION,
+	.openssl_security_level = DEFAULT_OPENSSL_SECURITY_LEVEL
 };
 
 __thread thread_ctx_t *curr_thread_ctx;
@@ -2204,132 +2227,143 @@ static inline void set_cloexec(int fd)
 	(void)result; /* To build w/disabled assert(). */
 }
 
-/* Returns file descriptor or -1 on error. */
-static int open_listener_ipv4(const char *addr_str, uint16_t port)
+/* Launched in TX thread. */
+static void register_listener_cfgs_socket(int fd, SSL_CTX *ssl_ctx, unsigned listener_idx)
 {
-	struct sockaddr_in addr;
-	int fd;
-
-	memset(&addr, 0, sizeof(addr));
-	addr.sin_family = AF_INET;
-	if (!inet_aton(addr_str, &addr.sin_addr)) {
-		return -1;
-	}
-	addr.sin_port = htons(port);
-
-	int flags = SOCK_STREAM;
-#ifdef SOCK_CLOEXEC
-	flags |= SOCK_CLOEXEC;
-#endif /* SOCK_CLOEXEC */
-	if ((fd = socket(AF_INET, flags, 0)) == -1) {
-		return -1;
-	}
-#ifndef SOCK_CLOEXEC
-	if (fcntl(fd, F_SETFD, FD_CLOEXEC) < 0) {
-		close(fd);
-		return -1;
-	}
-#endif /* SOCK_CLOEXEC */
-
-	int reuseaddr_flag = 1;
-	if (setsockopt(fd, SOL_SOCKET, SO_REUSEADDR, &reuseaddr_flag,
-	    sizeof(reuseaddr_flag)) != 0 ||
-            bind(fd, (struct sockaddr *)&addr, sizeof(addr)) != 0 ||
-	    listen(fd, SOMAXCONN) != 0) {
-		close(fd);
-		/* TODO: Log error. */
-		return -1;
-	}
-
-#ifdef TCP_DEFER_ACCEPT
-	{
-		/* We are only interested in connections
-		 * when actual data is received. */
-		int flag = 1;
-		if (setsockopt(fd, IPPROTO_TCP, TCP_DEFER_ACCEPT, &flag,
-		    sizeof(flag)) != 0) {
-			close(fd);
-			/* TODO: Log error. */
-			return -1;
-		}
-	}
-#endif /* TCP_DEFER_ACCEPT */
-
-	if (conf.tfo_queues > 0) {
-		/* TCP extension to do not wait for SYN/ACK for "known"
-		 * clients. */
-#ifdef TCP_FASTOPEN
-		int tfo_queues;
-#ifdef __APPLE__
-		/* In OS X, the option value for TCP_FASTOPEN must be 1
-		 * if is's enabled. */
-		tfo_queues = 1;
-#else
-		tfo_queues = conf.tfo_queues;
-#endif /* __APPLE__ */
-		if (setsockopt(fd, IPPROTO_TCP, TCP_FASTOPEN,
-		    (const void *)&tfo_queues, sizeof(tfo_queues)) != 0) {
-			/* TODO: Log warning. */
-		}
-#else
-		assert(!".tfo_queues not zero on platform w/o TCP_FASTOPEN");
-#endif /* TCP_FASTOPEN */
-	}
-
-	return fd;
+	assert(listener_idx < conf.num_listeners);
+	listener_cfg_t * const listener_cfg = 
+			&conf.listener_cfgs[listener_idx];
+	assert(!listener_cfg->is_opened);
+	listener_cfg->fd = fd;
+	listener_cfg->ssl_ctx = ssl_ctx;
+	listener_cfg->is_opened = true;
 }
 
-static SSL_CTX *setup_ssl(const char *cert_file, const char *key_file,
-	int level, long min_proto_version)
+/* Launched in TX thread. */
+static void close_listener_cfgs_sockets(void)
 {
-#ifndef OPENSSL_VERSION_NUMBER
-#error "OPENSSL_VERSION_NUMBER is not defined"
-#endif /* OPENSSL_VERSION_NUMBER */
-#if OPENSSL_VERSION_NUMBER < 0x1010000fL
-#error "OpenSSL 1.1.* is required"
-#endif /* OPENSSL_VERSION_NUMBER < 0x1010000fL */
-	if (!SSL_load_error_strings())
-		return NULL;
-	SSL_library_init(); /* Always succeeds */
-	OpenSSL_add_all_algorithms();
-
-	SSL_CTX *ssl_ctx = SSL_CTX_new(SSLv23_server_method());
-	if (ssl_ctx == NULL)
-		return NULL;
-
-	SSL_CTX_set_min_proto_version(ssl_ctx, min_proto_version);
-
-	SSL_CTX_set_security_level(ssl_ctx, level);
-
-	if (SSL_CTX_use_certificate_file(ssl_ctx, cert_file,
-	    SSL_FILETYPE_PEM) != 1) {
-		SSL_CTX_free(ssl_ctx);
-		return NULL;
+	puts("IN close_listener_cfgs_sockets");
+	unsigned listener_idx;
+	for (listener_idx = 0; listener_idx < conf.num_listeners;
+	    ++listener_idx) {
+		listener_cfg_t * const listener_cfg =
+				&conf.listener_cfgs[listener_idx];
+		if (listener_cfg->is_opened) {
+			close(listener_cfg->fd);
+			listener_cfg->is_opened = false;
+			if (listener_cfg->ssl_ctx != NULL) {
+				SSL_CTX_free(listener_cfg->ssl_ctx);
+				listener_cfg->ssl_ctx = NULL;
+			}
+		}
 	}
-	if (SSL_CTX_use_PrivateKey_file(ssl_ctx, key_file,
-	    SSL_FILETYPE_PEM) != 1) {
-		SSL_CTX_free(ssl_ctx);
-		return NULL;
+}
+
+/* Launched in TX thread. */
+static bool prepare_listening_sockets(thread_ctx_t *thread_ctx)
+{
+#ifdef USE_LIBUV
+#error "prepare_listening_sockets() not implemented for libuv yet"
+#else /* USE_LIBUV */
+	unsigned listener_idx;
+	for (listener_idx = 0; listener_idx < conf.num_listeners;
+	    ++listener_idx) {
+		listener_ctx_t * const listener_ctx =
+				&thread_ctx->listener_ctxs[listener_idx];
+		const listener_cfg_t * const listener_cfg =
+				&conf.listener_cfgs[listener_idx];
+
+		assert(listener_cfg->is_opened);
+		memset(listener_ctx, 0, sizeof(*listener_ctx));
+		listener_ctx->thread_ctx = thread_ctx;
+		listener_ctx->accept_ctx.ssl_ctx = listener_cfg->ssl_ctx;
+		listener_ctx->accept_ctx.ctx = &thread_ctx->ctx;
+		listener_ctx->accept_ctx.hosts = thread_ctx->globalconf.hosts;
+		listener_ctx->sock = NULL;
+
+		if (thread_ctx->idx) {
+			if ((listener_ctx->fd = dup(listener_cfg->fd)) == -1)
+				/* FIXME: Should report. */
+				return false;
+		} else
+			listener_ctx->fd = listener_cfg->fd;
+		set_cloexec(listener_ctx->fd);
+		thread_ctx->listeners_created++;
 	}
+	return true;
+#endif /* USE_LIBUV */
+}
 
-/* Setup protocol negotiation methods. */
-#if H2O_USE_NPN
-	h2o_ssl_register_npn_protocols(ssl_ctx, h2o_http2_npn_protocols);
-#endif /* H2O_USE_NPN */
-#if H2O_USE_ALPN
-#ifdef DISABLE_HTTP2
-	/* Disable HTTP/2 e. g. to test WebSockets. */
-	static const h2o_iovec_t my_alpn_protocols[] = {
-		{H2O_STRLIT("http/1.1")}, {NULL}
-	};
-	h2o_ssl_register_alpn_protocols(ssl_ctx, my_alpn_protocols);
-#else /* DISABLE_HTTP2 */
+/* Can be launched in TX thread or HTTP server thread. */
+static void close_listening_sockets(thread_ctx_t *thread_ctx)
+{
+	puts("IN close_listening_sockets");
+#ifdef USE_LIBUV
+#error "close_listening_sockets() not implemented for libuv yet"
+#else /* USE_LIBUV */
+	listener_ctx_t * const listener_ctxs =
+			thread_ctx->listener_ctxs;
 
-	h2o_ssl_register_alpn_protocols(ssl_ctx, h2o_http2_alpn_protocols);
-#endif /* DISABLE_HTTP2 */
-#endif /* H2O_USE_ALPN */
+	unsigned listener_idx;
+	for (listener_idx = 0; listener_idx < thread_ctx->listeners_created;
+	    ++listener_idx) {
+		listener_ctx_t * const listener_ctx =
+				&listener_ctxs[listener_idx];
+		close(listener_ctx->fd);
+	}
+	thread_ctx->listeners_created = 0;
+	
+	if (thread_ctx->idx == 0) {
+		listener_cfg_t * const listener_cfg = 
+				&conf.listener_cfgs[listener_idx];
+		for (listener_idx = 0; listener_idx < conf.num_listeners;
+		    ++listener_idx) {
+			listener_cfg->is_opened = false;
+			if (listener_cfg->ssl_ctx != NULL) {
+				SSL_CTX_free(listener_cfg->ssl_ctx);
+				listener_cfg->ssl_ctx = NULL;
+			}
+		}
+	}
+#endif /* USE_LIBUV */
+}
 
-	return ssl_ctx;
+/* Launched in HTTP server thread. */
+static void listening_sockets_stop_read(thread_ctx_t *thread_ctx)
+{
+#ifdef USE_LIBUV
+#error "listening_sockets_stop_read() not implemented for libuv yet"
+#else /* USE_LIBUV */
+	unsigned listener_idx;
+	for (listener_idx = 0; listener_idx < thread_ctx->listeners_created;
+	    ++listener_idx) {
+		listener_ctx_t * const listener_ctx =
+			&thread_ctx->listener_ctxs[listener_idx];
+		h2o_socket_read_stop(listener_ctx->sock);
+		h2o_socket_close(listener_ctx->sock);
+		listener_ctx->sock = NULL;
+	}
+	thread_ctx->listeners_created = 0;
+#endif /* USE_LIBUV */
+}
+
+/* Launched in HTTP server thread. */
+static void listening_sockets_start_read(thread_ctx_t *thread_ctx)
+{
+#ifdef USE_LIBUV
+#error "listening_sockets_start_read() not implemented for libuv yet"
+#endif /* USE_LIBUV */
+	unsigned listener_idx;
+	for (listener_idx = 0; listener_idx < thread_ctx->listeners_created;
+	    ++listener_idx) {
+		listener_ctx_t * const listener_ctx =
+				&thread_ctx->listener_ctxs[listener_idx];
+		listener_ctx->sock = h2o_evloop_socket_create(
+				thread_ctx->ctx.loop,
+				listener_ctx->fd, H2O_SOCKET_FLAG_DONT_READ);
+		listener_ctx->sock->data = listener_ctx;
+		h2o_socket_read_start(listener_ctx->sock, on_accept);
+	}
 }
 
 /* Launched in TX thread. */
@@ -2694,6 +2728,7 @@ static void handle_graceful_shutdown(thread_ctx_t *thread_ctx)
 /* This is HTTP server thread main function. */
 static void *worker_func(void *param)
 {
+	puts("START worker_func");
 	/* FIXME: SIGTERM should terminate loop. */
 	const unsigned thread_idx = (unsigned)(uintptr_t)param;
 	thread_ctx_t *const thread_ctx = &conf.thread_ctxs[thread_idx];
@@ -2744,6 +2779,7 @@ static void *worker_func(void *param)
 	thread_ctx->queue_from_tx_fd_consumed = true;
 	listening_sockets_start_read(thread_ctx);
 	h2o_evloop_t *loop = thread_ctx->ctx.loop;
+	puts("BEFORE THE LOOP");
 	while (!thread_ctx->shutdown_requested)
 		h2o_evloop_run(loop, INT32_MAX);
 
@@ -3575,6 +3611,8 @@ static void configure_and_start_reaper_fiber(void)
 	fiber_start(conf.reaper_fiber);
 }
 
+int multilisten_get_listen_from_lua(lua_State *L, int LUA_STACK_IDX_TABLE, const char **lerr);
+
 /* Lua parameters: lua_sites, function_to_call, function_param */
 int cfg(lua_State *L)
 {
@@ -4027,41 +4065,11 @@ Skip_main_lua_handler:
 		lerr = "shuttle_size is too small for Lua handlers";
 		goto no_handlers;
 	}
-	unsigned short port = DEFAULT_LISTEN_PORT;
-	lua_getfield(L, LUA_STACK_IDX_TABLE, "listen");
-	if (lua_isnil(L, -1))
-		goto Skip_listen;
-	if (lua_type(L, -1) != LUA_TTABLE) {
-		lerr = "listen is not a table";
-		goto listen_invalid;
-	}
 
-	lua_pushnil(L); /* Start of table. */
-	while (lua_next(L, -2)) {
-		if (!lua_istable(L, -1)) {
-			lerr = "listen is not a table of tables";
-			goto listen_invalid;
-		}
-		lua_getfield(L, -1, "port");
-		int is_integer;
-		const uint64_t candidate =
-			my_lua_tointegerx(L, -1, &is_integer);
-		if (!is_integer || !candidate || candidate >= 65535) {
-			lerr = "invalid port specified";
-			goto listen_invalid;
-		}
-		/* Silently overwrite for now (FIXME: Multilisten). */
-		port = candidate;
-		/* Remove port and value, keep key for next iteration. */
-		lua_pop(L, 2);
-	}
-
-Skip_listen:
 	;
-	long min_proto_version;
 	lua_getfield(L, LUA_STACK_IDX_TABLE, "min_proto_version");
 	if (lua_isnil(L, -1)) {
-		min_proto_version = TLS1_2_VERSION;
+		/* FIXME: min_proto_version report */
 		fprintf(stderr, "Using default min_proto_version=tls1.2\n");
 		goto Skip_min_proto_version;
 	}
@@ -4102,7 +4110,7 @@ Skip_listen:
 			if (protos[idx].len == min_proto_version_len &&
 			    !memcmp(&protos[idx].str, min_proto_version_str,
 			    min_proto_version_len)) {
-				min_proto_version = protos[idx].num;
+				conf.min_tls_proto_version = protos[idx].num;
 				goto Proto_found;
 			}
 		}
@@ -4115,12 +4123,10 @@ Skip_listen:
 
 Skip_min_proto_version:
 	lua_getfield(L, LUA_STACK_IDX_TABLE, "openssl_security_level");
-	uint64_t openssl_security_level;
 	if (lua_isnil(L, -1)) {
-		openssl_security_level = 1;
 		goto Skip_openssl_security_level;
 	}
-	openssl_security_level = my_lua_tointegerx(L, -1, &is_integer);
+	long openssl_security_level = my_lua_tointegerx(L, -1, &is_integer);
 	if (!is_integer) {
 		lerr = "openssl_security_level is not a number";
 		goto invalid_openssl_security_level;
@@ -4129,17 +4135,14 @@ Skip_min_proto_version:
 		lerr = "openssl_security_level is invalid";
 		goto invalid_openssl_security_level;
 	}
+	conf.openssl_security_level = openssl_security_level;
 
 Skip_openssl_security_level:
-	/* FIXME: Should use customizable file names. */
-	if (USE_HTTPS) {
-		if ((ssl_ctx = setup_ssl("examples/cert.pem",
-		    "examples/key.pem", openssl_security_level,
-		    min_proto_version)) == NULL) {
-			lerr = "setup_ssl() failed (cert/key files not found?)";
-			goto ssl_fail;
-		}
-	}
+	;
+	puts("BEFORE MULTILISTEN");
+	if (multilisten_get_listen_from_lua(L, LUA_STACK_IDX_TABLE, &lerr) != 0)
+		goto listen_invalid;
+	puts("AFTER MULTILISTEN");
 
 #if 0
 	/* FIXME: Should make customizable. */
@@ -4148,31 +4151,6 @@ Skip_openssl_security_level:
 		"/dev/stdout", NULL);
 #endif
 
-	conf.ssl_ctx = ssl_ctx;
-
-	/* TODO: Implement more than one listener (HTTP/HTTPS,
-	 * IPv4/IPv6, several IPs etc.) */
-	conf.num_listeners = 1; /* FIXME: Make customizable. */
-	if ((conf.listener_cfgs = (listener_cfg_t *)
-	    calloc(conf.num_listeners, sizeof(listener_cfg_t))) == NULL) {
-		lerr = "Failed to allocate memory for listener cfgs";
-		goto listeners_alloc_fail;
-	}
-
-	{
-		unsigned listener_idx;
-
-		for (listener_idx = 0; listener_idx < conf.num_listeners;
-		    ++listener_idx) {
-			/* FIXME: Make customizable. */
-			const int fd = open_listener_ipv4("0.0.0.0", port);
-			if (fd < 0) {
-				lerr = "Failed to listen";
-				goto listeners_fail;
-			}
-			register_listener_cfgs_socket(fd, 0);
-		}
-	}
 
 	if ((conf.tx_fiber_ptrs = (struct fiber **)
 	    malloc(sizeof(struct fiber *) * MAX_threads)) == NULL) {
@@ -4357,12 +4335,6 @@ xtm_to_tx_fail:
 	free(conf.tx_fiber_ptrs);
 
 fibers_fail_alloc:
-listeners_fail:
-	close_listener_cfgs_sockets();
-	free(conf.listener_cfgs);
-listeners_alloc_fail:
-	SSL_CTX_free(ssl_ctx);
-ssl_fail:
 invalid_openssl_security_level:
 min_proto_version_invalid:
 listen_invalid:
@@ -4483,7 +4455,7 @@ static const struct luaL_Reg mylib[] = {
 	{NULL, NULL}
 };
 
-int luaopen_httpng(lua_State *L)
+int luaopen_httpng_c(lua_State *L)
 {
 	luaL_newlib(L, mylib);
 	return 1;
