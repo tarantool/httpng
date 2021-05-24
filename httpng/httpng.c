@@ -3084,6 +3084,7 @@ static int on_shutdown_internal(lua_State *L, bool called_from_callback)
 	free(conf.lua_sites);
 	conf.configured = false;
 	conf.idx_of_root_site = -1;
+	SSL_CTX_free(conf.ssl_ctx);
 	complain_loudly_about_leaked_fds();
 	conf.is_shutdown_in_progress = false;
 	return 0;
