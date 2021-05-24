@@ -29,7 +29,7 @@ local stubborn2_handler = function(req, io)
     goto again
 end
 
-local g_shuttle_size = t.group('shuttle_size')
+g_shuttle_size = t.group('shuttle_size')
 
 --[[ There is no point testing other values - parameters are automatically
 saturated for MIN and MAX, only shuttle_size with Lua handlers is "special"
@@ -40,7 +40,7 @@ g_shuttle_size.test_small_for_lua = function()
         http.cfg, { shuttle_size = 64, handler = function() end })
 end
 
-local g_wrong_config = t.group('wrong_config')
+g_wrong_config = t.group('wrong_config')
 
 g_wrong_config.test_empty_cfg = function()
     t.assert_error_msg_content_equals('No parameters specified', http.cfg)
@@ -179,7 +179,7 @@ g_wrong_config.test_dup_paths = function()
 	})
 end
 
-local g_shutdown = t.group('shutdown')
+g_shutdown = t.group('shutdown')
 
 g_shutdown.test_simple_shutdown = function()
     http.cfg({ handler = function() end })
@@ -205,7 +205,7 @@ g_shutdown.test_double_shutdown = function()
         http.shutdown)
 end
 
-local g_bad_handlers = t.group 'bad_handlers'
+g_bad_handlers = t.group 'bad_handlers'
 g_bad_handlers.after_each(function() pcall(http.shutdown) end)
 
 local write_handler_launched = false
@@ -395,7 +395,7 @@ g_bad_handlers.test_write_header_params = function()
     t.assert_str_matches(close_bad_shuttle_err, 'shuttle is invalid')
 end
 
-local g_hot_reload = t.group 'hot_reload'
+g_hot_reload = t.group 'hot_reload'
 g_hot_reload.after_each(function() pcall(http.shutdown) end)
 
 local foo_handler = function(req, io)
@@ -664,7 +664,7 @@ g_hot_reload.test_combo1 = function()
 end
 
 local curls
-local g_hot_reload_with_curls = t.group 'hot_reload_with_curls'
+g_hot_reload_with_curls = t.group 'hot_reload_with_curls'
 function shutdown_and_kill_curls()
     pcall(http.shutdown)
     if (curls == nil) then
