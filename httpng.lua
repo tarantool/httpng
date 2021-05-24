@@ -320,7 +320,8 @@ local function get_clean_listen_confs_from_string(listen_conf)
         end
     end
 
-::return_get_clean_lc_from_str:: return res
+::return_get_clean_lc_from_str::
+return res
 
 end
 
