@@ -3053,7 +3053,6 @@ static int on_shutdown_internal(lua_State *L, bool called_from_callback)
 	free(conf.lua_sites);
 	conf.configured = false;
 	conf.idx_of_root_site = -1;
-	SSL_CTX_free(conf.ssl_ctx);
 	complain_loudly_about_leaked_fds();
 	conf.is_shutdown_in_progress = false;
 	return 0;
@@ -3479,7 +3478,6 @@ static void configure_and_start_reaper_fiber(void)
 int cfg(lua_State *L)
 {
 	const char *lerr = NULL; /* Error message for caller. */
-	SSL_CTX *ssl_ctx = NULL;
 	unsigned removed_sites = 0;
 	unsigned thr_init_idx = 0;
 	unsigned fiber_idx = 0;
