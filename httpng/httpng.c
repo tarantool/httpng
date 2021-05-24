@@ -442,6 +442,7 @@ static void close_async(thread_ctx_t *thread_ctx);
 static void async_cb(void *param);
 static int on_shutdown_callback(lua_State *L);
 static int multilisten_get_listen_from_lua(lua_State *L, int lua_stack_idx_table, const char **lerr);
+static void conf_sni_map_cleanup(void);
 
 static inline void my_xtm_delete_queue_from_tx(thread_ctx_t *thread_ctx)
 {
@@ -4085,6 +4086,7 @@ After_applying_new_config:
 		}
 	}
 
+	conf_sni_map_cleanup();
 	conf.lua_sites = lua_sites;
 	conf.lua_site_count = lua_site_count;
 	if (!conf.is_on_shutdown_setup)
@@ -4199,6 +4201,7 @@ xtm_to_tx_fail:
 
 fibers_fail_alloc:
 	close_listener_cfgs_sockets();
+	conf_sni_map_cleanup();
 listen_invalid:
 invalid_openssl_security_level:
 min_proto_version_invalid:
