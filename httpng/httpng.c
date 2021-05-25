@@ -441,7 +441,8 @@ static void init_async(thread_ctx_t *thread_ctx);
 static void close_async(thread_ctx_t *thread_ctx);
 static void async_cb(void *param);
 static int on_shutdown_callback(lua_State *L);
-static int multilisten_get_listen_from_lua(lua_State *L, int lua_stack_idx_table, const char **lerr);
+static int multilisten_get_listen_from_lua(lua_State *L,
+	int lua_stack_idx_table, const char **lerr);
 static void conf_sni_map_cleanup(void);
 
 static inline void my_xtm_delete_queue_from_tx(thread_ctx_t *thread_ctx)
@@ -4002,7 +4003,6 @@ Skip_min_proto_version:
 	}
 
 Skip_openssl_security_level:
-	;
 	if (multilisten_get_listen_from_lua(L, LUA_STACK_IDX_TABLE, &lerr) != 0)
 		goto listen_invalid;
 

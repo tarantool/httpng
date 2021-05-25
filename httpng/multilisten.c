@@ -185,10 +185,8 @@ sni_map_insert(sni_map_t *sni_map, const char *certificate_file,
 	}
 
 	X509 *X509_cert = get_X509_from_certificate_path(certificate_file, lerr);
-	if (X509_cert == NULL) {
-		*lerr = "can't parse certificate file";
+	if (X509_cert == NULL)
 		goto error;
-	}
 
 	const char *common_name = get_subject_common_name(X509_cert);
 	if (common_name == NULL) {
@@ -394,8 +392,8 @@ get_tls_field_from_lua(lua_State *L, unsigned listener_idx,
 	}
 	unsigned certs_num = lua_objlen(L, -1);
 	if (!uses_sni && certs_num != 1) {
-		*lerr = "certificates number and `uses_sni` contradict "
-			"each other";
+		*lerr = "`uses_sni` is false, "
+			"but more than one certificate provided";
 		goto wrong_cert_num_and_uses_sni;
 	}
 	return uses_sni ? get_ssl_ctx_uses_sni(L, listener_idx, lerr)
@@ -445,7 +443,7 @@ multilisten_get_listen_from_lua(lua_State *L, int lua_stack_idx_table,
 	while (lua_next(L, -2)) {
 		++need_to_pop;
 		if (!lua_istable(L, -1)) {
-			*lerr = "listeners are bad parsed";
+			*lerr = "`listen` must be table of tables";
 			goto failed_parsing_clean_listen_conf;
 		}
 
