@@ -264,7 +264,8 @@ get_ssl_ctx_not_uses_sni(lua_State *L, unsigned listener_idx,
 
 	unsigned certs_num = lua_objlen(L, -1);
 	if (certs_num != 1) {
-		*lerr = "certs num must be 1 when not using sni";
+		*lerr = "only one key/certificate pair can be"
+			"specified if SNI is disabled";
 		goto certs_num_fail;
 	}
 	conf.sni_maps[listener_idx] = NULL;
