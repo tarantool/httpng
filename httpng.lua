@@ -422,7 +422,11 @@ export.cfg = function (config)
     config.listen = prepared_listen
 
     log.debug("Listeners for C:\n" .. print_table_to_string(config.listen))
-    httpng_c.cfg(config)
+    local res, err = pcall(httpng_c.cfg, config)
+    if err then
+        error(err, 2)
+    end
+    return res
 end
 
 return export
