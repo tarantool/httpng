@@ -193,12 +193,10 @@ end
 local function validate_number_listen_conf(listen_conf)
     assert(type(listen_conf) == "number")
     if not is_integer(listen_conf) then
-        error("port must be an integer, not float:\n" .. listen_conf)
+        error("port must be an integer, not float:\n" .. listen_conf, 2)
     end
     if listen_conf < 0 or listen_conf > max_port_value then
-        error(("incorrect port value (must be in interval [0, %s]):\n")
-              :format(max_port_value) ..
-              listen_conf)
+        error("invalid port specified", 2)
     end
 end
 
@@ -339,6 +337,8 @@ local function get_clean_listen_confs_from_table(listen_conf)
     end
     if port == nil then
         port = default_listen_port
+    else
+        validate_number_listen_conf(port)
     end
     if addr == nil then
         res = {}
@@ -417,6 +417,9 @@ local export = table.copy(httpng_c)
 
 -- Main cfg function.
 export.cfg = function (config)
+    if config == nil then
+        error("No parameters specified", 2)
+    end
     local prepared_listen = prepare_listen_for_c(config.listen)
     check_for_duplicate_listeners(prepared_listen)
     config.listen = prepared_listen

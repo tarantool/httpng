@@ -100,23 +100,13 @@ g_wrong_config.test_sites_handler_is_not_a_function = function()
         http.cfg, { sites = { { path = '/', handler = 42 }, } })
 end
 
-g_wrong_config.test_listen_not_a_table = function()
-    t.assert_error_msg_content_equals('listen is not a table',
-        http.cfg, { handler = function() end, listen = 42 })
-end
-
-g_wrong_config.test_listen_invalid = function()
-    t.assert_error_msg_content_equals('listen is not a table of tables',
-        http.cfg, { handler = function() end, listen = { port = 8080 } })
-end
-
 g_wrong_config.test_listen_port_invalid = function()
     t.assert_error_msg_content_equals('invalid port specified',
         http.cfg, { handler = function() end, listen = { { port = 77777 } } })
 end
 
 g_wrong_config.test_listen_port_root = function()
-    t.assert_error_msg_content_equals('Failed to listen',
+    t.assert_error_msg_content_equals('bind error',
         http.cfg, { handler = function() end, listen = { { port = 80 } } })
 end
 
