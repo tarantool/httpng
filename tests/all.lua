@@ -748,6 +748,7 @@ g_hot_reload_with_curls.test_FLAKY_decrease_stubborn_threads_with_timeout =
         handler = stubborn_handler,
         threads = 2,
         thread_termination_timeout = 3,
+        listen = listen_with_single_ssl_pair,
     }
 
     http.cfg(cfg)
@@ -786,6 +787,7 @@ g_hot_reload_with_curls.test_FLAKY_decrease_not_so_stubborn_thr_with_timeout =
         handler = stubborn2_handler,
         threads = 2,
         thread_termination_timeout = 3,
+        listen = listen_with_single_ssl_pair,
     }
 
     http.cfg(cfg)
