@@ -2827,7 +2827,8 @@ tx_fiber_func(va_list ap)
 	}
 	thread_ctx->tx_fiber_finished = true;
 	if (thread_ctx->fiber_to_wake_on_shutdown != NULL) {
-		struct fiber *const fiber = thread_ctx->fiber_to_wake_on_shutdown;
+		struct fiber *const fiber =
+			thread_ctx->fiber_to_wake_on_shutdown;
 		thread_ctx->fiber_to_wake_on_shutdown = NULL;
 		fiber_wakeup(fiber);
 	}
@@ -4274,8 +4275,8 @@ Apply_new_config_hot_reload:
 			luaL_unref(L, LUA_REGISTRYINDEX,
 				lua_site->lua_handler_ref);
 			memmove(lua_site, lua_site + 1, (conf.lua_site_count
-				+ hot_reload_extra_sites - ++removed_sites - idx)
-				* sizeof(*lua_site));
+				+ hot_reload_extra_sites - ++removed_sites
+				- idx) * sizeof(*lua_site));
 			if (conf.idx_of_root_site >= 0) {
 				if (conf.idx_of_root_site > idx)
 					--conf.idx_of_root_site;
