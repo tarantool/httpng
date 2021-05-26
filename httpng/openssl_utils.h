@@ -9,6 +9,6 @@
 X509 *get_X509_from_certificate_path(const char *cert_path, const char **lerr);
 const char *get_subject_common_name(X509 *cert);
 SSL_CTX *make_ssl_ctx(const char *certificate_file, const char *key_file,
-						int security_level, long min_proto_version, const char **lerr);
+	int security_level, long min_proto_version, const char **lerr);
 
 #endif /* OPENSSL_UTILS_H */
