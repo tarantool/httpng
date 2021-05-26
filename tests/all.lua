@@ -36,7 +36,8 @@ saturated for MIN and MAX, only shuttle_size with Lua handlers is "special"
 (MIN_shuttle_size is enough for C handlers)
 --]]--
 g_shuttle_size.test_small_for_lua = function()
-    t.assert_error_msg_content_equals('shuttle_size is too small for Lua handlers',
+    t.assert_error_msg_content_equals(
+        'shuttle_size is too small for Lua handlers',
         http.cfg, { shuttle_size = 64, handler = function() end })
 end
 
