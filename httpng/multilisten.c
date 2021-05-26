@@ -324,8 +324,11 @@ servername_callback(SSL *s, int *al, void *arg)
 		    servername_len) == 0) {
 			SSL_CTX *ssl_ctx = sni_map->sni_fields[i].ssl_ctx;
 			if (SSL_set_SSL_CTX(s, ssl_ctx) == NULL) {
+/* FIXME: report to log */
+#ifndef NDEBUG
 				fprintf(stderr, "Error while switching SSL "
 					"context after scanning TLS SNI\n");
+#endif /* NDEBUG */
 				goto set_ssl_ctx_fail;
 			}
 		}
