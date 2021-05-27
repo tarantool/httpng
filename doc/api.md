@@ -27,7 +27,7 @@ httpng.shutdown()
 
 httpng module exports the following functions:
 
-- `cfg()`: configure and start HTTP(S) server; reconfigure HTTP(S) server launched earlier (hot reload). Accepts and requires a single parameter - table with server configuration, described below.
+- `cfg()`: configure and start HTTP(S) server; reconfigure HTTP(S) server launched earlier (hot reload). Accepts and requires a single parameter - table with server configuration, described below (with hot reload details).
 
 - `force_decrease_threads()`: reset TCP connections for terminating threads (those which were told to gracefully terminate by `cfg()` with a lower number of threads than configured earlier), then wait until those threads and corresponding fibers are finished. You can use that when you have used large `thread_termination_timeout` and do not want to wait.
 
@@ -48,14 +48,38 @@ httpng module exports the following functions:
 - `shuttle_size`: Integer, specifies the max size in bytes of the internal buffer used to pass data between HTTP(S) server threads and TX thread. Defaults to 65536. One "shuttle" is used for every HTTP(s) request. Lowering its value helps decrease memory usage but limits maximum HTTP(S) request (not response!) body size (but also look on `use_body_split`) as well as the maximal accepted size of request headers.
 
 - `sites`: Array describing HTTP(S) sites, each entry should contain a table with the following fields:
-  - `path`: String describing HTTP(S) path like '/foo' or '/'. Please note that order is important - "the first match" rule, in particular, '/' must be the last one. Duplicates are not allowed.
   - `handler`: Function to handle HTTP(S) requests (details are below).
+  - `path`: String describing HTTP(S) path like '/foo' or '/'. Please note that order is important - "the first match" rule, in particular, '/' must be the last one. Duplicates are not allowed.
+
+  + Examples:
+    - ```
+      sites = {
+          { path = '/foo', handler = foo },
+      }
+      ```
+      would call `foo()` for '/foo', '/foo?something=0', '/foo/bar'. Attempts to access '/', '/foo1' etc would cause 404/'not found' being returned to HTTP(S) client.
+    - ```
+      sites = {
+          { path = '/foo/bar', handler = foobar },
+          { path = '/foo', handler = foo },
+      }
+      ```
+      would call `foo()` for '/foo', '/foo?something=0'; call `foobar()` for '/foo/bar', '/foo/bar?test=1'. Note that attempt to access '/foo/bar1' would call `foo()`, not `foobar()`! Attempts to access '/', '/foo1' etc would cause 404/'not found' being returned to HTTP(S) client.
+    - ```
+      sites = {
+          { path = '/foo', handler = foo },
+          { path = '/foo/bar', handler = foobar },
+      }
+      ```
+      would call `foo()` for '/foo', '/foo?something=0', '/foo/bar', '/foo/bar?test=1'. `foobar()` would never be called! Attempts to access '/', '/foo1' etc would cause 404/'not found' being returned to HTTP(S) client.
 
 - `threads`: Integer, how many threads to use for HTTP(S) requests processing. It is unlikely that you would need more than 4 because performance is limited by Lua processing which is performed in the TX thread even if you do not access the database. Defaults to 1.
 
 - `thread_termination_timeout`: Number, specifies the number of seconds until TCP connections for gracefully terminating HTTP(S) threads are forcefully reset. Defaults to 60 seconds.
 
 - `use_body_split`: Boolean, whether to split HTTP(S) request body which does not fit into `shuttle_size` into chunks (which means several trips between HTTP(S) thread and TX thread) or fail request. Note that you are limited by `max_body_len` in any case. Defaults to `False`.
+
+When you are calling `cfg()` after successful call to `cfg()`, it performs reconfiguration (hot reload). You can replace `handler`s, add and/or remove `path`s, increase or decrease `threads`, change `thread_termination_timeout`. Attempts to change other parameters would throw an error. To reconfigure, call `cfg()` with modified cfg table - if you would create a new one and e. g. forget to add one of the existing `sites`, it would be removed. Please note that hot reload never reorders `sites` except for '/' so you can get 'wrong' order when adding 'overlapping' `path`s (not sure using them is a good idea in the first place).
 
 ### Handlers
 
@@ -66,7 +90,7 @@ This is what HTTPNG is about - handling HTTP(S) requests. Handlers are Lua funct
 - `req`: Table with the following entries:
   - `is_websocket`: Boolean, is this WebSockets request.
   - `method`: String, 'GET', 'PUT' etc.
-  - `path`: String, contains "path" of HTTP(S) request - that is, '/bar?a=b' for "https://foo.com/bar?a=b".
+  - `path`: String, contains "path" of HTTP(S) request - that is, '/en/download?a=b' for "https://www.tarantool.io/en/download?a=b".
   - `query`: Function, returns "query" (everything after "?" in path) or `nil`.
   - `query_at`: Integer, specifies a 1-based index of "?" in the `path` (-1 if there is none). You are more likely to use `req:query()`.
   - `version_major`: Number, contains "major" part of HTTP version ('2' for 'HTTP 2.0').
