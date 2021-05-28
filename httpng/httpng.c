@@ -322,6 +322,7 @@ typedef struct {
 	struct fiber *tx_fiber; /* The one which services requests
 				 * from "our" HTTP server thread. */
 	waiter_t *waiter; /* Changed by TX thread. */
+	struct sockaddr_storage peer;
 	int lua_state_ref;
 	int lua_recv_handler_ref;
 	int lua_recv_state_ref;
@@ -1670,6 +1671,65 @@ static void tx_done(thread_ctx_t *thread_ctx)
 
 /* Launched in TX thread. */
 static int
+get_peer(lua_State *L)
+{
+	/* Lua parameters: self. */
+	const unsigned num_params = lua_gettop(L);
+	if (num_params < 1)
+		return luaL_error(L, "Not enough parameters");
+
+	lua_getfield(L, 1, "shuttle");
+	if (!lua_islightuserdata(L, -1))
+		return luaL_error(L, "shuttle is invalid");
+	shuttle_t *const shuttle = (shuttle_t *)lua_touserdata(L, -1);
+	lua_response_t *const response = (lua_response_t *)&shuttle->payload;
+
+	const struct sockaddr_storage *const ss = &response->peer;
+	char tmp[(INET6_ADDRSTRLEN > INET_ADDRSTRLEN
+		? INET6_ADDRSTRLEN : INET_ADDRSTRLEN)];
+	const void *addr;
+	const char *family;
+	size_t family_len;
+	unsigned port;
+	if (ss->ss_family == AF_INET) {
+		static const char str_af_inet[] = "AF_INET";
+		const struct sockaddr_in *const in = (struct sockaddr_in *)ss;
+		addr = &in->sin_addr;
+		port = ntohs(in->sin_port);
+		family = str_af_inet;
+		family_len = sizeof(str_af_inet) - 1;
+	} else if (ss->ss_family == AF_INET6) {
+		static const char str_af_inet6[] = "AF_INET6";
+		const struct sockaddr_in6 *const in = (struct sockaddr_in6 *)ss;
+		addr = &in->sin6_addr;
+		port = ntohs(in->sin6_port);
+		family = str_af_inet6;
+		family_len = sizeof(str_af_inet6) - 1;
+	} else
+		return 0;
+	if (inet_ntop(ss->ss_family, addr, tmp, sizeof(tmp)) == NULL)
+		return 0;
+
+	lua_createtable(L, 0, 5);
+	const size_t peer_len = strlen(tmp);
+	lua_pushlstring(L, tmp, peer_len);
+	lua_setfield(L, -2, "host");
+	lua_pushlstring(L, family, family_len);
+	lua_setfield(L, -2, "family");
+	lua_pushinteger(L, port);
+	lua_setfield(L, -2, "port");
+
+	/* FIXME: Revisit for Unix sockets and HTTP/3 which uses UDP. */
+	lua_pushlstring(L, "tcp", 3);
+	lua_setfield(L, -2, "protocol");
+	lua_pushlstring(L, "SOCK_STREAM", 11);
+	lua_setfield(L, -2, "type");
+
+	return 1;
+}
+
+/* Launched in TX thread. */
+static int
 lua_fiber_func(va_list ap)
 {
 	shuttle_t *const shuttle = va_arg(ap, shuttle_t *);
@@ -1682,7 +1742,7 @@ lua_fiber_func(va_list ap)
 	lua_rawgeti(L, LUA_REGISTRYINDEX, response->un.req.lua_handler_ref);
 
 	/* First param for Lua handler - req. */
-	lua_createtable(L, 0, 7);
+	lua_createtable(L, 0, 9);
 	lua_pushinteger(L, response->un.req.version_major);
 	lua_setfield(L, -2, "version_major");
 	lua_pushinteger(L, response->un.req.version_minor);
@@ -1703,6 +1763,10 @@ lua_fiber_func(va_list ap)
 	lua_setfield(L, -2, "method");
 	lua_pushboolean(L, !!response->un.req.ws_client_key_len);
 	lua_setfield(L, -2, "is_websocket");
+	lua_pushlightuserdata(L, shuttle);
+	lua_setfield(L, -2, "shuttle");
+	lua_pushcfunction(L, get_peer);
+	lua_setfield(L, -2, "peer");
 	const int lua_state_ref = response->lua_state_ref;
 	if (fill_received_headers_and_body(L, shuttle)) {
 		/* We can get cancellation notification,
@@ -1961,6 +2025,11 @@ static int lua_req_handler(lua_h2o_handler_t *self, h2o_req_t *req)
 	response->waiter = NULL;
 	response->un.req.lua_handler_ref = self->lua_handler_ref;
 	response->site_path = self->path;
+
+	const socklen_t socklen = req->conn->callbacks->get_peername(req->conn,
+		(struct sockaddr *)&response->peer);
+	(void)socklen;
+	assert(socklen <= sizeof(response->peer));
 
 	thread_ctx_t *const thread_ctx = get_curr_thread_ctx();
 	if (xtm_fun_dispatch(thread_ctx->queue_to_tx,

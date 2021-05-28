@@ -359,6 +359,22 @@ local function put_handler(req, io)
     io:write_header(200, headers, payload, true)
 end
 
+local function ip_handler(req, io)
+    if (req.method ~= 'GET') then
+        return {status = 500, body = 'Unsupported HTTP method'}
+    end
+
+    local payload
+    if (req.peer == nil) then
+        payload = "Error: can't determine client IP address"
+    else
+        local peer = req:peer()
+        payload = 'Request came from IP '..peer.host
+            ..', port '..peer.port..'\n'
+    end
+    return { body = payload }
+end
+
 local httpng_lib = require 'httpng'
 local init_func = httpng_lib.cfg
 
@@ -372,6 +388,7 @@ local lua_sites = {
     {path = '/post_helper', handler = post_helper_handler},
     {path = '/post_test',   handler = post_test_handler},
     {path = '/put',         handler = put_handler},
+    {path = '/ip',          handler = ip_handler},
 }
 
 print '\n\n\nFilling in test spaces completed, launching HTTP server...\n\n'
