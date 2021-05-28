@@ -1752,7 +1752,7 @@ lua_fiber_func(va_list ap)
 
 	/* Lua indexes start from 1. */
 	lua_pushinteger(L, (response->un.req.query_at == LUA_QUERY_NONE)
-		? -1 : (response->un.req.query_at + 1));
+		? -1LL : (response->un.req.query_at + 1));
 
 	lua_setfield(L, -2, "query_at");
 	lua_pushcfunction(L, get_query);
