@@ -29,7 +29,7 @@ httpng module exports the following functions:
 
 - `cfg()`: configure and start HTTP(S) server; reconfigure HTTP(S) server launched earlier (hot reload). Accepts and requires a single parameter - table with server configuration, described below (with hot reload details).
 
-- `force_decrease_threads()`: reset TCP connections for terminating threads (those which were told to gracefully terminate by `cfg()` with a lower number of threads than configured earlier), then wait until those threads and corresponding fibers are finished. You can use that when you have used large `thread_termination_timeout` and do not want to wait.
+- `force_decrease_threads()`: reset TCP connections for terminating threads (those which were told to gracefully terminate by `cfg()` with a lower value of `threads` than configured earlier), then wait until those threads and corresponding fibers are finished. You can use that when you have used large `thread_termination_timeout` and do not want to wait.
 
 - `shutdown()`: forcefully shut down HTTP(S) server - reset TCP connections, then wait for threads and fibers to finish.
 
@@ -88,20 +88,20 @@ When you are calling `cfg()` after successful call to `cfg()`, it performs recon
 This is what HTTPNG is about - handling HTTP(S) requests. Handlers are Lua functions that run in separate fibers in the TX thread (and can access the Tarantool database if they want to).
 
 - `req`: Table with the following entries:
+  - `headers`: Table containing HTTP(S) request headers with entries like `['user-agent'] = 'godzilla'`
   - `is_websocket`: Boolean, is this WebSockets request.
   - `method`: String, 'GET', 'PUT' etc.
   - `path`: String, contains "path" of HTTP(S) request - that is, '/en/download?a=b' for 'https://www.tarantool.io/en/download?a=b'.
   - `query`: Function, returns "query" (everything after "?" in path) or `nil`.
-  - `query_at`: Integer, specifies a 1-based index of "?" in the `path` (-1 if there is none). You are more likely to use `req:query()`.
   - `version_major`: Number, contains "major" part of HTTP version ('2' for 'HTTP 2.0').
   - `version_minor`: Number, contains "minor" part of HTTP version ('0' for 'HTTP 2.0').
 
 - `io`: Table with the following entries:
   - `close`: function(`io`), equivalent to `io:write(nil, True)` - finishes HTTP(S) request handling. You do not need that in most cases because return from handler always does that.
-  - `headers`: Table containing HTTP(S) request headers with entries like `['user-agent'] = 'godzilla'`
+  - `headers`: Empty table where you can create entries containing HTTP(S) response headers like `['content-type'] = 'text/html'`. It is used if you do not specify `headers` when calling `write_header()` or `write()`.
   - `shuttle`: Userdata, please do not touch.
   - `upgrade_to_websocket`: function, to be documented.
-  - `write_header`: function(`io, code, headers, body, is_last`), sends HTTP(S) `code` (Integer), `headers` (optional Table with entries like `['content-type'] = 'text/plain; charset=utf-8'`) and `body` (optional String). `is_last` is optional Boolean, set to `True` if there would be no more sends for this request, defaults to `False`. Returns `True` if the connection has already been closed so there is no point in trying to send anything else. `io` is a reference to self - `io:write_header(code, headers, payload, is_last)`. `write_header()` can be called only once per HTTP(S) request.
-  - `write`: function(`body, is_last`), sends `body` (String). `is_last` is Boolean, set to `True` if there would be no more sends for this request, defaults to `False`. Returns `True` if the connection has already been closed so there is no point in trying to send anything else. `io` is a reference to self - `io:write(payload, is_last)`. If there was no call to `write_header()` earlier, HTTP(S) code would be 200 and there would be no headers (note that libh2o may add some headers to handle chunked encoding etc).
+  - `write_header`: function(`io, code, headers, body, is_last`), sends HTTP(S) `code` (Integer), `headers` (optional Table with entries like `['content-type'] = 'text/plain; charset=utf-8'`; if it is not specified then `io.headers` is used) and `body` (optional String). `is_last` is optional Boolean, set to `True` if there would be no more sends for this request, defaults to `False`. Returns `True` if the connection has already been closed so there is no point in trying to send anything else. `io` is a reference to self - `io:write_header(code, headers, payload, is_last)`. `write_header()` can be called only once per HTTP(S) request. Note that libh2o may add some headers to handle chunked encoding etc.
+  - `write`: function(`body, is_last`), sends `body` (String). `is_last` is Boolean, set to `True` if there would be no more sends for this request, defaults to `False`. Returns `True` if the connection has already been closed so there is no point in trying to send anything else. `io` is a reference to self - `io:write(payload, is_last)`. If there was no call to `write_header()` earlier, HTTP(S) code would be 200 and `io.headers` would be used. Note that libh2o may add some headers to handle chunked encoding etc.
 
-`handler()` can optionally return a table with `code`, `headers` and `body`, the effect is the same as a call to `io:write_header(code, headers, body, True)`.
+`handler()` can optionally return a table with `code`, `headers` and `body`, the effect is the same as a call to `io:write_header(code, headers, body, True)` (if `io:write_header()` was not called; note that `io.headers` is *not* used) or `io:write(body, True)` (if `io:write_header()` was called earlier; `code` and `headers` are silently ignored).
