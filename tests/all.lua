@@ -283,8 +283,11 @@ local write_header_handler = function(req, io)
     query_large_query_at_ok, query_large_query_at_err = pcall(req.query, req)
     req.query_at = saved_query_at
 
+    saved_query_at = req.query_at
+    req.query_at = 1 -- Most not be -1 or we wouldn't test properly.
     req.path = 42
     query_bad_path_ok, query_bad_path_err = pcall(req.query, req)
+    req.query_at = saved_query_at
 
     write_first_header_ok, _ = io:write_header(200, nil, 'a', true)
     write_second_header_ok, write_second_header_err =
@@ -835,4 +838,39 @@ end
 g_hot_reload.test_force_decrease_threads = function()
     t.assert_error_msg_content_equals(
         'Not configured, nothing to terminate', http.force_decrease_threads)
+end
+
+g_good_handlers = t.group 'good_handlers'
+g_good_handlers.after_each(shutdown_and_kill_curls)
+
+local query_handler = function(req, io)
+    if (req.method ~= 'GET') then
+        return {status = 500, body = 'Unsupported HTTP method'}
+    end
+    local payload
+    local req_query = req:query()
+    if req_query == 'id=2' then
+        payload = 'good'
+    else
+        payload = 'bad'
+    end
+    return {body = payload}
+end
+
+g_good_handlers.test_expected_query = function()
+    http.cfg{listen = { {port = 8080} }, handler = query_handler}
+    local cmd_main = curl_bin..' -k -s https://localhost:8080?id=2'
+    check_site_content(cmd_main, 'good')
+end
+
+g_good_handlers.test_unexpected_query = function()
+    http.cfg{listen = { {port = 8080} }, handler = query_handler}
+    local cmd_main = curl_bin..' -k -s https://localhost:8080?id=3'
+    check_site_content(cmd_main, 'bad')
+end
+
+g_good_handlers.test_no_query = function()
+    http.cfg{listen = { {port = 8080} }, handler = query_handler}
+    local cmd_main = curl_bin..' -k -s https://localhost:8080'
+    check_site_content(cmd_main, 'bad')
 end
