@@ -345,6 +345,8 @@ typedef struct {
 	unsigned extra_sites;
 } add_site_t;
 
+typedef void shuttle_func_t(shuttle_t *shuttle);
+
 static struct {
 	listener_cfg_t *listener_cfgs;
 	thread_ctx_t *thread_ctxs;
@@ -1502,6 +1504,22 @@ static int close_lua_req(lua_State *L)
 	return 0;
 }
 
+/* Launched in TX thread. */
+static void
+finish_handler_failure_processing(shuttle_t *shuttle, shuttle_func_t *func)
+{
+	stubborn_dispatch(shuttle->thread_ctx->queue_from_tx, func, shuttle);
+	lua_response_t *const response = (lua_response_t *)&shuttle->payload;
+	wait_for_lua_shuttle_return(response);
+	if (response->cancelled)
+		/* There would be no more calls from HTTP server thread,
+		 * must clean up. */
+		free_lua_shuttle_from_tx(shuttle);
+	else
+		response->fiber_done = true;
+		/* cancel_processing_lua_req_in_tx() is not yet called,
+		 * it would clean up because we have set fiber_done=true. */
+}
 
 /* Launched in TX thread. */
 static inline void process_handler_failure_not_ws(shuttle_t *shuttle)
@@ -1516,12 +1534,12 @@ static inline void process_handler_failure_not_ws(shuttle_t *shuttle)
 	}
 
 	response->un.resp.any.is_last_send = true;
+	shuttle_func_t *func;
 	if (response->sent_something) {
 		/* Do not add anything to user output to prevent
 		 * corrupt HTML etc. */
 		response->un.resp.any.payload_len = 0;
-		stubborn_dispatch(shuttle->thread_ctx->queue_from_tx,
-			&postprocess_lua_req_others, shuttle);
+		func = &postprocess_lua_req_others;
 	} else {
 		static const char key[] = "content-type";
 		static const char value[] = "text/plain; charset=utf-8";
@@ -1533,18 +1551,9 @@ static inline void process_handler_failure_not_ws(shuttle_t *shuttle)
 		response->un.resp.any.payload_len = sizeof(error_str) - 1;
 		response->un.resp.first.content_length = sizeof(error_str) - 1;
 		/* Not setting sent_something because no one would check it. */
-		stubborn_dispatch(shuttle->thread_ctx->queue_from_tx,
-			&postprocess_lua_req_first, shuttle);
+		func = &postprocess_lua_req_first;
 	}
-	wait_for_lua_shuttle_return(response);
-	if (response->cancelled)
-		/* There would be no more calls from HTTP server thread,
-		 * must clean up. */
-		free_lua_shuttle_from_tx(shuttle);
-	else
-		response->fiber_done = true;
-		/* cancel_processing_lua_req_in_tx() is not yet called,
-		 * it would clean up because we have set fiber_done=true. */
+	finish_handler_failure_processing(shuttle, func);
 }
 
 
@@ -1729,6 +1738,28 @@ get_peer(lua_State *L)
 }
 
 /* Launched in TX thread. */
+static inline void
+process_internal_error(shuttle_t *shuttle)
+{
+	lua_response_t *const response = (lua_response_t *)&shuttle->payload;
+
+	response->un.resp.first.num_headers = 0;
+	response->un.resp.any.is_last_send = true;
+	static const char key[] = "content-type";
+	static const char value[] = "text/plain; charset=utf-8";
+	add_http_header_to_lua_response(&response->un.resp.first, key,
+		sizeof(key) - 1, value, sizeof(value) - 1);
+	static const char error_str[] = "Internal error";
+	response->un.resp.first.http_code = 500;
+	response->un.resp.any.payload = error_str;
+	response->un.resp.any.payload_len = sizeof(error_str) - 1;
+	response->un.resp.first.content_length = sizeof(error_str) - 1;
+	/* Not setting sent_something because no one would check it. */
+
+	finish_handler_failure_processing(shuttle, &postprocess_lua_req_first);
+}
+
+/* Launched in TX thread. */
 static int
 lua_fiber_func(va_list ap)
 {
@@ -1769,9 +1800,7 @@ lua_fiber_func(va_list ap)
 	lua_setfield(L, -2, "peer");
 	const int lua_state_ref = response->lua_state_ref;
 	if (fill_received_headers_and_body(L, shuttle)) {
-		/* We can get cancellation notification,
-		 * can't safely free shuttle in this thread. */
-		free_lua_shuttle_from_tx_in_http_thr(shuttle);
+		process_internal_error(shuttle);
 		goto Done;
 	}
 
