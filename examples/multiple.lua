@@ -365,12 +365,19 @@ local function ip_handler(req, io)
     end
 
     local payload
-    if (req.peer == nil) then
-        payload = "Error: can't determine client IP address"
+    local peer = req:peer()
+    if (peer == nil) then
+        payload = "Error: can't determine client IP address\n"
     else
-        local peer = req:peer()
         payload = 'Request came from IP '..peer.host
-            ..', port '..peer.port..'\n'
+            .. ', port ' .. peer.port .. '\n'
+    end
+    local ouraddr = req:ouraddr()
+    if (ouraddr == nil) then
+        payload = payload .. "Error: can't determine our IP address\n"
+    else
+        payload = payload .. 'Request came to IP ' .. ouraddr.host
+            .. ', port ' .. ouraddr.port .. '\n'
     end
     return { body = payload }
 end
