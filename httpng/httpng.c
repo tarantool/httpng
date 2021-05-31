@@ -323,6 +323,7 @@ typedef struct {
 				 * from "our" HTTP server thread. */
 	waiter_t *waiter; /* Changed by TX thread. */
 	struct sockaddr_storage peer;
+	struct sockaddr_storage ouraddr;
 	int lua_state_ref;
 	int lua_recv_handler_ref;
 	int lua_recv_state_ref;
@@ -1680,7 +1681,7 @@ static void tx_done(thread_ctx_t *thread_ctx)
 
 /* Launched in TX thread. */
 static int
-get_peer(lua_State *L)
+get_addr_internal(lua_State *L, ptrdiff_t offset)
 {
 	/* Lua parameters: self. */
 	const unsigned num_params = lua_gettop(L);
@@ -1693,7 +1694,8 @@ get_peer(lua_State *L)
 	shuttle_t *const shuttle = (shuttle_t *)lua_touserdata(L, -1);
 	lua_response_t *const response = (lua_response_t *)&shuttle->payload;
 
-	const struct sockaddr_storage *const ss = &response->peer;
+	const struct sockaddr_storage *const ss =
+		(struct sockaddr_storage *)((char *)response + offset);
 	char tmp[(INET6_ADDRSTRLEN > INET_ADDRSTRLEN
 		? INET6_ADDRSTRLEN : INET_ADDRSTRLEN)];
 	const void *addr;
@@ -1720,8 +1722,8 @@ get_peer(lua_State *L)
 		return 0;
 
 	lua_createtable(L, 0, 5);
-	const size_t peer_len = strlen(tmp);
-	lua_pushlstring(L, tmp, peer_len);
+	const size_t addr_len = strlen(tmp);
+	lua_pushlstring(L, tmp, addr_len);
 	lua_setfield(L, -2, "host");
 	lua_pushlstring(L, family, family_len);
 	lua_setfield(L, -2, "family");
@@ -1735,6 +1737,20 @@ get_peer(lua_State *L)
 	lua_setfield(L, -2, "type");
 
 	return 1;
+}
+
+/* Launched in TX thread. */
+static inline int
+get_peer(lua_State *L)
+{
+	return get_addr_internal(L, offsetof(lua_response_t, peer));
+}
+
+/* Launched in TX thread. */
+static inline int
+get_ouraddr(lua_State *L)
+{
+	return get_addr_internal(L, offsetof(lua_response_t, ouraddr));
 }
 
 /* Launched in TX thread. */
@@ -1773,7 +1789,7 @@ lua_fiber_func(va_list ap)
 	lua_rawgeti(L, LUA_REGISTRYINDEX, response->un.req.lua_handler_ref);
 
 	/* First param for Lua handler - req. */
-	lua_createtable(L, 0, 9);
+	lua_createtable(L, 0, 12);
 	lua_pushinteger(L, response->un.req.version_major);
 	lua_setfield(L, -2, "version_major");
 	lua_pushinteger(L, response->un.req.version_minor);
@@ -1798,6 +1814,8 @@ lua_fiber_func(va_list ap)
 	lua_setfield(L, -2, "shuttle");
 	lua_pushcfunction(L, get_peer);
 	lua_setfield(L, -2, "peer");
+	lua_pushcfunction(L, get_ouraddr);
+	lua_setfield(L, -2, "ouraddr");
 	const int lua_state_ref = response->lua_state_ref;
 	if (fill_received_headers_and_body(L, shuttle)) {
 		process_internal_error(shuttle);
@@ -2055,10 +2073,13 @@ static int lua_req_handler(lua_h2o_handler_t *self, h2o_req_t *req)
 	response->un.req.lua_handler_ref = self->lua_handler_ref;
 	response->site_path = self->path;
 
-	const socklen_t socklen = req->conn->callbacks->get_peername(req->conn,
+	socklen_t socklen = req->conn->callbacks->get_peername(req->conn,
 		(struct sockaddr *)&response->peer);
 	(void)socklen;
 	assert(socklen <= sizeof(response->peer));
+	socklen = req->conn->callbacks->get_sockname(req->conn,
+		(struct sockaddr *)&response->ouraddr);
+	assert(socklen <= sizeof(response->ouraddr));
 
 	thread_ctx_t *const thread_ctx = get_curr_thread_ctx();
 	if (xtm_fun_dispatch(thread_ctx->queue_to_tx,
