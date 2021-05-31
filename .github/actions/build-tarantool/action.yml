@@ -1,0 +1,16 @@
+name: 'Build and install Tarantool'
+description: 'Builds Tarantool from source and installs it'
+runs:
+  using: "composite"
+  steps:
+    - run: |
+        mkdir -p ${{github.workspace}}/build
+        cd ${{github.workspace}}/build
+        git clone -n https://github.com/tarantool/tarantool.git
+        cd tarantool
+        git checkout 2.7
+        git submodule update --init --recursive
+        cmake -B ${{github.workspace}}/build/tarantool/build -DCMAKE_BUILD_TYPE=${{env.BUILD_TYPE}}
+        cmake --build ${{github.workspace}}/build/tarantool/build --parallel --config ${{env.BUILD_TYPE}}
+        cd ${{github.workspace}}/build/tarantool/build && sudo make install
+      shell: bash
