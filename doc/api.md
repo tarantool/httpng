@@ -88,9 +88,11 @@ When you are calling `cfg()` after successful call to `cfg()`, it performs recon
 This is what HTTPNG is about - handling HTTP(S) requests. Handlers are Lua functions that run in separate fibers in the TX thread (and can access the Tarantool database if they want to).
 
 - `req`: Table with the following entries:
+  - `body`: String, HTTP(S) request body.
   - `headers`: Table containing HTTP(S) request headers with entries like `['user-agent'] = 'godzilla'`
   - `is_websocket`: Boolean, is this WebSockets request.
   - `method`: String, 'GET', 'PUT' etc.
+  - `ouraddr`: Function, returns table which contains an IP address and port connection has been received on in `socket.getaddrinfo()` format.
   - `path`: String, contains "path" of HTTP(S) request - that is, '/en/download?a=b' for 'https://www.tarantool.io/en/download?a=b'.
   - `peer`: Function, returns table which contains IP address and port of HTTP(S) client in `socket.getaddrinfo()` format.
   - `query`: Function, returns "query" (everything after "?" in path) or `nil`.
