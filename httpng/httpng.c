@@ -3453,9 +3453,12 @@ static void hot_reload_add_remove_sites_in_some_thr(thread_ctx_t *thread_ctx,
 			/* We can adjust .capacity and do realloc(). */
 			continue;
 		}
-		h2o_context_init_pathconf_context(&thread_ctx->ctx,
+		h2o_pathconf_t *const pathconf =
 			register_lua_handler_part_two(thread_ctx->hostconf,
-				lua_site, thread_ctx->idx));
+				lua_site, thread_ctx->idx);
+		if (!is_tx_thread)
+			h2o_context_init_pathconf_context(&thread_ctx->ctx,
+				pathconf);
 	}
 	reorder_paths(thread_ctx);
 	if (is_tx_thread)
