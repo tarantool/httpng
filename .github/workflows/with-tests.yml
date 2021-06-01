@@ -1,0 +1,49 @@
+name: Test buildability, then regressions
+
+on:
+  push:
+    branches: [ master ]
+  pull_request:
+    branches: [ master ]
+
+env:
+  # Customize the CMake build type here (Release, Debug, RelWithDebInfo, etc.)
+  BUILD_TYPE: Release
+
+jobs:
+  build:
+    # The CMake configure and build commands are platform agnostic and should work equally
+    # well on Windows or Mac.  You can convert this to a matrix build if you need
+    # cross-platform coverage.
+    # See: https://docs.github.com/en/free-pro-team@latest/actions/learn-github-actions/managing-complex-workflows#using-a-build-matrix
+
+    #strategy:
+    #  fail-fast: false
+    #  matrix:
+    #    os: ['ubuntu-latest', 'macos-latest']
+    #runs-on: ${{matrix.os}}
+    runs-on: 'ubuntu-latest'
+
+    steps:
+    - name: Where we are?
+      run: cat /etc/os-release || cat /etc/issue || true
+
+    - uses: actions/checkout@v2
+
+    - name: Checkout submodules
+      run: git submodule update --init --recursive
+
+    - name: Build and install Tarantool
+      uses: ./.github/actions/build-tarantool
+
+    - name: Build httpng
+      uses: ./.github/actions/build-httpng
+
+    - name: Install luatest
+      working-directory: ${{github.workspace}}/build
+      run: ${{github.workspace}}/build/tarantool/build/extra/dist/tarantoolctl rocks install luatest
+
+    - name: Test HTTPNG (luatest)
+      working-directory: ${{github.workspace}}
+      # FIXME: luatest doesn't understand neither absolute paths nor ".."!
+      run: LUA_CPATH="${{github.workspace}}/build/?.dylib;${{github.workspace}}/build/?.so" build/.rocks/bin/luatest -v tests/all.lua
