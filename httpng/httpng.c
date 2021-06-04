@@ -2734,7 +2734,7 @@ static inline void tell_close_connection(our_sock_t *item)
 		h2o_http1_reqread_on_read(sock, err);
 		break;
 	case SOCK_PROTO_HTTP2:
-		h2o_http2_close_connection_now((h2o_http2_conn_t *)sock->data);
+		h2o_force_http2_close_connection_now((h2o_http2_conn_t *)sock->data);
 		break;
 	case SOCK_PROTO_EXPECT_PROXY:
 		/* FIXME: Looks like this would never happen. */
@@ -2770,13 +2770,7 @@ static void prepare_for_shutdown(thread_ctx_t *thread_ctx)
 	 * blocked). */
 
 	if (thread_ctx->use_graceful_shutdown)
-		/* FIXME: Modify libh2o to be even more graceful?
-		 * Force it to close all connections w/o active requests,
-		 * not just ignore keep-alive flag.
-		 * FIXME: Can't use h2o_context_request_shutdown() because it
-		 * activates timeout which we do not cancel thus causing
-		 * assert. */
-		thread_ctx->ctx.shutdown_requested = 1;
+		h2o_context_request_shutdown(&thread_ctx->ctx);
 	else
 		close_existing_connections(thread_ctx);
 	thread_ctx->do_not_exit_tx_fiber = thread_ctx->use_graceful_shutdown;
@@ -2792,7 +2786,7 @@ static void prepare_for_shutdown(thread_ctx_t *thread_ctx)
 static void handle_graceful_shutdown(thread_ctx_t *thread_ctx)
 {
 	if (!thread_ctx->use_graceful_shutdown)
-		return;
+		goto done;
 
 	close_existing_connections(thread_ctx);
 
@@ -2808,6 +2802,8 @@ static void handle_graceful_shutdown(thread_ctx_t *thread_ctx)
 	while (!thread_ctx->tx_done_notification_received)
 		h2o_evloop_run(loop, 1);
 #endif /* USE_LIBUV */
+done:
+	h2o_make_shutdown_ungraceful(&thread_ctx->ctx);
 }
 
 /* This is HTTP server thread main function. */
