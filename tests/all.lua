@@ -421,14 +421,15 @@ local check_site_content = function(cmd, str)
     end
 end
 
-g_hot_reload.test_extra_sites = function()
+local test_extra_sites = function(ver)
     local cfg = {
         sites = { { path = '/alt', handler = foo_handler } },
         threads = 4,
     }
     http.cfg(cfg)
-    local cmd_main = curl_bin..' -k -s https://localhost:8080'
-    local cmd_alt = curl_bin..' -k -s https://localhost:8080/alt'
+    local cmd_main = curl_bin .. ' ' .. ver .. ' -k -s https://localhost:8080'
+    local cmd_alt =
+        curl_bin .. ' ' .. ver .. ' -k -s https://localhost:8080/alt'
 
     check_site_content(cmd_main, 'not found')
     check_site_content(cmd_alt, 'foo')
@@ -440,14 +441,23 @@ g_hot_reload.test_extra_sites = function()
     check_site_content(cmd_alt, 'foo')
 end
 
-g_hot_reload.test_add_primary_handler = function()
+g_hot_reload.test_extra_sites_http1 = function()
+    test_extra_sites '--http1.1'
+end
+
+g_hot_reload.test_extra_sites_http2 = function()
+    test_extra_sites '--http2'
+end
+
+local test_add_primary_handler = function(ver)
     local cfg = {
         sites = { { path = '/alt', handler = foo_handler } },
         threads = 4,
     }
     http.cfg(cfg)
-    local cmd_main = curl_bin..' -k -s https://localhost:8080'
-    local cmd_alt = curl_bin..' -k -s https://localhost:8080/alt'
+    local cmd_main = curl_bin .. ' ' .. ver .. ' -k -s https://localhost:8080'
+    local cmd_alt =
+        curl_bin .. ' ' .. ver .. ' -k -s https://localhost:8080/alt'
 
     check_site_content(cmd_main, 'not found')
     check_site_content(cmd_alt, 'foo')
@@ -459,14 +469,23 @@ g_hot_reload.test_add_primary_handler = function()
     check_site_content(cmd_alt, 'foo')
 end
 
-g_hot_reload.test_add_intermediate_site = function()
+g_hot_reload.test_add_primary_handler_http1 = function()
+        test_add_primary_handler '--http1.1'
+end
+
+g_hot_reload.test_add_primary_handler_http2 = function()
+        test_add_primary_handler '--http2'
+end
+
+local test_add_intermediate_site = function(ver)
     local cfg = {
         handler = foo_handler,
         threads = 4,
     }
     http.cfg(cfg)
-    local cmd_main = curl_bin..' -k -s https://localhost:8080'
-    local cmd_alt = curl_bin..' -k -s https://localhost:8080/alt'
+    local cmd_main = curl_bin .. ' ' .. ver .. ' -k -s https://localhost:8080'
+    local cmd_alt =
+        curl_bin .. ' ' .. ver .. ' -k -s https://localhost:8080/alt'
 
     check_site_content(cmd_main, 'foo')
     check_site_content(cmd_alt, 'foo')
@@ -479,14 +498,23 @@ g_hot_reload.test_add_intermediate_site = function()
     check_site_content(cmd_alt, 'bar')
 end
 
-g_hot_reload.test_add_intermediate_site_alt = function()
+g_hot_reload.test_add_intermediate_site_http1 = function()
+    test_add_intermediate_site '--http1.1'
+end
+
+g_hot_reload.test_add_intermediate_site_http2 = function()
+    test_add_intermediate_site '--http2'
+end
+
+local test_add_intermediate_site_alt = function(ver)
     local cfg = {
         sites = { { path = '/', handler = foo_handler } },
         threads = 4,
     }
     http.cfg(cfg)
-    local cmd_main = curl_bin..' -k -s https://localhost:8080'
-    local cmd_alt = curl_bin..' -k -s https://localhost:8080/alt'
+    local cmd_main = curl_bin .. ' ' .. ver .. ' -k -s https://localhost:8080'
+    local cmd_alt =
+        curl_bin .. ' ' .. ver .. ' -k -s https://localhost:8080/alt'
 
     check_site_content(cmd_main, 'foo')
     check_site_content(cmd_alt, 'foo')
@@ -498,14 +526,24 @@ g_hot_reload.test_add_intermediate_site_alt = function()
     check_site_content(cmd_alt, 'bar')
 end
 
-g_hot_reload.test_add_duplicate_paths = function()
+g_hot_reload.test_add_intermediate_site_alt_http1 = function()
+    test_add_intermediate_site_alt '--http1.1'
+end
+
+g_hot_reload.test_add_intermediate_site_alt_http2 = function()
+    test_add_intermediate_site_alt '--http2'
+end
+
+local test_add_duplicate_paths = function(ver)
     local cfg = {
         sites = { { path = '/foo', handler = foo_handler } },
         threads = 4,
     }
     http.cfg(cfg)
-    local cmd_main = curl_bin..' -k -s https://localhost:8080/foo'
-    local cmd_alt = curl_bin..' -k -s https://localhost:8080/bar'
+    local cmd_main =
+        curl_bin .. ' ' .. ver .. ' -k -s https://localhost:8080/foo'
+    local cmd_alt =
+        curl_bin .. ' ' .. ver .. ' -k -s https://localhost:8080/bar'
 
     check_site_content(cmd_main, 'foo')
     check_site_content(cmd_alt, 'not found')
@@ -519,14 +557,23 @@ g_hot_reload.test_add_duplicate_paths = function()
     check_site_content(cmd_alt, 'not found')
 end
 
-g_hot_reload.test_add_duplicate_paths_alt = function()
+g_hot_reload.test_add_duplicate_paths_http1 = function()
+    test_add_duplicate_paths '--http1.1'
+end
+
+g_hot_reload.test_add_duplicate_paths_http2 = function()
+    test_add_duplicate_paths '--http2'
+end
+
+local test_add_duplicate_paths_alt = function(ver)
     local cfg = {
         sites = { { path = '/', handler = foo_handler } },
         threads = 4,
     }
     http.cfg(cfg)
-    local cmd_main = curl_bin..' -k -s https://localhost:8080'
-    local cmd_alt = curl_bin..' -k -s https://localhost:8080/alt'
+    local cmd_main = curl_bin .. ' ' .. ver .. ' -k -s https://localhost:8080'
+    local cmd_alt =
+        curl_bin .. ' ' .. ver .. ' -k -s https://localhost:8080/alt'
 
     check_site_content(cmd_main, 'foo')
     check_site_content(cmd_alt, 'foo')
@@ -540,7 +587,15 @@ g_hot_reload.test_add_duplicate_paths_alt = function()
     check_site_content(cmd_alt, 'foo')
 end
 
-g_hot_reload.test_remove_path = function()
+g_hot_reload.test_add_duplicate_paths_alt_http1 = function()
+    test_add_duplicate_paths_alt '--http1.1'
+end
+
+g_hot_reload.test_add_duplicate_paths_alt_http2 = function()
+    test_add_duplicate_paths_alt '--http2'
+end
+
+local test_remove_path = function(ver)
     local cfg = {
         sites = {
             { path = '/foo', handler = foo_handler },
@@ -549,8 +604,10 @@ g_hot_reload.test_remove_path = function()
         threads = 4,
     }
     http.cfg(cfg)
-    local cmd_main = curl_bin..' -k -s https://localhost:8080/foo'
-    local cmd_alt = curl_bin..' -k -s https://localhost:8080/bar'
+    local cmd_main =
+        curl_bin .. ' ' .. ver .. ' -k -s https://localhost:8080/foo'
+    local cmd_alt =
+        curl_bin .. ' ' .. ver .. ' -k -s https://localhost:8080/bar'
 
     check_site_content(cmd_main, 'foo')
     check_site_content(cmd_alt, 'bar')
@@ -562,7 +619,15 @@ g_hot_reload.test_remove_path = function()
     check_site_content(cmd_alt, 'not found')
 end
 
-g_hot_reload.test_remove_all_paths = function()
+g_hot_reload.test_remove_path_http1 = function()
+    test_remove_path '--http1.1'
+end
+
+g_hot_reload.test_remove_path_http2 = function()
+    test_remove_path '--http2'
+end
+
+local test_remove_all_paths = function(ver)
     local cfg = {
         sites = {
             { path = '/', handler = foo_handler },
@@ -570,7 +635,7 @@ g_hot_reload.test_remove_all_paths = function()
         threads = 4,
     }
     http.cfg(cfg)
-    local cmd_main = curl_bin..' -k -s https://localhost:8080/'
+    local cmd_main = curl_bin .. ' ' .. ver .. ' -k -s https://localhost:8080'
 
     check_site_content(cmd_main, 'foo')
 
@@ -580,13 +645,21 @@ g_hot_reload.test_remove_all_paths = function()
     check_site_content(cmd_main, 'not found')
 end
 
-g_hot_reload.test_remove_all_paths_alt = function()
+g_hot_reload.test_remove_all_paths_http1 = function()
+    test_remove_all_paths '--http1.1'
+end
+
+g_hot_reload.test_remove_all_paths_http2 = function()
+    test_remove_all_paths '--http2'
+end
+
+local test_remove_all_paths_alt = function(ver)
     local cfg = {
         handler = foo_handler,
         threads = 4,
     }
     http.cfg(cfg)
-    local cmd_main = curl_bin..' -k -s https://localhost:8080/'
+    local cmd_main = curl_bin .. ' ' .. ver .. ' -k -s https://localhost:8080'
 
     check_site_content(cmd_main, 'foo')
 
@@ -594,6 +667,14 @@ g_hot_reload.test_remove_all_paths_alt = function()
 
     http.cfg(cfg)
     check_site_content(cmd_main, 'not found')
+end
+
+g_hot_reload.test_remove_all_paths_alt_http1 = function()
+    test_remove_all_paths_alt '--http1.1'
+end
+
+g_hot_reload.test_remove_all_paths_alt_http2 = function()
+    test_remove_all_paths_alt '--http2'
 end
 
 g_hot_reload.test_change_params = function()
@@ -664,7 +745,12 @@ g_hot_reload.test_FLAKY_after_decrease_threads = function()
 end
 
 g_hot_reload.test_combo1 = function()
-    g_hot_reload.test_extra_sites()
+    g_hot_reload.test_extra_sites_http1()
+    g_bad_handlers.test_write_params()
+end
+
+g_hot_reload.test_combo3 = function()
+    g_hot_reload.test_extra_sites_http2()
     g_bad_handlers.test_write_params()
 end
 
@@ -682,7 +768,7 @@ function shutdown_and_kill_curls()
 end
 g_hot_reload_with_curls.after_each(shutdown_and_kill_curls)
 
-g_hot_reload_with_curls.test_FLAKY_decrease_stubborn_threads = function()
+local test_FLAKY_decrease_stubborn_threads = function(ver)
     local cfg = {
         handler = stubborn_handler,
         threads = 2,
@@ -695,8 +781,8 @@ g_hot_reload_with_curls.test_FLAKY_decrease_stubborn_threads = function()
     local i
     for i = 1, curl_count do
         curls[#curls + 1] =
-            popen.shell(curl_bin..' -k -s -o /dev/null https://localhost:8080',
-                "r")
+            popen.shell(curl_bin .. ' ' .. ver ..
+                ' -k -s -o /dev/null https://localhost:8080', 'r')
     end
     fiber.sleep(1)
 
@@ -720,13 +806,25 @@ g_hot_reload_with_curls.test_FLAKY_decrease_stubborn_threads = function()
     goto retry
 end
 
-g_hot_reload_with_curls.test_FLAKY_decrease_stubborn_threads_combo2 = function()
-    g_hot_reload.test_extra_sites()
-    g_hot_reload_with_curls.test_FLAKY_decrease_stubborn_threads()
+g_hot_reload_with_curls.test_FLAKY_decrease_stubborn_threads_http1 = function()
+    test_FLAKY_decrease_stubborn_threads '--http1.1'
 end
 
-g_hot_reload_with_curls.test_FLAKY_decrease_stubborn_threads_with_timeout =
-        function()
+g_hot_reload_with_curls.test_FLAKY_decrease_stubborn_threads_http2 = function()
+    test_FLAKY_decrease_stubborn_threads '--http2'
+end
+
+g_hot_reload_with_curls.test_FLAKY_decrease_stubborn_threads_combo2 = function()
+    g_hot_reload.test_extra_sites_http1()
+    g_hot_reload_with_curls.test_FLAKY_decrease_stubborn_threads_http1()
+end
+
+g_hot_reload_with_curls.test_FLAKY_decrease_stubborn_threads_combo4 = function()
+    g_hot_reload.test_extra_sites_http2()
+    g_hot_reload_with_curls.test_FLAKY_decrease_stubborn_threads_http2()
+end
+
+local test_FLAKY_decrease_stubborn_threads_with_timeout = function(ver)
     local cfg = {
         handler = stubborn_handler,
         threads = 2,
@@ -740,8 +838,8 @@ g_hot_reload_with_curls.test_FLAKY_decrease_stubborn_threads_with_timeout =
     local i
     for i = 1, curl_count do
         curls[#curls + 1] =
-            popen.shell(curl_bin..' -k -s -o /dev/null https://localhost:8080',
-                "r")
+            popen.shell(curl_bin .. ' ' .. ver ..
+                ' -k -s -o /dev/null https://localhost:8080', 'r')
     end
     fiber.sleep(1)
 
@@ -763,8 +861,18 @@ g_hot_reload_with_curls.test_FLAKY_decrease_stubborn_threads_with_timeout =
     goto retry
 end
 
-g_hot_reload_with_curls.test_FLAKY_decrease_not_so_stubborn_thr_with_timeout =
+g_hot_reload_with_curls.test_FLAKY_decrease_stubborn_threads_with_timeout_h1 =
         function()
+    test_FLAKY_decrease_stubborn_threads_with_timeout '--http1.1'
+end
+
+g_hot_reload_with_curls.test_FLAKY_decrease_stubborn_threads_with_timeout_h2 =
+        function()
+    test_FLAKY_decrease_stubborn_threads_with_timeout '--http2'
+end
+
+local test_FLAKY_decrease_not_so_stubborn_thr_with_timeout =
+        function(ver)
     local cfg = {
         handler = stubborn2_handler,
         threads = 2,
@@ -778,8 +886,8 @@ g_hot_reload_with_curls.test_FLAKY_decrease_not_so_stubborn_thr_with_timeout =
     local i
     for i = 1, curl_count do
         curls[#curls + 1] =
-            popen.shell(curl_bin..' -k -s -o /dev/null https://localhost:8080',
-                "r")
+            popen.shell(curl_bin .. ' ' .. ver ..
+                ' -k -s -o /dev/null https://localhost:8080', 'r')
     end
     assert(cfg.thread_termination_timeout > 0.5)
     fiber.sleep(0.5)
@@ -804,6 +912,16 @@ g_hot_reload_with_curls.test_FLAKY_decrease_not_so_stubborn_thr_with_timeout =
     goto retry
 end
 
+g_hot_reload_with_curls.test_FLAKY_decr_not_so_stubborn_thr_with_timeout_h1 =
+        function()
+    test_FLAKY_decrease_not_so_stubborn_thr_with_timeout '--http1.1'
+end
+
+g_hot_reload_with_curls.test_FLAKY_decr_not_so_stubborn_thr_with_timeout_h2 =
+        function()
+    test_FLAKY_decrease_not_so_stubborn_thr_with_timeout '--http2'
+end
+
 local alt_foo_handler = function(req, io)
     return { body = 'FOO' }
 end
@@ -812,7 +930,7 @@ local alt_bar_handler = function(req, io)
     return { body = 'BAR' }
 end
 
-g_hot_reload.test_replace_handlers = function()
+local test_replace_handlers = function(ver)
     local cfg = {
         handler = foo_handler,
         sites = { { path = '/alt', handler = alt_foo_handler } },
@@ -821,8 +939,9 @@ g_hot_reload.test_replace_handlers = function()
 
     http.cfg(cfg)
 
-    local cmd_main = curl_bin..' -k -s https://localhost:8080'
-    local cmd_alt = curl_bin..' -k -s https://localhost:8080/alt'
+    local cmd_main = curl_bin .. ' ' .. ver .. ' -k -s https://localhost:8080'
+    local cmd_alt =
+        curl_bin .. ' ' .. ver .. ' -k -s https://localhost:8080/alt'
     local check = check_site_content
 
     check(cmd_main, 'foo')
@@ -834,6 +953,14 @@ g_hot_reload.test_replace_handlers = function()
 
     check(cmd_main, 'bar')
     check(cmd_alt, 'BAR')
+end
+
+g_hot_reload.test_replace_handlers_http1 = function()
+    test_replace_handlers '--http1.1'
+end
+
+g_hot_reload.test_replace_handlers_http2 = function()
+    test_replace_handlers '--http2'
 end
 
 g_hot_reload.test_force_decrease_threads = function()
@@ -858,20 +985,86 @@ local query_handler = function(req, io)
     return {body = payload}
 end
 
-g_good_handlers.test_expected_query = function()
+local test_expected_query = function(ver)
     http.cfg{listen = { {port = 8080} }, handler = query_handler}
-    local cmd_main = curl_bin..' -k -s https://localhost:8080?id=2'
+    local cmd_main =
+        curl_bin .. ' ' .. ver .. ' -k -s https://localhost:8080?id=2'
     check_site_content(cmd_main, 'good')
 end
 
-g_good_handlers.test_unexpected_query = function()
+g_good_handlers.test_expected_query_http1 = function()
+    test_expected_query '--http1.1'
+end
+
+g_good_handlers.test_expected_query_http2 = function()
+    test_expected_query '--http2'
+end
+
+local test_unexpected_query = function(ver)
     http.cfg{listen = { {port = 8080} }, handler = query_handler}
-    local cmd_main = curl_bin..' -k -s https://localhost:8080?id=3'
+    local cmd_main =
+        curl_bin .. ' ' .. ver .. ' -k -s https://localhost:8080?id=3'
     check_site_content(cmd_main, 'bad')
 end
 
-g_good_handlers.test_no_query = function()
+g_good_handlers.test_unexpected_query_http1 = function()
+    test_unexpected_query '--http1.1'
+end
+
+g_good_handlers.test_unexpected_query_http2 = function()
+    test_unexpected_query '--http2'
+end
+
+local test_no_query = function(ver)
     http.cfg{listen = { {port = 8080} }, handler = query_handler}
-    local cmd_main = curl_bin..' -k -s https://localhost:8080'
+    local cmd_main = curl_bin .. ' ' .. ver .. ' -k -s https://localhost:8080'
     check_site_content(cmd_main, 'bad')
+end
+
+g_good_handlers.test_no_query_http1 = function()
+    test_no_query '--http1.1'
+end
+
+g_good_handlers.test_no_query_http2 = function()
+    test_no_query '--http2'
+end
+
+local version_handler_launched = false
+local received_http1_req = false
+local received_http2_req = false
+local check_http_version_handler = function(req, io)
+    version_handler_launched = true
+    if (req.version_major == 2) then
+        received_http2_req = true
+    else
+        if (req.version_major == 1) then
+            received_http1_req = true
+        end
+    end
+    return {body = 'foo'}
+end
+
+g_good_handlers.test_curl_supports_v1 = function()
+    version_handler_launched = false
+    received_http1_req = false
+    received_http2_req = false
+    http.cfg{listen = { {port = 8080} }, handler = check_http_version_handler }
+    local cmd_main = curl_bin ..' -k -s --http1.1 https://localhost:8080'
+    check_site_content(cmd_main, 'foo')
+    assert(version_handler_launched == true)
+    assert(received_http1_req == true)
+    assert(received_http2_req == false)
+end
+
+g_good_handlers.test_curl_supports_v2 = function()
+    version_handler_launched = false
+    received_http1_req = false
+    received_http2_req = false
+    http.cfg{listen = { {port = 8080} }, handler = check_http_version_handler }
+    local cmd_alt = curl_bin .. ' -k -s --http2 https://localhost:8080'
+    check_site_content(cmd_alt, 'foo')
+    assert(version_handler_launched == true)
+    assert(received_http1_req == false,
+        'http/2 support in curl is required to test everything fully')
+    assert(received_http2_req == true)
 end
