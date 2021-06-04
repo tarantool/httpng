@@ -26,7 +26,7 @@ jobs:
 
     steps:
     - name: Where we are?
-      run: cat /etc/os-release || cat /etc/issue || true
+      run: uname -a; cat /etc/os-release || cat /etc/issue || python -m platform || true
 
     - uses: actions/checkout@v2
 
@@ -46,4 +46,4 @@ jobs:
     - name: Test HTTPNG (luatest)
       working-directory: ${{github.workspace}}
       # FIXME: luatest doesn't understand neither absolute paths nor ".."!
-      run: LUA_CPATH="${{github.workspace}}/build/?.dylib;${{github.workspace}}/build/?.so" build/.rocks/bin/luatest -v tests/all.lua
+      run: LUA_CPATH="${{github.workspace}}/build/?.dylib;${{github.workspace}}/build/?.so" build/.rocks/bin/luatest -v -r 2 tests/all.lua
