@@ -308,6 +308,7 @@ end
 
 local function cfg_bad_handlers()
     write_handler_launched = false
+    write_header_handler_launched = false
     http.cfg({ sites = {
         { path = '/write', handler = write_handler },
         { path = '/write_header', handler = write_header_handler },
