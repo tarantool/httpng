@@ -21,7 +21,10 @@ local http = require 'httpng'
 
 http.cfg{
     listen = {
-        { port = 8080 },
+        {
+            port = 8080,
+            tls = { require 'examples.ssl_pairs'.foo },
+        },
     },
     threads = 8,
     openssl_security_level = 0,

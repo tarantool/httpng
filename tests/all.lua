@@ -101,23 +101,13 @@ g_wrong_config.test_sites_handler_is_not_a_function = function()
         http.cfg, { sites = { { path = '/', handler = 42 }, } })
 end
 
-g_wrong_config.test_listen_not_a_table = function()
-    t.assert_error_msg_content_equals('listen is not a table',
-        http.cfg, { handler = function() end, listen = 42 })
-end
-
-g_wrong_config.test_listen_invalid = function()
-    t.assert_error_msg_content_equals('listen is not a table of tables',
-        http.cfg, { handler = function() end, listen = { port = 8080 } })
-end
-
 g_wrong_config.test_listen_port_invalid = function()
     t.assert_error_msg_content_equals('invalid port specified',
         http.cfg, { handler = function() end, listen = { { port = 77777 } } })
 end
 
 g_wrong_config.test_listen_port_root = function()
-    t.assert_error_msg_content_equals('Failed to listen',
+    t.assert_error_msg_content_equals('bind error',
         http.cfg, { handler = function() end, listen = { { port = 80 } } })
 end
 
@@ -306,13 +296,25 @@ local write_header_handler = function(req, io)
     io:close()
 end
 
+
+local ssl_pairs = require 'tests.ssl_pairs'
+local listen_with_single_ssl_pair = {
+    port = 8080,
+    tls = {
+        ssl_pairs['foo'],
+    }
+}
+
 local function cfg_bad_handlers()
     write_handler_launched = false
     write_header_handler_launched = false
-    http.cfg({ sites = {
-        { path = '/write', handler = write_handler },
-        { path = '/write_header', handler = write_header_handler },
-    }})
+    http.cfg({
+        sites = {
+            { path = '/write', handler = write_handler },
+            { path = '/write_header', handler = write_header_handler },
+        },
+        listen = listen_with_single_ssl_pair,
+    })
 end
 
 g_bad_handlers.test_write_params = function()
@@ -425,6 +427,7 @@ local test_extra_sites = function(ver)
     local cfg = {
         sites = { { path = '/alt', handler = foo_handler } },
         threads = 4,
+        listen = listen_with_single_ssl_pair,
     }
     http.cfg(cfg)
     local cmd_main = curl_bin .. ' ' .. ver .. ' -k -s https://localhost:8080'
@@ -453,6 +456,7 @@ local test_add_primary_handler = function(ver)
     local cfg = {
         sites = { { path = '/alt', handler = foo_handler } },
         threads = 4,
+        listen = listen_with_single_ssl_pair,
     }
     http.cfg(cfg)
     local cmd_main = curl_bin .. ' ' .. ver .. ' -k -s https://localhost:8080'
@@ -481,6 +485,7 @@ local test_add_intermediate_site = function(ver)
     local cfg = {
         handler = foo_handler,
         threads = 4,
+        listen = listen_with_single_ssl_pair,
     }
     http.cfg(cfg)
     local cmd_main = curl_bin .. ' ' .. ver .. ' -k -s https://localhost:8080'
@@ -510,6 +515,7 @@ local test_add_intermediate_site_alt = function(ver)
     local cfg = {
         sites = { { path = '/', handler = foo_handler } },
         threads = 4,
+        listen = listen_with_single_ssl_pair,
     }
     http.cfg(cfg)
     local cmd_main = curl_bin .. ' ' .. ver .. ' -k -s https://localhost:8080'
@@ -538,6 +544,7 @@ local test_add_duplicate_paths = function(ver)
     local cfg = {
         sites = { { path = '/foo', handler = foo_handler } },
         threads = 4,
+        listen = listen_with_single_ssl_pair,
     }
     http.cfg(cfg)
     local cmd_main =
@@ -569,6 +576,7 @@ local test_add_duplicate_paths_alt = function(ver)
     local cfg = {
         sites = { { path = '/', handler = foo_handler } },
         threads = 4,
+        listen = listen_with_single_ssl_pair,
     }
     http.cfg(cfg)
     local cmd_main = curl_bin .. ' ' .. ver .. ' -k -s https://localhost:8080'
@@ -602,6 +610,7 @@ local test_remove_path = function(ver)
             { path = '/bar', handler = bar_handler },
         },
         threads = 4,
+        listen = listen_with_single_ssl_pair,
     }
     http.cfg(cfg)
     local cmd_main =
@@ -633,6 +642,7 @@ local test_remove_all_paths = function(ver)
             { path = '/', handler = foo_handler },
         },
         threads = 4,
+        listen = listen_with_single_ssl_pair,
     }
     http.cfg(cfg)
     local cmd_main = curl_bin .. ' ' .. ver .. ' -k -s https://localhost:8080'
@@ -657,6 +667,7 @@ local test_remove_all_paths_alt = function(ver)
     local cfg = {
         handler = foo_handler,
         threads = 4,
+        listen = listen_with_single_ssl_pair,
     }
     http.cfg(cfg)
     local cmd_main = curl_bin .. ' ' .. ver .. ' -k -s https://localhost:8080'
@@ -772,6 +783,7 @@ local test_FLAKY_decrease_stubborn_threads = function(ver)
     local cfg = {
         handler = stubborn_handler,
         threads = 2,
+        listen = listen_with_single_ssl_pair,
     }
 
     http.cfg(cfg)
@@ -829,6 +841,7 @@ local test_FLAKY_decrease_stubborn_threads_with_timeout = function(ver)
         handler = stubborn_handler,
         threads = 2,
         thread_termination_timeout = 3,
+        listen = listen_with_single_ssl_pair,
     }
 
     http.cfg(cfg)
@@ -877,6 +890,7 @@ local test_FLAKY_decrease_not_so_stubborn_thr_with_timeout =
         handler = stubborn2_handler,
         threads = 2,
         thread_termination_timeout = 3,
+        listen = listen_with_single_ssl_pair,
     }
 
     http.cfg(cfg)
@@ -935,6 +949,7 @@ local test_replace_handlers = function(ver)
         handler = foo_handler,
         sites = { { path = '/alt', handler = alt_foo_handler } },
         threads = 4,
+        listen = listen_with_single_ssl_pair,
     }
 
     http.cfg(cfg)
@@ -986,7 +1001,7 @@ local query_handler = function(req, io)
 end
 
 local test_expected_query = function(ver)
-    http.cfg{listen = { {port = 8080} }, handler = query_handler}
+    http.cfg{listen = listen_with_single_ssl_pair, handler = query_handler}
     local cmd_main =
         curl_bin .. ' ' .. ver .. ' -k -s https://localhost:8080?id=2'
     check_site_content(cmd_main, 'good')
@@ -1001,7 +1016,7 @@ g_good_handlers.test_expected_query_http2 = function()
 end
 
 local test_unexpected_query = function(ver)
-    http.cfg{listen = { {port = 8080} }, handler = query_handler}
+    http.cfg{listen = listen_with_single_ssl_pair, handler = query_handler}
     local cmd_main =
         curl_bin .. ' ' .. ver .. ' -k -s https://localhost:8080?id=3'
     check_site_content(cmd_main, 'bad')
@@ -1016,7 +1031,7 @@ g_good_handlers.test_unexpected_query_http2 = function()
 end
 
 local test_no_query = function(ver)
-    http.cfg{listen = { {port = 8080} }, handler = query_handler}
+    http.cfg{listen = listen_with_single_ssl_pair, handler = query_handler}
     local cmd_main = curl_bin .. ' ' .. ver .. ' -k -s https://localhost:8080'
     check_site_content(cmd_main, 'bad')
 end
@@ -1048,7 +1063,7 @@ g_good_handlers.test_curl_supports_v1 = function()
     version_handler_launched = false
     received_http1_req = false
     received_http2_req = false
-    http.cfg{listen = { {port = 8080} }, handler = check_http_version_handler }
+    http.cfg{listen = listen_with_single_ssl_pair, handler = check_http_version_handler }
     local cmd_main = curl_bin ..' -k -s --http1.1 https://localhost:8080'
     check_site_content(cmd_main, 'foo')
     assert(version_handler_launched == true)
@@ -1060,7 +1075,7 @@ g_good_handlers.test_curl_supports_v2 = function()
     version_handler_launched = false
     received_http1_req = false
     received_http2_req = false
-    http.cfg{listen = { {port = 8080} }, handler = check_http_version_handler }
+    http.cfg{listen = listen_with_single_ssl_pair, handler = check_http_version_handler }
     local cmd_alt = curl_bin .. ' -k -s --http2 https://localhost:8080'
     check_site_content(cmd_alt, 'foo')
     assert(version_handler_launched == true)

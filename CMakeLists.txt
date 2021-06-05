@@ -89,10 +89,19 @@ if (HTTPNG_USE_LIBUV)
     add_definitions(-DUSE_LIBUV)
 endif (HTTPNG_USE_LIBUV)
 
-set(HEADERS include/tarantool-httpng/httpng.h)
+
+#set(HEADERS include/tarantool-httpng/httpng.h)
+set(HEADERS ${HEADERS} httpng/openssl_utils.h)
 
 #set_source_files_properties(httpng/httpng.c PROPERTIES LANGUAGE CXX)
-build_module(httpng httpng/httpng.c ${HEADERS})
+set (HTTPNG_C_SRC
+                  httpng/httpng.c
+                  httpng/openssl_utils.c
+)
+
+set(HTTPNG_SRC ${HTTPNG_C_SRC} ${HEADERS})
+
+build_module(httpng_c "${HTTPNG_SRC}")
 
 set(LIBS wslay xtm_api_static)
 
@@ -104,7 +113,7 @@ endif (HTTPNG_USE_LIBUV)
 
 if (ENABLE_FD_LEAK_DETECTOR)
     set(LEAK httpng/fd-leak-detector.h)
-    target_precompile_headers(httpng PUBLIC ${LEAK})
+    target_precompile_headers(httpng_c PUBLIC ${LEAK})
     target_precompile_headers(libh2o PUBLIC ${LEAK})
     target_precompile_headers(libh2o-evloop PUBLIC ${LEAK})
     target_precompile_headers(xtm_api_static PUBLIC ${LEAK})
@@ -113,13 +122,19 @@ if (ENABLE_FD_LEAK_DETECTOR)
     set(LIBS ${LIBS} fd-leak-detector)
 endif (ENABLE_FD_LEAK_DETECTOR)
 
-target_link_libraries(httpng ${LIBS})
+target_link_libraries(httpng_c ${LIBS})
+# FIXME: Make runtime configurable from Lua.
+if (DISABLE_HTTP2)
+    target_compile_definitions(httpng_c PRIVATE "DISABLE_HTTP2")
+endif(DISABLE_HTTP2)
 
 if (NOT(ENABLE_ASAN))
     # Just test
-    add_custom_target(test-linkability ALL COMMAND "$ENV{SHELL}" "${CMAKE_CURRENT_SOURCE_DIR}/tests/linkability-helper.sh" "${CMAKE_CURRENT_SOURCE_DIR}/tests/linkability.lua")
-    add_dependencies(test-linkability httpng)
+    add_custom_target(test-linkability ALL COMMAND "$ENV{SHELL}" "${CMAKE_CURRENT_SOURCE_DIR}/tests/linkability-helper.sh"
+        "${CMAKE_CURRENT_SOURCE_DIR}/?.lua" "${CMAKE_CURRENT_SOURCE_DIR}/tests/linkability.lua")
+    add_dependencies(test-linkability httpng_c)
 endif (NOT(ENABLE_ASAN))
 
 # Install library
-install(TARGETS httpng LIBRARY DESTINATION ${TARANTOOL_INSTALL_LIBDIR})
+install(TARGETS httpng_c LIBRARY DESTINATION ${TARANTOOL_INSTALL_LIBDIR})
+install(FILES httpng.lua DESTINATION ${TARANTOOL_INSTALL_LUADIR})
