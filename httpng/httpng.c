@@ -4,6 +4,7 @@
 #include <lauxlib.h>
 #include <module.h>
 #include <semaphore.h>
+#include <string.h>
 
 #include <xtm/xtm_api.h>
 
@@ -17,6 +18,8 @@
 #include <h2o/websocket.h>
 #include "../third_party/h2o/deps/cloexec/cloexec.h"
 #include "httpng_sem.h"
+#include <openssl/err.h>
+#include "openssl_utils.h"
 
 #ifdef USE_LIBUV
 #include <uv.h>
@@ -68,12 +71,7 @@
 #define SPLIT_LARGE_BODY
 //#undef SPLIT_LARGE_BODY
 
-#define USE_HTTPS 1
-//#define USE_HTTPS 0
 
-/* For debugging. FIXME: Make runtime configurable from Lua. */
-#define DISABLE_HTTP2
-#undef DISABLE_HTTP2
 
 #define H2O_DEFAULT_PORT_FOR_PROTOCOL_USED 65535
 #define H2O_CONTENT_LENGTH_UNSPECIFIED SIZE_MAX
@@ -100,7 +98,6 @@
 #define MAX_shuttle_size (16 * 1024 * 1024)
 #define MAX_max_body_len (64ULL * 1024 * 1024 * 1024)
 
-#define DEFAULT_LISTEN_PORT 8080
 
 /* N.b.: for SSL3 to work you should probably use custom OpenSSL build. */
 #define SSL3_STR "ssl3"
@@ -119,6 +116,12 @@
 	const typeof( ((type *)0)->member  ) *__mptr = \
 		(typeof( &((type *)0)->member  ))(ptr); \
 	(type *)( (char *)__mptr - offsetof(type,member)  );})
+
+#define DEFAULT_MIN_TLS_PROTO_VERSION_NUM TLS1_2_VERSION
+#define DEFAULT_MIN_TLS_PROTO_VERSION_STR TLS1_2_STR
+#define DEFAULT_OPENSSL_SECURITY_LEVEL 1
+
+#define STR_PORT_LENGTH 8
 
 struct listener_ctx;
 
@@ -223,9 +226,24 @@ typedef struct listener_ctx {
 } listener_ctx_t;
 
 typedef struct {
+	SSL_CTX *ssl_ctx;
 	int fd;
 	bool is_opened;
 } listener_cfg_t;
+
+typedef struct st_sni_map {
+	SSL_CTX **ssl_ctxs; /* Set of all ctxs for listener */
+	size_t ssl_ctxs_capacity;
+	size_t ssl_ctxs_size;
+
+	struct {
+		h2o_iovec_t hostname;
+		SSL_CTX *ssl_ctx;
+	} *sni_fields;
+	size_t sni_fields_size;
+	size_t sni_fields_capacity;
+} sni_map_t;
+typedef sni_map_t servername_callback_arg_t;
 
 typedef struct waiter {
 	struct waiter *next;
@@ -355,10 +373,12 @@ static struct {
 	struct fiber *reaper_fiber;
 	struct fiber *fiber_to_wake_by_reaper_fiber;
 	struct fiber *fiber_to_wake_on_reaping_done;
-	SSL_CTX *ssl_ctx;
 	lua_site_t *lua_sites;
+	sni_map_t **sni_maps;
 	double thread_termination_timeout;
 	double thr_timeout_start;
+	uint64_t openssl_security_level;
+	long min_tls_proto_version;
 	unsigned lua_site_count;
 	unsigned shuttle_size;
 	unsigned recv_data_size;
@@ -399,6 +419,12 @@ __thread thread_ctx_t *curr_thread_ctx;
 
 static const char msg_cant_reap[] =
 	"Unable to reconfigure until threads will shut down";
+static const char msg_bad_cert_num[] =
+	"Only one key/certificate pair can be specified if SNI is disabled";
+#ifndef NDEBUG
+static const char msg_cant_switch_ssl_ctx[] =
+	"Error while switching SSL context after scanning TLS SNI";
+#endif /* NDEBUG */
 
 /* Must be called in HTTP server thread.
  * Should only be called if disposed==true
@@ -2323,143 +2349,16 @@ static inline void set_cloexec(int fd)
 	(void)result; /* To build w/disabled assert(). */
 }
 
-/* Returns file descriptor or -1 on error. */
-static int open_listener_ipv4(const char *addr_str, uint16_t port)
-{
-	struct sockaddr_in addr;
-	int fd;
-
-	memset(&addr, 0, sizeof(addr));
-	addr.sin_family = AF_INET;
-	if (!inet_aton(addr_str, &addr.sin_addr)) {
-		return -1;
-	}
-	addr.sin_port = htons(port);
-
-	int flags = SOCK_STREAM;
-#ifdef SOCK_CLOEXEC
-	flags |= SOCK_CLOEXEC;
-#endif /* SOCK_CLOEXEC */
-	if ((fd = socket(AF_INET, flags, 0)) == -1) {
-		return -1;
-	}
-#ifndef SOCK_CLOEXEC
-	if (fcntl(fd, F_SETFD, FD_CLOEXEC) < 0) {
-		close(fd);
-		return -1;
-	}
-#endif /* SOCK_CLOEXEC */
-
-	int reuseaddr_flag = 1;
-	if (setsockopt(fd, SOL_SOCKET, SO_REUSEADDR, &reuseaddr_flag,
-	    sizeof(reuseaddr_flag)) != 0 ||
-            bind(fd, (struct sockaddr *)&addr, sizeof(addr)) != 0 ||
-	    listen(fd, SOMAXCONN) != 0) {
-		close(fd);
-		/* TODO: Log error. */
-		return -1;
-	}
-
-#ifdef TCP_DEFER_ACCEPT
-	{
-		/* We are only interested in connections
-		 * when actual data is received. */
-		int flag = 1;
-		if (setsockopt(fd, IPPROTO_TCP, TCP_DEFER_ACCEPT, &flag,
-		    sizeof(flag)) != 0) {
-			close(fd);
-			/* TODO: Log error. */
-			return -1;
-		}
-	}
-#endif /* TCP_DEFER_ACCEPT */
-
-	if (conf.tfo_queues > 0) {
-		/* TCP extension to do not wait for SYN/ACK for "known"
-		 * clients. */
-#ifdef TCP_FASTOPEN
-		int tfo_queues;
-#ifdef __APPLE__
-		/* In OS X, the option value for TCP_FASTOPEN must be 1
-		 * if is's enabled. */
-		tfo_queues = 1;
-#else
-		tfo_queues = conf.tfo_queues;
-#endif /* __APPLE__ */
-		if (setsockopt(fd, IPPROTO_TCP, TCP_FASTOPEN,
-		    (const void *)&tfo_queues, sizeof(tfo_queues)) != 0) {
-			/* TODO: Log warning. */
-		}
-#else
-		assert(!".tfo_queues not zero on platform w/o TCP_FASTOPEN");
-#endif /* TCP_FASTOPEN */
-	}
-
-	return fd;
-}
-
-static SSL_CTX *setup_ssl(const char *cert_file, const char *key_file,
-	int level, long min_proto_version)
-{
-#ifndef OPENSSL_VERSION_NUMBER
-#error "OPENSSL_VERSION_NUMBER is not defined"
-#endif /* OPENSSL_VERSION_NUMBER */
-#if OPENSSL_VERSION_NUMBER < 0x1010000fL
-#error "OpenSSL 1.1.* is required"
-#endif /* OPENSSL_VERSION_NUMBER < 0x1010000fL */
-	if (!SSL_load_error_strings())
-		return NULL;
-	SSL_library_init(); /* Always succeeds */
-	OpenSSL_add_all_algorithms();
-
-	SSL_CTX *ssl_ctx = SSL_CTX_new(SSLv23_server_method());
-	if (ssl_ctx == NULL)
-		return NULL;
-
-	SSL_CTX_set_min_proto_version(ssl_ctx, min_proto_version);
-
-	SSL_CTX_set_security_level(ssl_ctx, level);
-
-	if (SSL_CTX_use_certificate_file(ssl_ctx, cert_file,
-	    SSL_FILETYPE_PEM) != 1) {
-		SSL_CTX_free(ssl_ctx);
-		return NULL;
-	}
-	if (SSL_CTX_use_PrivateKey_file(ssl_ctx, key_file,
-	    SSL_FILETYPE_PEM) != 1) {
-		SSL_CTX_free(ssl_ctx);
-		return NULL;
-	}
-
-/* Setup protocol negotiation methods. */
-#if H2O_USE_NPN
-	h2o_ssl_register_npn_protocols(ssl_ctx, h2o_http2_npn_protocols);
-#endif /* H2O_USE_NPN */
-#if H2O_USE_ALPN
-#ifdef DISABLE_HTTP2
-	/* Disable HTTP/2 e. g. to test WebSockets. */
-	static const h2o_iovec_t my_alpn_protocols[] = {
-		{H2O_STRLIT("http/1.1")}, {NULL}
-	};
-	h2o_ssl_register_alpn_protocols(ssl_ctx, my_alpn_protocols);
-#else /* DISABLE_HTTP2 */
-
-	h2o_ssl_register_alpn_protocols(ssl_ctx, h2o_http2_alpn_protocols);
-#endif /* DISABLE_HTTP2 */
-#endif /* H2O_USE_ALPN */
-
-	return ssl_ctx;
-}
-
 /* Launched in TX thread. */
 static void
-register_listener_cfgs_socket(int fd, unsigned listener_idx)
+register_listener_cfgs_socket(int fd, SSL_CTX *ssl_ctx, unsigned listener_idx)
 {
 	assert(listener_idx < conf.num_listeners);
 	listener_cfg_t *const listener_cfg =
 		&conf.listener_cfgs[listener_idx];
 	assert(!listener_cfg->is_opened);
 	listener_cfg->fd = fd;
+	listener_cfg->ssl_ctx = ssl_ctx;
 	listener_cfg->is_opened = true;
 }
 
@@ -2475,6 +2374,10 @@ close_listener_cfgs_sockets(void)
 		if (listener_cfg->is_opened) {
 			close(listener_cfg->fd);
 			listener_cfg->is_opened = false;
+		}
+		if (listener_cfg->ssl_ctx != NULL) {
+			SSL_CTX_free(listener_cfg->ssl_ctx);
+			listener_cfg->ssl_ctx = NULL;
 		}
 	}
 }
@@ -2497,7 +2400,7 @@ prepare_listening_sockets(thread_ctx_t *thread_ctx)
 		assert(listener_cfg->is_opened);
 		memset(listener_ctx, 0, sizeof(*listener_ctx));
 		listener_ctx->thread_ctx = thread_ctx;
-		listener_ctx->accept_ctx.ssl_ctx = conf.ssl_ctx;
+		listener_ctx->accept_ctx.ssl_ctx = listener_cfg->ssl_ctx;
 		listener_ctx->accept_ctx.ctx = &thread_ctx->ctx;
 		listener_ctx->accept_ctx.hosts = thread_ctx->globalconf.hosts;
 		listener_ctx->sock = NULL;
@@ -2539,6 +2442,10 @@ close_listening_sockets(thread_ctx_t *thread_ctx)
 			listener_cfg_t *const listener_cfg =
 			    &conf.listener_cfgs[listener_idx];
 			listener_cfg->is_opened = false;
+			if (listener_cfg->ssl_ctx != NULL) {
+				SSL_CTX_free(listener_cfg->ssl_ctx);
+				listener_cfg->ssl_ctx = NULL;
+			}
 		}
 	}
 #endif /* USE_LIBUV */
@@ -2584,6 +2491,522 @@ listening_sockets_start_read(thread_ctx_t *thread_ctx)
 	}
 #endif /* USE_LIBUV */
 }
+
+/* Launched in TX thread. */
+static int
+ip_version(const char *src)
+{
+	char buf[sizeof(struct in6_addr)];
+	if (inet_pton(AF_INET, src, buf))
+		return AF_INET;
+	if (inet_pton(AF_INET6, src, buf))
+		return AF_INET6;
+	return -1;
+}
+
+/* Launched in TX thread.
+ * Returns file descriptor or -1 on error. */
+static int
+open_listener(const char *addr_str, uint16_t port, const char **lerr)
+{
+	struct addrinfo hints, *res;
+	char port_str[STR_PORT_LENGTH];
+	snprintf(port_str, sizeof(port_str), "%d", port);
+
+	memset(&hints, 0, sizeof(hints));
+
+	int ai_family = ip_version(addr_str);
+	if (ai_family < 0) {
+		*lerr = "Can't parse IP address";
+		goto ip_detection_fail;
+	}
+
+	hints.ai_family = ai_family;
+	hints.ai_socktype = SOCK_STREAM;
+	hints.ai_protocol = IPPROTO_TCP;
+	hints.ai_flags = AI_PASSIVE | AI_NUMERICHOST | AI_NUMERICSERV;
+
+	int ret = getaddrinfo(addr_str, port_str, &hints, &res);
+	if (ret || res->ai_family != ai_family) {
+		*lerr = "getaddrinfo can't find appropriate ip and port";
+		goto getaddrinfo_fail;
+	}
+
+	int flags = SOCK_STREAM;
+#ifdef SOCK_CLOEXEC
+	flags |= SOCK_CLOEXEC;
+#endif /* SOCK_CLOEXEC */
+	int fd;
+	if ((fd = socket(res->ai_family, flags, 0)) < 0) {
+		*lerr = "create socket failed";
+		goto socket_create_fail;
+	}
+#ifndef SOCK_CLOEXEC
+	if (fcntl(fd, F_SETFD, FD_CLOEXEC) < 0) {
+		*lerr = "setting FD_CLOEXEC failed";
+		goto fdcloexec_set_fail;
+	}
+#endif /* SOCK_CLOEXEC */
+
+	int reuseaddr_flag = 1;
+	if (setsockopt(fd, SOL_SOCKET, SO_REUSEADDR, &reuseaddr_flag,
+	    sizeof(reuseaddr_flag)) != 0) {
+		*lerr = "setsockopt SO_REUSEADDR failed";
+		goto so_reuseaddr_set_fail;
+	}
+
+	int ipv6_flag = 1;
+	if (ai_family == AF_INET6 &&
+	    setsockopt(fd, IPPROTO_IPV6, IPV6_V6ONLY, &ipv6_flag,
+		sizeof(ipv6_flag)) != 0) {
+		*lerr = "setsockopt IPV6_V6ONLY failed";
+		goto ipv6_only_set_fail;
+	}
+
+	if (bind(fd, res->ai_addr, res->ai_addrlen) != 0) {
+		*lerr = "bind error";
+		goto bind_fail;
+	}
+
+	if (listen(fd, SOMAXCONN) != 0) {
+		*lerr = "listen error";
+		goto listen_fail;
+	}
+
+#ifdef TCP_DEFER_ACCEPT
+	{
+		/* We are only interested in connections
+		 * when actual data is received. */
+		int flag = 1;
+		if (setsockopt(fd, IPPROTO_TCP, TCP_DEFER_ACCEPT, &flag,
+		    sizeof(flag)) != 0)
+			/* FIXME: report in log */
+			fprintf(stderr, "setting TCP_DEFER_ACCEPT failed\n");
+	}
+#endif /* TCP_DEFER_ACCEPT */
+
+	if (conf.tfo_queues > 0) {
+		/* TCP extension to do not wait for SYN/ACK for "known"
+		 * clients. */
+#ifdef TCP_FASTOPEN
+		int tfo_queues;
+#ifdef __APPLE__
+		/* In OS X, the option value for TCP_FASTOPEN must be 1
+		 * if is's enabled. */
+		tfo_queues = 1;
+#else /* __APPLE__ */
+		tfo_queues = conf.tfo_queues;
+#endif /* __APPLE__ */
+		if (setsockopt(fd, IPPROTO_TCP, TCP_FASTOPEN,
+		    (const void *)&tfo_queues, sizeof(tfo_queues)) != 0)
+			/* FIXME: report in log. */
+			fprintf(stderr, "setting TCP TFO feature failed\n");
+#else /* TCP_FASTOPEN */
+		assert(!".tfo_queues not zero on platform w/o TCP_FASTOPEN");
+#endif /* TCP_FASTOPEN */
+	}
+
+	return fd;
+
+listen_fail:
+bind_fail:
+ipv6_only_set_fail:
+so_reuseaddr_set_fail:
+#ifndef SOCK_CLOEXEC
+fdcloexec_set_fail:
+#endif /* SOCK_CLOEXEC */
+	close(fd);
+socket_create_fail:
+getaddrinfo_fail:
+ip_detection_fail:
+	assert(*lerr != NULL);
+	return -1;
+}
+
+/* Launched in TX thread. */
+static sni_map_t *
+sni_map_create(int certs_num, const char **lerr)
+{
+	sni_map_t *sni_map = calloc(1, sizeof(*sni_map));
+	if (sni_map == NULL) {
+		*lerr = "sni map memory allocation failed";
+		goto sni_map_alloc_fail;
+	}
+
+	sni_map->ssl_ctxs = calloc(certs_num, sizeof(*sni_map->ssl_ctxs));
+	if (sni_map->ssl_ctxs == NULL) {
+		*lerr = "memory allocation failed for ssl_ctxs in sni map";
+		goto ssl_ctxs_alloc_fail;
+	}
+	sni_map->ssl_ctxs_capacity = certs_num;
+	sni_map->sni_fields = calloc(certs_num, sizeof(*sni_map->sni_fields));
+	if (sni_map->sni_fields == NULL) {
+		*lerr = "memory allocation failed for sni_fields in sni map";
+		goto sni_fields_alloc_fail;
+	}
+	sni_map->sni_fields_capacity = certs_num;
+	return sni_map;
+
+sni_fields_alloc_fail:
+	free(sni_map->sni_fields);
+ssl_ctxs_alloc_fail:
+	free(sni_map->ssl_ctxs);
+sni_map_alloc_fail:
+	assert(*lerr != NULL);
+	return NULL;
+}
+
+/* Launched in TX thread. */
+static int
+sni_map_insert(sni_map_t *sni_map, const char *certificate_file,
+	       const char *certificate_key_file, const char **lerr)
+{
+	if (sni_map == NULL) {
+		*lerr = "pointer to sni map is NULL";
+		goto error;
+	}
+
+	assert(sni_map->ssl_ctxs_size < sni_map->ssl_ctxs_capacity);
+	assert(sni_map->sni_fields_size < sni_map->sni_fields_capacity);
+
+	X509 *X509_cert = get_X509_from_certificate_path(certificate_file,
+		lerr);
+	if (X509_cert == NULL)
+		goto error;
+
+	const char *common_name = get_subject_common_name(X509_cert);
+	if (common_name == NULL) {
+		*lerr = "can't get common name";
+		goto x509_common_name_fail;
+	}
+
+	SSL_CTX *ssl_ctx = make_ssl_ctx(certificate_file, certificate_key_file,
+		conf.openssl_security_level, conf.min_tls_proto_version, lerr);
+	if (ssl_ctx == NULL)
+		goto make_ssl_ctx_fail;
+	sni_map->ssl_ctxs[sni_map->ssl_ctxs_size++] = ssl_ctx;
+	sni_map->sni_fields[sni_map->sni_fields_size].hostname.base =
+		(char *)common_name;
+	sni_map->sni_fields[sni_map->sni_fields_size].hostname.len =
+		strlen(common_name);
+	sni_map->sni_fields[sni_map->sni_fields_size++].ssl_ctx = ssl_ctx;
+
+	X509_free(X509_cert);
+	return 0;
+
+make_ssl_ctx_fail:
+	free((char *)common_name);
+x509_common_name_fail:
+	X509_free(X509_cert);
+error:
+	assert(*lerr != NULL);
+	return -1;
+}
+
+/* Launched in TX thread. 
+ * Frees ssl contexts, host names of sni map and itself. */
+static void
+sni_map_free(sni_map_t *sni_map)
+{
+	if (sni_map == NULL)
+		return;
+	for (size_t i = 0; i < sni_map->ssl_ctxs_size; ++i)
+		SSL_CTX_free(sni_map->ssl_ctxs[i]);
+	for (size_t i = 0; i < sni_map->sni_fields_size; ++i)
+		free((char *)sni_map->sni_fields[i].hostname.base);
+	free(sni_map);
+}
+
+/* Launched in TX thread. */
+static void
+conf_sni_map_cleanup(void)
+{
+	if (conf.sni_maps == NULL)
+		return;
+	for (size_t i = 0; i < conf.num_listeners; ++i)
+		sni_map_free(conf.sni_maps[i]);
+	free(conf.sni_maps);
+}
+
+#define GET_REQUIRED_LISTENER_FIELD(name, lua_ttype, convert_func_postfix) \
+	do { \
+		lua_getfield(L, -1, #name); \
+		if (lua_isnil(L, -1)) { \
+			*lerr = #name " is absent"; \
+			lua_pop(L, 1); \
+			goto required_field_fail; \
+		} \
+		if (lua_type(L, -1) != lua_ttype) { \
+			*lerr = #name " isn't " #convert_func_postfix; \
+			lua_pop(L, 1); \
+			goto required_field_fail; \
+		} \
+		name = lua_to##convert_func_postfix(L, -1); \
+		lua_pop(L, 1); \
+	} while (0);
+
+/* Launched in TX thread. */
+static SSL_CTX *
+get_ssl_ctx_not_uses_sni(lua_State *L, unsigned listener_idx,
+			 const char **lerr)
+{
+	SSL_CTX *ssl_ctx = NULL;
+
+	unsigned certs_num = lua_objlen(L, -1);
+	if (certs_num != 1) {
+		*lerr = msg_bad_cert_num;
+		goto certs_num_fail;
+	}
+	conf.sni_maps[listener_idx] = NULL;
+
+	const char *certificate_file = NULL;
+	const char *certificate_key_file = NULL;
+
+	lua_rawgeti(L, -1, 1);
+	if (!lua_istable(L, -1)) {
+		*lerr = "element of `tls` table isn't a table";
+		lua_pop(L, 1);
+		goto tls_pair_not_a_table;
+	}
+	GET_REQUIRED_LISTENER_FIELD(certificate_file, LUA_TSTRING, string);
+	GET_REQUIRED_LISTENER_FIELD(certificate_key_file, LUA_TSTRING, string);
+	lua_pop(L, 1);
+
+	ssl_ctx = make_ssl_ctx(certificate_file, certificate_key_file,
+		conf.openssl_security_level, conf.min_tls_proto_version, lerr);
+	if (ssl_ctx == NULL)
+		goto ssl_ctx_create_fail;
+
+	return ssl_ctx;
+
+ssl_ctx_create_fail:
+tls_pair_not_a_table:
+required_field_fail:
+certs_num_fail:
+	assert(*lerr != NULL);
+	return NULL;
+}
+
+/* Launched in HTTP thread. */
+static int
+servername_callback(SSL *s, int *al, void *arg)
+{
+	assert(arg != NULL);
+	sni_map_t *sni_map = (servername_callback_arg_t *)arg;
+
+	const char *servername = SSL_get_servername(s,
+		TLSEXT_NAMETYPE_host_name);
+	if (servername == NULL) {
+#ifndef NDEBUG
+		/* FIXME: report to log. */
+		fprintf(stderr, "Server name is not received:%s\n",
+			servername);
+#endif /* NDEBUG */
+		/* FIXME: think maybe return SSL_TLSEXT_ERR_NOACK. */
+		goto get_servername_fail;
+	}
+	size_t servername_len = strlen(servername);
+
+	/* FIXME: make hash table for sni_fields, not an array. */
+	size_t i;
+	for (i = 0; i < sni_map->sni_fields_size; ++i) {
+		if (servername_len == sni_map->sni_fields[i].hostname.len &&
+		    memcmp(servername, sni_map->sni_fields[i].hostname.base,
+		    servername_len) == 0) {
+			SSL_CTX *ssl_ctx = sni_map->sni_fields[i].ssl_ctx;
+			if (SSL_set_SSL_CTX(s, ssl_ctx) == NULL) {
+#ifndef NDEBUG
+				/* FIXME: report to log. */
+				fprintf(stderr, "%s\n",
+					msg_cant_switch_ssl_ctx);
+#endif /* NDEBUG */
+				goto set_ssl_ctx_fail;
+			}
+		}
+	}
+	return SSL_TLSEXT_ERR_OK;
+
+set_ssl_ctx_fail:
+get_servername_fail:
+	return SSL_TLSEXT_ERR_ALERT_FATAL;
+}
+
+/* Launched in TX thread. */
+static SSL_CTX *
+get_ssl_ctx_uses_sni(lua_State *L, unsigned listener_idx, const char **lerr)
+{
+	SSL_CTX *ssl_ctx = NULL;
+	unsigned certs_num = lua_objlen(L, -1);
+	sni_map_t *sni_map = NULL;
+	if ((sni_map = sni_map_create(certs_num, lerr)) == NULL)
+		goto sni_map_init_fail;
+
+	lua_pushnil(L); /* Start of table. */
+	while (lua_next(L, -2)) {
+		const char *certificate_file = NULL;
+		const char *certificate_key_file = NULL;
+
+		GET_REQUIRED_LISTENER_FIELD(certificate_file,
+			LUA_TSTRING, string);
+		GET_REQUIRED_LISTENER_FIELD(certificate_key_file,
+			LUA_TSTRING, string);
+
+		if (sni_map_insert(sni_map, certificate_file,
+		    certificate_key_file, lerr) != 0) {
+			lua_pop(L, 1);
+			goto sni_map_insert_fail;
+		}
+		lua_pop(L, 1);
+	}
+
+	ssl_ctx = make_ssl_ctx(NULL, NULL, conf.openssl_security_level,
+		conf.min_tls_proto_version, lerr);
+	if (ssl_ctx == NULL)
+		goto ssl_ctx_create_fail;
+	SSL_CTX_set_tlsext_servername_callback(ssl_ctx, servername_callback);
+	SSL_CTX_set_tlsext_servername_arg(ssl_ctx,
+		(servername_callback_arg_t *)sni_map);
+	conf.sni_maps[listener_idx] = sni_map;
+	return ssl_ctx;
+
+ssl_ctx_create_fail:
+required_field_fail:
+sni_map_insert_fail:
+	sni_map_free(sni_map);
+sni_map_init_fail:
+	assert(*lerr != NULL);
+	return NULL;
+}
+
+/* Launched in TX thread. */
+static SSL_CTX *
+get_tls_field_from_lua(lua_State *L, unsigned listener_idx,
+		       bool uses_sni, const char **lerr)
+{
+	if (!lua_istable(L, -1)) {
+		*lerr = "`tls` isn't a table";
+		goto tls_not_a_table;
+	}
+	unsigned certs_num = lua_objlen(L, -1);
+	if (!uses_sni && certs_num != 1) {
+		*lerr = msg_bad_cert_num;
+		goto wrong_cert_num_and_uses_sni;
+	}
+	return uses_sni ? get_ssl_ctx_uses_sni(L, listener_idx, lerr)
+			: get_ssl_ctx_not_uses_sni(L, listener_idx, lerr);
+
+wrong_cert_num_and_uses_sni:
+tls_not_a_table:
+	assert(*lerr != NULL);
+	return NULL;
+}
+
+/* Launched in TX thread. */
+static int
+load_and_handle_listen_from_lua(lua_State *L, int lua_stack_idx_table,
+				const char **lerr)
+{
+	SSL_library_init();
+	SSL_load_error_strings();
+
+	lua_getfield(L, lua_stack_idx_table, "listen");
+	int need_to_pop = 1;
+	if (lua_isnil(L, -1)) {
+		*lerr = "listen is absent";
+		goto listen_invalid_type;
+	}
+
+	if (!lua_istable(L, -1)) {
+		*lerr = "listen isn't table";
+		goto listen_invalid_type;
+	}
+	conf.num_listeners = lua_objlen(L, -1);
+
+	if ((conf.listener_cfgs = calloc(conf.num_listeners,
+	    sizeof(*conf.listener_cfgs))) == NULL) {
+		*lerr = "allocation memory for listener_cfgs failed";
+		goto listener_cfg_malloc_fail;
+	}
+
+	if ((conf.sni_maps = calloc(conf.num_listeners,
+	    sizeof(*conf.sni_maps)))== NULL) {
+		*lerr = "allocation memory for sni maps failed";
+		goto sni_map_alloc_fail;
+	}
+
+	size_t listener_idx = 0;
+	lua_pushnil(L); /* Start of table. */
+	while (lua_next(L, -2)) {
+		++need_to_pop;
+		if (!lua_istable(L, -1)) {
+			*lerr = "`listen` must be table of tables";
+			goto failed_parsing_clean_listen_conf;
+		}
+
+		const char *addr;
+		uint16_t port;
+
+		GET_REQUIRED_LISTENER_FIELD(addr, LUA_TSTRING, string);
+		GET_REQUIRED_LISTENER_FIELD(port, LUA_TNUMBER, integer);
+
+		SSL_CTX *ssl_ctx = NULL;
+		lua_getfield(L, -1, "tls");
+		++need_to_pop;
+		if (lua_isnil(L, -1))
+			conf.sni_maps[listener_idx] = NULL;
+		else if (lua_istable(L, -1)) {
+			lua_pop(L, 1);
+			--need_to_pop;
+
+			bool uses_sni;
+			GET_REQUIRED_LISTENER_FIELD(uses_sni,
+				LUA_TBOOLEAN, boolean);
+			lua_getfield(L, -1, "tls");
+			++need_to_pop;
+
+			if ((ssl_ctx = get_tls_field_from_lua(L, listener_idx,
+			    uses_sni, lerr)) == NULL)
+				goto failed_parsing_clean_listen_conf;
+		} else {
+			*lerr = "`tls` isn't table or nil";
+			goto failed_parsing_clean_listen_conf;
+		}
+		/* Pop "tls" and "clean" listen cfg. */
+		lua_pop(L, 2);
+		need_to_pop -= 2;
+
+		int fd = open_listener(addr, port, lerr);
+		if (fd < 0)
+			goto open_listener_fail;
+		register_listener_cfgs_socket(fd, ssl_ctx, listener_idx);
+		++listener_idx;
+	}
+
+	/* Pop listen table. */
+	lua_pop(L, 1);
+	assert(--need_to_pop == 0);
+	return 0;
+
+open_listener_fail:
+required_field_fail:
+failed_parsing_clean_listen_conf:
+	conf_sni_map_cleanup();
+	close_listener_cfgs_sockets();
+	conf.sni_maps = NULL;
+sni_map_alloc_fail:
+	free(conf.listener_cfgs);
+	conf.listener_cfgs = NULL;
+listener_cfg_malloc_fail:
+listen_invalid_type:
+	/* Pop values pushed while executing current function. */
+	lua_pop(L, need_to_pop);
+	EVP_cleanup();
+	ERR_free_strings();
+	assert(*lerr != NULL);
+	return 1;
+}
+
+#undef GET_REQUIRED_LISTENER_FIELD
 
 /* Launched in TX thread. */
 static void
@@ -3260,6 +3683,7 @@ static int on_shutdown_internal(lua_State *L, bool called_from_callback)
 	}
 #endif /* USE_LIBUV */
 	free(conf.listener_cfgs);
+	conf_sni_map_cleanup();
 	for (thr_idx = 0; thr_idx < MAX_threads;
 	    ++thr_idx)
 		h2o_config_dispose(&conf.thread_ctxs[thr_idx].globalconf);
@@ -3269,7 +3693,6 @@ static int on_shutdown_internal(lua_State *L, bool called_from_callback)
 	free(conf.lua_sites);
 	conf.configured = false;
 	conf.idx_of_root_site = -1;
-	SSL_CTX_free(conf.ssl_ctx);
 	complain_loudly_about_leaked_fds();
 	conf.is_shutdown_in_progress = false;
 	return 0;
@@ -3698,7 +4121,6 @@ static void configure_and_start_reaper_fiber(void)
 int cfg(lua_State *L)
 {
 	const char *lerr = NULL; /* Error message for caller. */
-	SSL_CTX *ssl_ctx = NULL;
 	unsigned removed_sites = 0;
 	unsigned thr_init_idx = 0;
 	unsigned fiber_idx = 0;
@@ -4146,42 +4568,14 @@ Skip_main_lua_handler:
 		lerr = "shuttle_size is too small for Lua handlers";
 		goto no_handlers;
 	}
-	unsigned short port = DEFAULT_LISTEN_PORT;
-	lua_getfield(L, LUA_STACK_IDX_TABLE, "listen");
-	if (lua_isnil(L, -1))
-		goto Skip_listen;
-	if (lua_type(L, -1) != LUA_TTABLE) {
-		lerr = "listen is not a table";
-		goto listen_invalid;
-	}
 
-	lua_pushnil(L); /* Start of table. */
-	while (lua_next(L, -2)) {
-		if (!lua_istable(L, -1)) {
-			lerr = "listen is not a table of tables";
-			goto listen_invalid;
-		}
-		lua_getfield(L, -1, "port");
-		int is_integer;
-		const uint64_t candidate =
-			my_lua_tointegerx(L, -1, &is_integer);
-		if (!is_integer || !candidate || candidate >= 65535) {
-			lerr = "invalid port specified";
-			goto listen_invalid;
-		}
-		/* Silently overwrite for now (FIXME: Multilisten). */
-		port = candidate;
-		/* Remove port and value, keep key for next iteration. */
-		lua_pop(L, 2);
-	}
-
-Skip_listen:
 	;
-	long min_proto_version;
 	lua_getfield(L, LUA_STACK_IDX_TABLE, "min_proto_version");
 	if (lua_isnil(L, -1)) {
-		min_proto_version = TLS1_2_VERSION;
-		fprintf(stderr, "Using default min_proto_version=tls1.2\n");
+		/* FIXME: min_proto_version report */
+		conf.min_tls_proto_version = DEFAULT_MIN_TLS_PROTO_VERSION_NUM;
+		fprintf(stderr, "Using default min_proto_version="
+			DEFAULT_MIN_TLS_PROTO_VERSION_STR "\n");
 		goto Skip_min_proto_version;
 	}
 
@@ -4221,7 +4615,7 @@ Skip_listen:
 			if (protos[idx].len == min_proto_version_len &&
 			    !memcmp(&protos[idx].str, min_proto_version_str,
 			    min_proto_version_len)) {
-				min_proto_version = protos[idx].num;
+				conf.min_tls_proto_version = protos[idx].num;
 				goto Proto_found;
 			}
 		}
@@ -4234,31 +4628,25 @@ Skip_listen:
 
 Skip_min_proto_version:
 	lua_getfield(L, LUA_STACK_IDX_TABLE, "openssl_security_level");
-	uint64_t openssl_security_level;
 	if (lua_isnil(L, -1)) {
-		openssl_security_level = 1;
+		conf.openssl_security_level = DEFAULT_OPENSSL_SECURITY_LEVEL;
+		fprintf(stderr, "Using default openssl_security_level=%d\n",
+			DEFAULT_OPENSSL_SECURITY_LEVEL);
 		goto Skip_openssl_security_level;
 	}
-	openssl_security_level = my_lua_tointegerx(L, -1, &is_integer);
+	conf.openssl_security_level = my_lua_tointegerx(L, -1, &is_integer);
 	if (!is_integer) {
 		lerr = "openssl_security_level is not a number";
 		goto invalid_openssl_security_level;
 	}
-	if (openssl_security_level > 5) {
+	if (conf.openssl_security_level > 5) {
 		lerr = "openssl_security_level is invalid";
 		goto invalid_openssl_security_level;
 	}
 
 Skip_openssl_security_level:
-	/* FIXME: Should use customizable file names. */
-	if (USE_HTTPS) {
-		if ((ssl_ctx = setup_ssl("examples/cert.pem",
-		    "examples/key.pem", openssl_security_level,
-		    min_proto_version)) == NULL) {
-			lerr = "setup_ssl() failed (cert/key files not found?)";
-			goto ssl_fail;
-		}
-	}
+	if (load_and_handle_listen_from_lua(L, LUA_STACK_IDX_TABLE, &lerr) != 0)
+		goto listen_invalid;
 
 #if 0
 	/* FIXME: Should make customizable. */
@@ -4267,31 +4655,6 @@ Skip_openssl_security_level:
 		"/dev/stdout", NULL);
 #endif
 
-	conf.ssl_ctx = ssl_ctx;
-
-	/* TODO: Implement more than one listener (HTTP/HTTPS,
-	 * IPv4/IPv6, several IPs etc.) */
-	conf.num_listeners = 1; /* FIXME: Make customizable. */
-	if ((conf.listener_cfgs = (listener_cfg_t *)
-	    calloc(conf.num_listeners, sizeof(listener_cfg_t))) == NULL) {
-		lerr = "Failed to allocate memory for listener cfgs";
-		goto listeners_alloc_fail;
-	}
-
-	{
-		unsigned listener_idx;
-
-		for (listener_idx = 0; listener_idx < conf.num_listeners;
-		    ++listener_idx) {
-			/* FIXME: Make customizable. */
-			const int fd = open_listener_ipv4("0.0.0.0", port);
-			if (fd < 0) {
-				lerr = "Failed to listen";
-				goto listeners_fail;
-			}
-			register_listener_cfgs_socket(fd, 0);
-		}
-	}
 
 	if ((conf.tx_fiber_ptrs = (struct fiber **)
 	    malloc(sizeof(struct fiber *) * MAX_threads)) == NULL) {
@@ -4476,15 +4839,11 @@ xtm_to_tx_fail:
 	free(conf.tx_fiber_ptrs);
 
 fibers_fail_alloc:
-listeners_fail:
 	close_listener_cfgs_sockets();
-	free(conf.listener_cfgs);
-listeners_alloc_fail:
-	SSL_CTX_free(ssl_ctx);
-ssl_fail:
+	conf_sni_map_cleanup();
+listen_invalid:
 invalid_openssl_security_level:
 min_proto_version_invalid:
-listen_invalid:
 no_handlers:
 failed_to_add_threads:
 invalid_handler:
@@ -4602,7 +4961,7 @@ static const struct luaL_Reg mylib[] = {
 	{NULL, NULL}
 };
 
-int luaopen_httpng(lua_State *L)
+int luaopen_httpng_c(lua_State *L)
 {
 	luaL_newlib(L, mylib);
 	return 1;

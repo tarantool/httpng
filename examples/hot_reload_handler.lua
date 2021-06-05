@@ -1,5 +1,5 @@
 local http = require 'httpng'
-local fiber = require 'fiber'
+
 
 local foo_handler = function(req, io)
     return {
@@ -17,7 +17,10 @@ end
 
 local config = {
     threads = 4,
-    listen =  { { port = 8080 } },
+    listen = {
+        port = 8080,
+        tls = { require 'examples.ssl_pairs'.foo },
+    },
 }
 
 ::again::

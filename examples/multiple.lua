@@ -407,7 +407,8 @@ init_func({
     max_body_len = 16 * 1024 * 1024,
     use_body_split = true,
     listen = {
-        { port = 7890 },
+        port = 7890,
+        tls = { require 'examples.ssl_pairs'.foo },
     },
     sites = lua_sites,
 })

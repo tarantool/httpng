@@ -10,7 +10,10 @@ http.cfg{
     },
     --]]--
     listen = {
-        { port = 8080 },
+        {
+            port = 8080,
+            tls = { require 'examples.ssl_pairs'.foo },
+        },
     },
     threads = 4,
     handler = function(req, io)

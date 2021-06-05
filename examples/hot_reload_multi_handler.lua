@@ -58,7 +58,10 @@ end
 
 local config = {
     threads = 4,
-    listen =  { { port = 8080 } },
+    listen = {
+        port = 8080,
+        tls = { require 'examples.ssl_pairs'.foo },
+    },
 }
 
 ::again::
