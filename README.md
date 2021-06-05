@@ -12,9 +12,6 @@ fibers in the TX thread.
 Implementation is not yet finished - there is no logging, WebSockets
 support is limited and prone to DoS.
 
-At the moment it listens on 0.0.0.0 at configured port
-(default is 8080). TLS only, key/certificate filenames are hardcoded.
-
 API is documented in doc/api.md. Please note that it is not yet finalized
 (especially WebSockets).
 
