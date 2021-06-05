@@ -112,3 +112,72 @@ This is what HTTPNG is about - handling HTTP(S) requests. Handlers are Lua funct
   - `_shuttle`: Userdata, please do not touch.
 
 `handler()` can optionally return a table with `status`, `headers` and `body`, the effect is the same as a call to `io:write_header(status, headers, body, True)` (if `io:write_header()` was not called; note that `io.headers` is *not* used) or `io:write(body, True)` (if `io:write_header()` was called earlier; `status` and `headers` are silently ignored).
+
+### Listen
+
+`httpng.cfg{ listen = <...> }`
+
+The way to specify server listeners (IP:port pairs) in HTTPNG is to pass a value with a key called `listen` to the table which is the first argument to `httpng.cfg()` function. There are some rules on how to set `listen`.
+
+`listen`: Table or integer or string, depending on a case. We have such a term as "listener-conf" which is an entity describing one listener (IP:port pair).
+If `listen` is an array (consists only of elements with keys `[1, #listen]`), then
+it is considered as a table of listener-confs, in other ways it is considered as one listener-conf (one listener). `listen = 3300`, by default. There're 3 types of listener-conf:
+  + Table. It is the most descriptive way to define listener-conf. The table contains fields:
+    - `addr`: String. IPv4/IPv6 address. If it is `nil` then 2 listeners with '0.0.0.0' and '::' addresses are created.
+    - `port`: Integer. Must be in the interval [0, 65535]. If it is `nil`, then the default 3300 port is used.
+    - `tls`: Array of tables. Each table contains fields `certificate_file` and `certificate_key_file` which are strings with paths of the certificate file and private key file for a certificate accordingly. If `tls` is `nil`, an insecure HTTP protocol is used.
+    - `uses_sni`: Boolean. Specifies to enable TLS SNI or not. `false`, by default.
+
+    Examples:
+      - ```Lua
+        -- https://foo.com:8080 and https://bar.com:8080
+        -- https://0.0.0.0:8080 won't be accepted due to SNI.
+        {
+          addr = '0.0.0.0',
+          port = 8080,
+          tls = {
+            { certificate_file = '/path/to/certificate/foo.com_cert.pem', certificate_key_file = '/path/to/key/foo.com_key.pem' },
+            { certificate_file = '/path/to/certificate/bar.com_cert.pem', certificate_key_file = '/path/to/key/bar.com_key.pem' },
+          },
+          uses_sni = true
+        }
+        ```
+      - ```Lua
+        -- Any requests to [::] (https://[::]:3300).
+        -- Note: a user's browser would refuse to accept such a page unless it attempts to access the website from this certificate (foo.com in this example)
+        {
+          addr = '::',
+          tls = { { certificate_file = 'path/to/certificate/foo.com_cert.pem', certificate_key_file = '/path/to/key/foo.com_key.pem' } },
+        }
+    
+  + Integer. Defines port. In this case, will be created listeners with mentioned port on default IP addresses to listen by an insecure HTTP protocol.
+  + String. Describes URI. Note: HTTPS protocol can't be enabled in this way because `tls` can be defined only if listener-conf is a table.
+
+    Examples:
+      - ```Lua 
+        listen = 'http://0.0.0.0:8080'
+        ```
+      - ```Lua
+        -- listen on foo.com port 80
+        listen = 'http://foo.com'
+        ```
+  Examples of `listen`:
+  - ```Lua
+    listen = { 8080, 9090 }
+    ```
+  - ```Lua
+    listen = {
+      {
+        addr = '::',
+        port = 8080,
+      },
+      9090,
+      {
+        addr = '0.0.0.0',
+        port = 8080,
+        tls = { 
+          { certificate_file = '/path/to/certificate/foo.com_cert.pem', certificate_key_file = '/path/to/key/foo.com_key.pem' }
+        },
+      }
+    }
+    ```
