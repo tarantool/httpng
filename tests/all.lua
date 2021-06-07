@@ -774,8 +774,21 @@ function shutdown_and_kill_curls()
     for k, curl in pairs(curls) do
         curl:close()
     end
+    curls = nil
 end
 g_hot_reload_with_curls.after_each(shutdown_and_kill_curls)
+
+local launch_hungry_curls = function(path, ver)
+    assert(curls == nil)
+    curls = {}
+    local curl_count = 16
+    local i
+    for i = 1, curl_count do
+        curls[#curls + 1] =
+            popen.shell(curl_bin .. ' ' .. ver ..
+                ' -k -s -o /dev/null https://' .. path, 'r')
+    end
+end
 
 local test_FLAKY_decrease_stubborn_threads = function(ver)
     local cfg = {
@@ -789,14 +802,7 @@ local test_FLAKY_decrease_stubborn_threads = function(ver)
     -- We do not (yet?) have API to check that earlier test from combo is done.
     fiber.sleep(0.1)
 
-    curls = {}
-    local curl_count = 16
-    local i
-    for i = 1, curl_count do
-        curls[#curls + 1] =
-            popen.shell(curl_bin .. ' ' .. ver ..
-                ' -k -s -o /dev/null https://localhost:8080', 'r')
-    end
+    launch_hungry_curls('localhost:8080', ver)
     fiber.sleep(0.1)
 
     cfg.threads = 1
@@ -846,14 +852,7 @@ local test_FLAKY_decrease_stubborn_threads_with_timeout = function(ver)
 
     http.cfg(cfg)
 
-    curls = {}
-    local curl_count = 16
-    local i
-    for i = 1, curl_count do
-        curls[#curls + 1] =
-            popen.shell(curl_bin .. ' ' .. ver ..
-                ' -k -s -o /dev/null https://localhost:8080', 'r')
-    end
+    launch_hungry_curls('localhost:8080', ver)
     fiber.sleep(0.1)
 
     cfg.threads = 1
@@ -895,15 +894,8 @@ local test_FLAKY_decrease_not_so_stubborn_thr_with_timeout =
 
     http.cfg(cfg)
 
-    curls = {}
-    local curl_count = 16
-    local i
-    for i = 1, curl_count do
-        curls[#curls + 1] =
-            popen.shell(curl_bin .. ' ' .. ver ..
-                ' -k -s -o /dev/null https://localhost:8080', 'r')
-    end
     assert(cfg.thread_termination_timeout > 0.1)
+    launch_hungry_curls('localhost:8080', ver)
     fiber.sleep(0.1)
 
     cfg.threads = 1
