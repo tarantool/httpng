@@ -23,7 +23,7 @@ local stubborn2_handler = function(req, io)
         -- Connection has already been closed
         return
     end
-    if (fiber.clock() - start >= 2) then
+    if (fiber.clock() - start >= 0.5) then
         return
     end
     goto again
@@ -742,15 +742,13 @@ g_hot_reload.test_FLAKY_after_decrease_threads = function()
     http.cfg(cfg)
 
     cfg.threads = 4
-    local counter = 0
+    local start = fiber.clock()
 ::retry::
     local ok, err = pcall(http.cfg, cfg)
     if (not ok) then
-        print('counter=', counter, ' , error =', err)
-        counter = counter + 1
         assert(err == 'Unable to reconfigure until threads will shut down')
-        assert(counter < 100)
-        fiber.sleep(0.1)
+        assert(fiber.clock() - start < 0.5)
+        fiber.sleep(0.01)
         goto retry
     end
 end
@@ -788,6 +786,9 @@ local test_FLAKY_decrease_stubborn_threads = function(ver)
 
     http.cfg(cfg)
 
+    -- We do not (yet?) have API to check that earlier test from combo is done.
+    fiber.sleep(0.1)
+
     curls = {}
     local curl_count = 16
     local i
@@ -796,19 +797,18 @@ local test_FLAKY_decrease_stubborn_threads = function(ver)
             popen.shell(curl_bin .. ' ' .. ver ..
                 ' -k -s -o /dev/null https://localhost:8080', 'r')
     end
-    fiber.sleep(1)
+    fiber.sleep(0.1)
 
     cfg.threads = 1
     http.cfg(cfg)
 
     cfg.threads = 2
-    local counter = 0
+    local start = fiber.clock()
 ::retry::
     local ok, err = pcall(http.cfg, cfg)
     assert(not ok, 'httpng.cfg() should fail')
     assert(err == 'Unable to reconfigure until threads will shut down')
-    counter = counter + 1
-    if (counter > 50) then
+    if (fiber.clock() - start >= 1) then
         -- We have waited long enough, this is as it should be.
         http.force_decrease_threads()
         http.cfg(cfg)
@@ -840,7 +840,7 @@ local test_FLAKY_decrease_stubborn_threads_with_timeout = function(ver)
     local cfg = {
         handler = stubborn_handler,
         threads = 2,
-        thread_termination_timeout = 3,
+        thread_termination_timeout = 1,
         listen = listen_with_single_ssl_pair,
     }
 
@@ -854,7 +854,7 @@ local test_FLAKY_decrease_stubborn_threads_with_timeout = function(ver)
             popen.shell(curl_bin .. ' ' .. ver ..
                 ' -k -s -o /dev/null https://localhost:8080', 'r')
     end
-    fiber.sleep(1)
+    fiber.sleep(0.1)
 
     cfg.threads = 1
     local start = fiber.clock()
@@ -869,8 +869,8 @@ local test_FLAKY_decrease_stubborn_threads_with_timeout = function(ver)
         return
     end
     assert(err == 'Unable to reconfigure until threads will shut down')
-    assert(fiber.clock() - start < cfg.thread_termination_timeout + 3)
-    fiber.sleep(0.1)
+    assert(fiber.clock() - start < cfg.thread_termination_timeout + 1)
+    fiber.sleep(0.05)
     goto retry
 end
 
@@ -889,7 +889,7 @@ local test_FLAKY_decrease_not_so_stubborn_thr_with_timeout =
     local cfg = {
         handler = stubborn2_handler,
         threads = 2,
-        thread_termination_timeout = 3,
+        thread_termination_timeout = 1,
         listen = listen_with_single_ssl_pair,
     }
 
@@ -903,8 +903,8 @@ local test_FLAKY_decrease_not_so_stubborn_thr_with_timeout =
             popen.shell(curl_bin .. ' ' .. ver ..
                 ' -k -s -o /dev/null https://localhost:8080', 'r')
     end
-    assert(cfg.thread_termination_timeout > 0.5)
-    fiber.sleep(0.5)
+    assert(cfg.thread_termination_timeout > 0.1)
+    fiber.sleep(0.1)
 
     cfg.threads = 1
     local start = fiber.clock()
@@ -914,15 +914,15 @@ local test_FLAKY_decrease_not_so_stubborn_thr_with_timeout =
 ::retry::
     local ok, err = pcall(http.cfg, cfg)
     if (ok) then
-        assert(fiber.clock() - start >= 0.5,
+        assert(fiber.clock() - start >= 0.4,
             'threads have terminated too early');
         assert(fiber.clock() - start < cfg.thread_termination_timeout,
             'threads have terminated too late');
         return
     end
     assert(err == 'Unable to reconfigure until threads will shut down')
-    assert(fiber.clock() - start < cfg.thread_termination_timeout + 3)
-    fiber.sleep(0.1)
+    assert(fiber.clock() - start < cfg.thread_termination_timeout + 0.5)
+    fiber.sleep(0.05)
     goto retry
 end
 
