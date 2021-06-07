@@ -131,7 +131,7 @@ endif(DISABLE_HTTP2)
 if (NOT(ENABLE_ASAN))
     # Just test
     add_custom_target(test-linkability ALL COMMAND "$ENV{SHELL}" "${CMAKE_CURRENT_SOURCE_DIR}/tests/linkability-helper.sh"
-        "${CMAKE_CURRENT_SOURCE_DIR}/?.lua" "${CMAKE_CURRENT_SOURCE_DIR}/tests/linkability.lua")
+        "${CMAKE_CURRENT_SOURCE_DIR}/httpng.lua" "${CMAKE_CURRENT_SOURCE_DIR}/tests/linkability.lua")
     add_dependencies(test-linkability httpng_c)
 endif (NOT(ENABLE_ASAN))
 
