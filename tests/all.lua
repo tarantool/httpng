@@ -298,7 +298,6 @@ end
 
 local ssl_pairs = require 'tests.ssl_pairs'
 local listen_with_single_ssl_pair = {
-    port = 8080,
     tls = {
         ssl_pairs['foo'],
     }
@@ -315,8 +314,6 @@ local function cfg_bad_handlers(use_tls)
     }
     if (use_tls) then
         cfg.listen = listen_with_single_ssl_pair
-    else
-        cfg.listen = 8080
     end
     http.cfg(cfg)
 end
@@ -331,7 +328,7 @@ local test_write_params = function(ver, use_tls)
         protocol = 'http'
     end
     local ph = popen.shell(curl_bin .. ' -k -s ' .. ver ..
-        ' ' .. protocol .. '://localhost:8080/write')
+        ' ' .. protocol .. '://localhost:3300/write')
     local result = ph:wait().exit_code
     t.assert(result == 0, 'http request failed')
     t.assert(write_handler_launched == true, 'Handler was not launched')
@@ -371,7 +368,7 @@ local test_write_header_params = function(ver, use_tls)
         protocol = 'http'
     end
     local ph = popen.shell(curl_bin .. ' -k -s ' .. ver ..
-        ' ' .. protocol .. '://localhost:8080/write_header')
+        ' ' .. protocol .. '://localhost:3300/write_header')
     local result = ph:wait().exit_code
     t.assert(result == 0, 'http request failed')
     t.assert(write_header_handler_launched == true, 'Handler was not launched')
@@ -510,16 +507,28 @@ local ensure_http2 = function()
     t.skip_if(not http2_supported, 'This test requires HTTP/2 support in curl')
 end
 
-local test_extra_sites = function(ver)
+local cfg_for_two_sites = function(cfg, first, second, ver, use_tls)
+    local proto
+    if (use_tls) then
+        cfg.listen = listen_with_single_ssl_pair
+        proto = 'https'
+    else
+        proto = 'http'
+    end
+    http.cfg(cfg)
+    local cmd_main = curl_bin .. ' ' .. ver .. ' -k -s ' ..
+        proto .. '://localhost:3300/' .. first
+    local cmd_alt = curl_bin .. ' ' .. ver .. ' -k -s ' ..
+        proto .. '://localhost:3300/' .. second
+    return cmd_main, cmd_alt
+end
+
+local test_extra_sites = function(ver, use_tls)
     local cfg = {
         sites = { { path = '/alt', handler = foo_handler } },
         threads = 4,
-        listen = listen_with_single_ssl_pair,
     }
-    http.cfg(cfg)
-    local cmd_main = curl_bin .. ' ' .. ver .. ' -k -s https://localhost:8080'
-    local cmd_alt =
-        curl_bin .. ' ' .. ver .. ' -k -s https://localhost:8080/alt'
+    local cmd_main, cmd_alt = cfg_for_two_sites(cfg, '', 'alt', ver, use_tls)
 
     check_site_content(cmd_main, 'not found')
     check_site_content(cmd_alt, 'foo')
@@ -531,26 +540,30 @@ local test_extra_sites = function(ver)
     check_site_content(cmd_alt, 'foo')
 end
 
-g_hot_reload.test_extra_sites_http1 = function()
+g_hot_reload.test_extra_sites_http1_insecure = function()
     test_extra_sites '--http1.1'
 end
 
-g_hot_reload.test_extra_sites_http2 = function()
+g_hot_reload.test_extra_sites_http1_tls = function()
+    test_extra_sites('--http1.1', true)
+end
+
+g_hot_reload.test_extra_sites_http2_insecure = function()
     ensure_http2()
     test_extra_sites '--http2'
 end
 
-local test_add_primary_handler = function(ver)
+g_hot_reload.test_extra_sites_http2_tls = function()
+    ensure_http2()
+    test_extra_sites('--http2', true)
+end
+
+local test_add_primary_handler = function(ver, use_tls)
     local cfg = {
         sites = { { path = '/alt', handler = foo_handler } },
         threads = 4,
-        listen = listen_with_single_ssl_pair,
     }
-    http.cfg(cfg)
-    local cmd_main = curl_bin .. ' ' .. ver .. ' -k -s https://localhost:8080'
-    local cmd_alt =
-        curl_bin .. ' ' .. ver .. ' -k -s https://localhost:8080/alt'
-
+    local cmd_main, cmd_alt = cfg_for_two_sites(cfg, '', 'alt', ver, use_tls)
     check_site_content(cmd_main, 'not found')
     check_site_content(cmd_alt, 'foo')
 
@@ -561,8 +574,12 @@ local test_add_primary_handler = function(ver)
     check_site_content(cmd_alt, 'foo')
 end
 
-g_hot_reload.test_add_primary_handler_http1 = function()
+g_hot_reload.test_add_primary_handler_http1_insecure = function()
     test_add_primary_handler '--http1.1'
+end
+
+g_hot_reload.test_add_primary_handler_http1_tls = function()
+    test_add_primary_handler('--http1.1', true)
 end
 
 g_hot_reload.test_add_primary_handler_http2 = function()
@@ -570,17 +587,12 @@ g_hot_reload.test_add_primary_handler_http2 = function()
     test_add_primary_handler '--http2'
 end
 
-local test_add_intermediate_site = function(ver)
+local test_add_intermediate_site = function(ver, use_tls)
     local cfg = {
         handler = foo_handler,
         threads = 4,
-        listen = listen_with_single_ssl_pair,
     }
-    http.cfg(cfg)
-    local cmd_main = curl_bin .. ' ' .. ver .. ' -k -s https://localhost:8080'
-    local cmd_alt =
-        curl_bin .. ' ' .. ver .. ' -k -s https://localhost:8080/alt'
-
+    local cmd_main, cmd_alt = cfg_for_two_sites(cfg, '', 'alt', ver, use_tls)
     check_site_content(cmd_main, 'foo')
     check_site_content(cmd_alt, 'foo')
 
@@ -592,8 +604,12 @@ local test_add_intermediate_site = function(ver)
     check_site_content(cmd_alt, 'bar')
 end
 
-g_hot_reload.test_add_intermediate_site_http1 = function()
+g_hot_reload.test_add_intermediate_site_http1_insecure = function()
     test_add_intermediate_site '--http1.1'
+end
+
+g_hot_reload.test_add_intermediate_site_http1_tls = function()
+    test_add_intermediate_site('--http1.1', true)
 end
 
 g_hot_reload.test_add_intermediate_site_http2 = function()
@@ -601,17 +617,12 @@ g_hot_reload.test_add_intermediate_site_http2 = function()
     test_add_intermediate_site '--http2'
 end
 
-local test_add_intermediate_site_alt = function(ver)
+local test_add_intermediate_site_alt = function(ver, use_tls)
     local cfg = {
         sites = { { path = '/', handler = foo_handler } },
         threads = 4,
-        listen = listen_with_single_ssl_pair,
     }
-    http.cfg(cfg)
-    local cmd_main = curl_bin .. ' ' .. ver .. ' -k -s https://localhost:8080'
-    local cmd_alt =
-        curl_bin .. ' ' .. ver .. ' -k -s https://localhost:8080/alt'
-
+    local cmd_main, cmd_alt = cfg_for_two_sites(cfg, '', 'alt', ver, use_tls)
     check_site_content(cmd_main, 'foo')
     check_site_content(cmd_alt, 'foo')
 
@@ -622,8 +633,12 @@ local test_add_intermediate_site_alt = function(ver)
     check_site_content(cmd_alt, 'bar')
 end
 
-g_hot_reload.test_add_intermediate_site_alt_http1 = function()
+g_hot_reload.test_add_intermediate_site_alt_http1_insecure = function()
     test_add_intermediate_site_alt '--http1.1'
+end
+
+g_hot_reload.test_add_intermediate_site_alt_http1_tls = function()
+    test_add_intermediate_site_alt('--http1.1', true)
 end
 
 g_hot_reload.test_add_intermediate_site_alt_http2 = function()
@@ -635,14 +650,9 @@ local test_add_duplicate_paths = function(ver)
     local cfg = {
         sites = { { path = '/foo', handler = foo_handler } },
         threads = 4,
-        listen = listen_with_single_ssl_pair,
     }
-    http.cfg(cfg)
-    local cmd_main =
-        curl_bin .. ' ' .. ver .. ' -k -s https://localhost:8080/foo'
-    local cmd_alt =
-        curl_bin .. ' ' .. ver .. ' -k -s https://localhost:8080/bar'
-
+    local cmd_main, cmd_alt =
+        cfg_for_two_sites(cfg, 'foo', 'bar', ver, use_tls)
     check_site_content(cmd_main, 'foo')
     check_site_content(cmd_alt, 'not found')
 
@@ -655,8 +665,12 @@ local test_add_duplicate_paths = function(ver)
     check_site_content(cmd_alt, 'not found')
 end
 
-g_hot_reload.test_add_duplicate_paths_http1 = function()
+g_hot_reload.test_add_duplicate_paths_http1_insecure = function()
     test_add_duplicate_paths '--http1.1'
+end
+
+g_hot_reload.test_add_duplicate_paths_http1_tls = function()
+    test_add_duplicate_paths('--http1.1', true)
 end
 
 g_hot_reload.test_add_duplicate_paths_http2 = function()
@@ -664,17 +678,12 @@ g_hot_reload.test_add_duplicate_paths_http2 = function()
     test_add_duplicate_paths '--http2'
 end
 
-local test_add_duplicate_paths_alt = function(ver)
+local test_add_duplicate_paths_alt = function(ver, use_tls)
     local cfg = {
         sites = { { path = '/', handler = foo_handler } },
         threads = 4,
-        listen = listen_with_single_ssl_pair,
     }
-    http.cfg(cfg)
-    local cmd_main = curl_bin .. ' ' .. ver .. ' -k -s https://localhost:8080'
-    local cmd_alt =
-        curl_bin .. ' ' .. ver .. ' -k -s https://localhost:8080/alt'
-
+    local cmd_main, cmd_alt = cfg_for_two_sites(cfg, '', 'alt', ver, use_tls)
     check_site_content(cmd_main, 'foo')
     check_site_content(cmd_alt, 'foo')
 
@@ -687,8 +696,12 @@ local test_add_duplicate_paths_alt = function(ver)
     check_site_content(cmd_alt, 'foo')
 end
 
-g_hot_reload.test_add_duplicate_paths_alt_http1 = function()
+g_hot_reload.test_add_duplicate_paths_alt_http1_insecure = function()
     test_add_duplicate_paths_alt '--http1.1'
+end
+
+g_hot_reload.test_add_duplicate_paths_alt_http1_tls = function()
+    test_add_duplicate_paths_alt('--http1.1', true)
 end
 
 g_hot_reload.test_add_duplicate_paths_alt_http2 = function()
@@ -696,21 +709,16 @@ g_hot_reload.test_add_duplicate_paths_alt_http2 = function()
     test_add_duplicate_paths_alt '--http2'
 end
 
-local test_remove_path = function(ver)
+local test_remove_path = function(ver, use_tls)
     local cfg = {
         sites = {
             { path = '/foo', handler = foo_handler },
             { path = '/bar', handler = bar_handler },
         },
         threads = 4,
-        listen = listen_with_single_ssl_pair,
     }
-    http.cfg(cfg)
-    local cmd_main =
-        curl_bin .. ' ' .. ver .. ' -k -s https://localhost:8080/foo'
-    local cmd_alt =
-        curl_bin .. ' ' .. ver .. ' -k -s https://localhost:8080/bar'
-
+    local cmd_main, cmd_alt =
+        cfg_for_two_sites(cfg, 'foo', 'bar', ver, use_tls)
     check_site_content(cmd_main, 'foo')
     check_site_content(cmd_alt, 'bar')
 
@@ -721,8 +729,12 @@ local test_remove_path = function(ver)
     check_site_content(cmd_alt, 'not found')
 end
 
-g_hot_reload.test_remove_path_http1 = function()
+g_hot_reload.test_remove_path_http1_insecure = function()
     test_remove_path '--http1.1'
+end
+
+g_hot_reload.test_remove_path_http1_tls = function()
+    test_remove_path('--http1.1', true)
 end
 
 g_hot_reload.test_remove_path_http2 = function()
@@ -730,17 +742,14 @@ g_hot_reload.test_remove_path_http2 = function()
     test_remove_path '--http2'
 end
 
-local test_remove_all_paths = function(ver)
+local test_remove_all_paths = function(ver, use_tls)
     local cfg = {
         sites = {
             { path = '/', handler = foo_handler },
         },
         threads = 4,
-        listen = listen_with_single_ssl_pair,
     }
-    http.cfg(cfg)
-    local cmd_main = curl_bin .. ' ' .. ver .. ' -k -s https://localhost:8080'
-
+    local cmd_main = cfg_for_two_sites(cfg, ver, '', 'alt', use_tls)
     check_site_content(cmd_main, 'foo')
 
     cfg.sites = nil
@@ -749,8 +758,12 @@ local test_remove_all_paths = function(ver)
     check_site_content(cmd_main, 'not found')
 end
 
-g_hot_reload.test_remove_all_paths_http1 = function()
+g_hot_reload.test_remove_all_paths_http1_insecure = function()
     test_remove_all_paths '--http1.1'
+end
+
+g_hot_reload.test_remove_all_paths_http1_tls = function()
+    test_remove_all_paths('--http1.1', true)
 end
 
 g_hot_reload.test_remove_all_paths_http2 = function()
@@ -758,15 +771,12 @@ g_hot_reload.test_remove_all_paths_http2 = function()
     test_remove_all_paths '--http2'
 end
 
-local test_remove_all_paths_alt = function(ver)
+local test_remove_all_paths_alt = function(ver, use_tls)
     local cfg = {
         handler = foo_handler,
         threads = 4,
-        listen = listen_with_single_ssl_pair,
     }
-    http.cfg(cfg)
-    local cmd_main = curl_bin .. ' ' .. ver .. ' -k -s https://localhost:8080'
-
+    local cmd_main = cfg_for_two_sites(cfg, '', 'alt', ver, use_tls)
     check_site_content(cmd_main, 'foo')
 
     cfg.handler = nil
@@ -775,8 +785,12 @@ local test_remove_all_paths_alt = function(ver)
     check_site_content(cmd_main, 'not found')
 end
 
-g_hot_reload.test_remove_all_paths_alt_http1 = function()
+g_hot_reload.test_remove_all_paths_alt_http1_insecure = function()
     test_remove_all_paths_alt '--http1.1'
+end
+
+g_hot_reload.test_remove_all_paths_alt_http1_tls = function()
+    test_remove_all_paths_alt('--http1.1', true)
 end
 
 g_hot_reload.test_remove_all_paths_alt_http2 = function()
@@ -849,14 +863,24 @@ g_hot_reload.test_FLAKY_after_decrease_threads = function()
     end
 end
 
-g_hot_reload.test_combo1 = function()
-    g_hot_reload.test_extra_sites_http1()
+g_hot_reload.test_combo1_http1_tls = function()
+    g_hot_reload.test_extra_sites_http1_tls()
     g_bad_handlers.test_write_params_http1_tls()
 end
 
-g_hot_reload.test_combo3 = function()
-    g_hot_reload.test_extra_sites_http2()
+g_hot_reload.test_combo1_http1_insecure = function()
+    g_hot_reload.test_extra_sites_http1_insecure()
+    g_bad_handlers.test_write_params_http1_insecure()
+end
+
+g_hot_reload.test_combo1_http2_tls = function()
+    g_hot_reload.test_extra_sites_http2_tls()
     g_bad_handlers.test_write_params_http2_tls()
+end
+
+g_hot_reload.test_combo1_http2_insecure = function()
+    g_hot_reload.test_extra_sites_http2_insecure()
+    g_bad_handlers.test_write_params_http2_insecure()
 end
 
 local curls
@@ -874,31 +898,39 @@ function shutdown_and_kill_curls()
 end
 g_hot_reload_with_curls.after_each(shutdown_and_kill_curls)
 
-local launch_hungry_curls = function(path, ver)
+local launch_hungry_curls = function(path, ver, use_tls)
     assert(curls == nil)
     curls = {}
     local curl_count = 16
     local i
+    local proto
+    if use_tls then
+        proto = 'https'
+    else
+        proto = 'http'
+    end
     for i = 1, curl_count do
         curls[#curls + 1] =
             popen.shell(curl_bin .. ' ' .. ver ..
-                ' -k -s -o /dev/null https://' .. path, 'r')
+                ' -k -s -o /dev/null ' .. proto .. '://' .. path, 'r')
     end
 end
 
-local test_FLAKY_decrease_stubborn_threads = function(ver)
+local test_FLAKY_decrease_stubborn_threads = function(ver, use_tls)
     local cfg = {
         handler = stubborn_handler,
         threads = 2,
-        listen = listen_with_single_ssl_pair,
     }
+    if use_tls then
+        cfg.listen = listen_with_single_ssl_pair
+    end
 
     http.cfg(cfg)
 
     -- We do not (yet?) have API to check that earlier test from combo is done.
     fiber.sleep(0.1)
 
-    launch_hungry_curls('localhost:8080', ver)
+    launch_hungry_curls('localhost:3300', ver, use_tls)
     fiber.sleep(0.1)
 
     cfg.threads = 1
@@ -920,36 +952,68 @@ local test_FLAKY_decrease_stubborn_threads = function(ver)
     goto retry
 end
 
-g_hot_reload_with_curls.test_FLAKY_decrease_stubborn_threads_http1 = function()
+g_hot_reload_with_curls.test_FLAKY_decrease_stubborn_threads_http1_insecure =
+        function()
     test_FLAKY_decrease_stubborn_threads '--http1.1'
 end
 
-g_hot_reload_with_curls.test_FLAKY_decrease_stubborn_threads_http2 = function()
+g_hot_reload_with_curls.test_FLAKY_decrease_stubborn_threads_http1_tls =
+        function()
+    test_FLAKY_decrease_stubborn_threads('--http1.1', true)
+end
+
+g_hot_reload_with_curls.test_FLAKY_decrease_stubborn_threads_http2_insecure =
+        function()
     ensure_http2()
     test_FLAKY_decrease_stubborn_threads '--http2'
 end
 
-g_hot_reload_with_curls.test_FLAKY_decrease_stubborn_threads_combo2 = function()
-    g_hot_reload.test_extra_sites_http1()
-    g_hot_reload_with_curls.test_FLAKY_decrease_stubborn_threads_http1()
+g_hot_reload_with_curls.test_FLAKY_decrease_stubborn_threads_http2_tls =
+        function()
+    ensure_http2()
+    test_FLAKY_decrease_stubborn_threads('--http2', true)
 end
 
-g_hot_reload_with_curls.test_FLAKY_decrease_stubborn_threads_combo4 = function()
-    g_hot_reload.test_extra_sites_http2()
-    g_hot_reload_with_curls.test_FLAKY_decrease_stubborn_threads_http2()
+g_hot_reload_with_curls.test_FLAKY_decrease_stubborn_thr_combo2_http1_insec =
+        function()
+    g_hot_reload.test_extra_sites_http1_insecure()
+    g_hot_reload_with_curls.
+        test_FLAKY_decrease_stubborn_threads_http1_insecure()
 end
 
-local test_FLAKY_decrease_stubborn_threads_with_timeout = function(ver)
+g_hot_reload_with_curls.test_FLAKY_decrease_stubborn_thr_combo2_http1_tls =
+        function()
+    g_hot_reload.test_extra_sites_http1_tls()
+    g_hot_reload_with_curls.test_FLAKY_decrease_stubborn_threads_http1_tls()
+end
+
+g_hot_reload_with_curls.test_FLAKY_decrease_stubborn_threads_combo2_http2_insec
+        = function()
+    g_hot_reload.test_extra_sites_http2_insecure()
+    g_hot_reload_with_curls.
+        test_FLAKY_decrease_stubborn_threads_http2_insecure()
+end
+
+g_hot_reload_with_curls.test_FLAKY_decrease_stubborn_threads_combo2_http2_tls =
+        function()
+    g_hot_reload.test_extra_sites_http2_tls()
+    g_hot_reload_with_curls.test_FLAKY_decrease_stubborn_threads_http2_tls()
+end
+
+local test_FLAKY_decrease_stubborn_threads_with_timeout =
+        function(ver, use_tls)
     local cfg = {
         handler = stubborn_handler,
         threads = 2,
         thread_termination_timeout = 1,
-        listen = listen_with_single_ssl_pair,
     }
+    if use_tls then
+        cfg.listen = listen_with_single_ssl_pair
+    end
 
     http.cfg(cfg)
 
-    launch_hungry_curls('localhost:8080', ver)
+    launch_hungry_curls('localhost:3300', ver, use_tls)
     fiber.sleep(0.1)
 
     cfg.threads = 1
@@ -970,30 +1034,43 @@ local test_FLAKY_decrease_stubborn_threads_with_timeout = function(ver)
     goto retry
 end
 
-g_hot_reload_with_curls.test_FLAKY_decrease_stubborn_threads_with_timeout_h1 =
+g_hot_reload_with_curls.test_FLAKY_decrease_stubborn_threads_with_timeout_h1i =
         function()
     test_FLAKY_decrease_stubborn_threads_with_timeout '--http1.1'
 end
 
-g_hot_reload_with_curls.test_FLAKY_decrease_stubborn_threads_with_timeout_h2 =
+g_hot_reload_with_curls.test_FLAKY_decrease_stubborn_threads_with_timeout_h1s =
+        function()
+    test_FLAKY_decrease_stubborn_threads_with_timeout('--http1.1', true)
+end
+
+g_hot_reload_with_curls.test_FLAKY_decrease_stubborn_threads_with_timeout_h2i =
         function()
     ensure_http2()
     test_FLAKY_decrease_stubborn_threads_with_timeout '--http2'
 end
 
+g_hot_reload_with_curls.test_FLAKY_decrease_stubborn_threads_with_timeout_h2s =
+        function()
+    ensure_http2()
+    test_FLAKY_decrease_stubborn_threads_with_timeout('--http2', true)
+end
+
 local test_FLAKY_decrease_not_so_stubborn_thr_with_timeout =
-        function(ver)
+        function(ver, use_tls)
     local cfg = {
         handler = stubborn2_handler,
         threads = 2,
         thread_termination_timeout = 1,
-        listen = listen_with_single_ssl_pair,
     }
+    if use_tls then
+        cfg.listen = listen_with_single_ssl_pair
+    end
 
     http.cfg(cfg)
 
     assert(cfg.thread_termination_timeout > 0.1)
-    launch_hungry_curls('localhost:8080', ver)
+    launch_hungry_curls('localhost:3300', ver, use_tls)
     fiber.sleep(0.1)
 
     cfg.threads = 1
@@ -1016,15 +1093,26 @@ local test_FLAKY_decrease_not_so_stubborn_thr_with_timeout =
     goto retry
 end
 
-g_hot_reload_with_curls.test_FLAKY_decr_not_so_stubborn_thr_with_timeout_h1 =
+g_hot_reload_with_curls.test_FLAKY_decr_not_so_stubborn_thr_with_timeout_h1i =
         function()
     test_FLAKY_decrease_not_so_stubborn_thr_with_timeout '--http1.1'
 end
 
-g_hot_reload_with_curls.test_FLAKY_decr_not_so_stubborn_thr_with_timeout_h2 =
+g_hot_reload_with_curls.test_FLAKY_decr_not_so_stubborn_thr_with_timeout_h1s =
+        function()
+    test_FLAKY_decrease_not_so_stubborn_thr_with_timeout('--http1.1', true)
+end
+
+g_hot_reload_with_curls.test_FLAKY_decr_not_so_stubborn_thr_with_timeout_h2i =
         function()
     ensure_http2()
     test_FLAKY_decrease_not_so_stubborn_thr_with_timeout '--http2'
+end
+
+g_hot_reload_with_curls.test_FLAKY_decr_not_so_stubborn_thr_with_timeout_h2s =
+        function()
+    ensure_http2()
+    test_FLAKY_decrease_not_so_stubborn_thr_with_timeout('--http2', true)
 end
 
 local alt_foo_handler = function(req, io)
@@ -1035,19 +1123,13 @@ local alt_bar_handler = function(req, io)
     return { body = 'BAR' }
 end
 
-local test_replace_handlers = function(ver)
+local test_replace_handlers = function(ver, use_tls)
     local cfg = {
         handler = foo_handler,
         sites = { { path = '/alt', handler = alt_foo_handler } },
         threads = 4,
-        listen = listen_with_single_ssl_pair,
     }
-
-    http.cfg(cfg)
-
-    local cmd_main = curl_bin .. ' ' .. ver .. ' -k -s https://localhost:8080'
-    local cmd_alt =
-        curl_bin .. ' ' .. ver .. ' -k -s https://localhost:8080/alt'
+    local cmd_main, cmd_alt = cfg_for_two_sites(cfg, '', 'alt', ver, use_tls)
     local check = check_site_content
 
     check(cmd_main, 'foo')
@@ -1061,13 +1143,22 @@ local test_replace_handlers = function(ver)
     check(cmd_alt, 'BAR')
 end
 
-g_hot_reload.test_replace_handlers_http1 = function()
+g_hot_reload.test_replace_handlers_http1_insecure = function()
     test_replace_handlers '--http1.1'
 end
 
-g_hot_reload.test_replace_handlers_http2 = function()
+g_hot_reload.test_replace_handlers_http1_tls = function()
+    test_replace_handlers('--http1.1', true)
+end
+
+g_hot_reload.test_replace_handlers_http2_insecure = function()
     ensure_http2()
     test_replace_handlers '--http2'
+end
+
+g_hot_reload.test_replace_handlers_http2_tls = function()
+    ensure_http2()
+    test_replace_handlers('--http2', true)
 end
 
 g_hot_reload.test_force_decrease_threads = function()
@@ -1092,46 +1183,75 @@ local query_handler = function(req, io)
     return {body = payload}
 end
 
-local test_expected_query = function(ver)
-    http.cfg{listen = listen_with_single_ssl_pair, handler = query_handler}
-    local cmd_main =
-        curl_bin .. ' ' .. ver .. ' -k -s https://localhost:8080?id=2'
-    check_site_content(cmd_main, 'good')
+local test_some_query = function(ver, use_tls, query, expected)
+    local cfg = {handler = query_handler}
+    local proto
+    if use_tls then
+        cfg.listen = listen_with_single_ssl_pair
+        proto = 'https'
+    else
+        proto = 'http'
+    end
+    http.cfg(cfg)
+    local cmd_main = curl_bin .. ' ' .. ver .. ' -k -s ' ..
+        proto .. '://localhost:3300' .. query
+    check_site_content(cmd_main, expected)
 end
 
-g_good_handlers.test_expected_query_http1 = function()
+local test_expected_query = function(ver, use_tls)
+    test_some_query(ver, use_tls, '?id=2', 'good')
+end
+
+g_good_handlers.test_expected_query_http1_insecure = function()
     test_expected_query '--http1.1'
 end
 
-g_good_handlers.test_expected_query_http2 = function()
+g_good_handlers.test_expected_query_http1_tls = function()
+    test_expected_query('--http1.1', true)
+end
+
+g_good_handlers.test_expected_query_http2_insecure = function()
     ensure_http2()
     test_expected_query '--http2'
 end
 
-local test_unexpected_query = function(ver)
-    http.cfg{listen = listen_with_single_ssl_pair, handler = query_handler}
-    local cmd_main =
-        curl_bin .. ' ' .. ver .. ' -k -s https://localhost:8080?id=3'
-    check_site_content(cmd_main, 'bad')
+g_good_handlers.test_expected_query_http2_tls = function()
+    ensure_http2()
+    test_expected_query('--http2', true)
 end
 
-g_good_handlers.test_unexpected_query_http1 = function()
+local test_unexpected_query = function(ver, use_tls)
+    test_some_query(ver, use_tls, '?id=3', 'bad')
+end
+
+g_good_handlers.test_unexpected_query_http1_insecure = function()
     test_unexpected_query '--http1.1'
 end
 
-g_good_handlers.test_unexpected_query_http2 = function()
+g_good_handlers.test_unexpected_query_http1_tls = function()
+    test_unexpected_query('--http1.1', true)
+end
+
+g_good_handlers.test_unexpected_query_http2_insecure = function()
     ensure_http2()
     test_unexpected_query '--http2'
 end
 
-local test_no_query = function(ver)
-    http.cfg{listen = listen_with_single_ssl_pair, handler = query_handler}
-    local cmd_main = curl_bin .. ' ' .. ver .. ' -k -s https://localhost:8080'
-    check_site_content(cmd_main, 'bad')
+g_good_handlers.test_unexpected_query_http2_tls = function()
+    ensure_http2()
+    test_unexpected_query('--http2', true)
 end
 
-g_good_handlers.test_no_query_http1 = function()
+local test_no_query = function(ver, use_tls)
+    test_some_query(ver, use_tls, '', 'bad')
+end
+
+g_good_handlers.test_no_query_http1_insecure = function()
     test_no_query '--http1.1'
+end
+
+g_good_handlers.test_no_query_http1_tls = function()
+    test_no_query('--http1.1', true)
 end
 
 g_good_handlers.test_no_query_http2 = function()
