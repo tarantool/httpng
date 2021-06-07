@@ -1,6 +1,5 @@
 local t = require('luatest')
 local http = require 'httpng'
---local http_client = require 'http.client'
 local fiber = require 'fiber'
 local popen = require 'popen'
 local curl_bin = 'curl'
@@ -305,28 +304,34 @@ local listen_with_single_ssl_pair = {
     }
 }
 
-local function cfg_bad_handlers()
+local function cfg_bad_handlers(use_tls)
     write_handler_launched = false
     write_header_handler_launched = false
-    http.cfg({
+    local cfg = {
         sites = {
             { path = '/write', handler = write_handler },
             { path = '/write_header', handler = write_header_handler },
         },
-        listen = listen_with_single_ssl_pair,
-    })
+    }
+    if (use_tls) then
+        cfg.listen = listen_with_single_ssl_pair
+    else
+        cfg.listen = 8080
+    end
+    http.cfg(cfg)
 end
 
-g_bad_handlers.test_write_params = function()
-    cfg_bad_handlers()
+local test_write_params = function(ver, use_tls)
+    cfg_bad_handlers(use_tls)
     t.assert(write_handler_launched == false)
-    --[[
-    local httpc = http_client.new()
-    local result = httpc:request('GET', 'https://localhost:8080', nil,
-        {verify_host = 0, verify_peer = 0})
-    --]]--
-    local ph = popen.shell('wget --no-check-certificate -O /dev/null '..
-        'https://localhost:8080/write')
+    local protocol
+    if use_tls then
+        protocol = 'https'
+    else
+        protocol = 'http'
+    end
+    local ph = popen.shell(curl_bin .. ' -k -s ' .. ver ..
+        ' ' .. protocol .. '://localhost:8080/write')
     local result = ph:wait().exit_code
     t.assert(result == 0, 'http request failed')
     t.assert(write_handler_launched == true, 'Handler was not launched')
@@ -337,13 +342,36 @@ g_bad_handlers.test_write_params = function()
     t.assert(write_bad_shuttle_ok == false,
         'io:write() with corrupt io.shuttle didn\'t fail')
     t.assert_str_matches(write_bad_shuttle_err, 'shuttle is invalid')
+    http.shutdown()
 end
 
-g_bad_handlers.test_write_header_params = function()
-    cfg_bad_handlers()
+g_bad_handlers.test_write_params_http1_insecure = function()
+    test_write_params('--http1.1')
+end
+
+g_bad_handlers.test_write_params_http1_tls = function()
+    test_write_params('--http1.1', true)
+end
+
+g_bad_handlers.test_write_params_http2_insecure = function()
+    test_write_params('--http2')
+end
+
+g_bad_handlers.test_write_params_http2_tls = function()
+    test_write_params('--http2', true)
+end
+
+local test_write_header_params = function(ver, use_tls)
+    cfg_bad_handlers(use_tls)
     t.assert(write_header_handler_launched == false)
-    local ph = popen.shell('wget --no-check-certificate -O /dev/null '..
-        'https://localhost:8080/write_header')
+    local protocol
+    if use_tls then
+        protocol = 'https'
+    else
+        protocol = 'http'
+    end
+    local ph = popen.shell(curl_bin .. ' -k -s ' .. ver ..
+        ' ' .. protocol .. '://localhost:8080/write_header')
     local result = ph:wait().exit_code
     t.assert(result == 0, 'http request failed')
     t.assert(write_header_handler_launched == true, 'Handler was not launched')
@@ -400,6 +428,23 @@ g_bad_handlers.test_write_header_params = function()
     t.assert(close_bad_shuttle_ok == false,
         'io:close() with corrupt io.shuttle didn\'t fail')
     t.assert_str_matches(close_bad_shuttle_err, 'shuttle is invalid')
+    http.shutdown()
+end
+
+g_bad_handlers.test_write_header_params_http1_insecure = function()
+    test_write_header_params '--http1.1'
+end
+
+g_bad_handlers.test_write_header_params_http1_tls = function()
+    test_write_header_params('--http1.1', true)
+end
+
+g_bad_handlers.test_write_header_params_http2_insecure = function()
+    test_write_header_params '--http2'
+end
+
+g_bad_handlers.test_write_header_params_http2_tls = function()
+    test_write_header_params('--http2', true)
 end
 
 g_hot_reload = t.group 'hot_reload'
@@ -432,6 +477,7 @@ local check_site_content = function(cmd, str)
     local ph = popen.shell(cmd, "r")
     local output = ph:read()
     local result = ph:wait().exit_code
+    assert(result == 0, 'curl failed')
     if (output ~= str) then
         print('Expected: "'..str..'", actual: "'..output..'"')
         assert(output == str)
@@ -445,14 +491,15 @@ local test_curl_supports_v2 = function()
     version_handler_launched = false
     received_http1_req = false
     received_http2_req = false
-    http.cfg{listen = listen_with_single_ssl_pair, handler = check_http_version_handler }
-    local cmd_alt = curl_bin .. ' -k -s --http2 https://localhost:8080'
+    http.cfg{handler = check_http_version_handler}
+    local cmd_alt = curl_bin .. ' -k -s --http2 http://localhost:3300'
     check_site_content(cmd_alt, 'foo')
     assert(version_handler_launched == true)
     if (not received_http1_req and received_http2_req) then
         http2_supported = true
     end
     http2_support_checked = true
+    http.shutdown()
 end
 
 local ensure_http2 = function()
@@ -804,12 +851,12 @@ end
 
 g_hot_reload.test_combo1 = function()
     g_hot_reload.test_extra_sites_http1()
-    g_bad_handlers.test_write_params()
+    g_bad_handlers.test_write_params_http1_tls()
 end
 
 g_hot_reload.test_combo3 = function()
     g_hot_reload.test_extra_sites_http2()
-    g_bad_handlers.test_write_params()
+    g_bad_handlers.test_write_params_http2_tls()
 end
 
 local curls
@@ -1096,8 +1143,8 @@ g_good_handlers.test_curl_supports_v1 = function()
     version_handler_launched = false
     received_http1_req = false
     received_http2_req = false
-    http.cfg{listen = listen_with_single_ssl_pair, handler = check_http_version_handler }
-    local cmd_main = curl_bin ..' -k -s --http1.1 https://localhost:8080'
+    http.cfg{handler = check_http_version_handler}
+    local cmd_main = curl_bin ..' -k -s --http1.1 http://localhost:3300'
     check_site_content(cmd_main, 'foo')
     assert(version_handler_launched == true)
     assert(received_http1_req == true)
