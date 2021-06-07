@@ -413,6 +413,21 @@ local bar_handler = function(req, io)
     return { body = 'bar' }
 end
 
+local version_handler_launched = false
+local received_http1_req = false
+local received_http2_req = false
+local check_http_version_handler = function(req, io)
+    version_handler_launched = true
+    if (req.version_major == 2) then
+        received_http2_req = true
+    else
+        if (req.version_major == 1) then
+            received_http1_req = true
+        end
+    end
+    return {body = 'foo'}
+end
+
 local check_site_content = function(cmd, str)
     local ph = popen.shell(cmd, "r")
     local output = ph:read()
@@ -421,6 +436,31 @@ local check_site_content = function(cmd, str)
         print('Expected: "'..str..'", actual: "'..output..'"')
         assert(output == str)
     end
+end
+
+local http2_support_checked = false
+local http2_supported
+
+local test_curl_supports_v2 = function()
+    version_handler_launched = false
+    received_http1_req = false
+    received_http2_req = false
+    http.cfg{listen = listen_with_single_ssl_pair, handler = check_http_version_handler }
+    local cmd_alt = curl_bin .. ' -k -s --http2 https://localhost:8080'
+    check_site_content(cmd_alt, 'foo')
+    assert(version_handler_launched == true)
+    if (not received_http1_req and received_http2_req) then
+        http2_supported = true
+    end
+    http2_support_checked = true
+end
+
+local ensure_http2 = function()
+    if (not http2_support_checked) then
+        test_curl_supports_v2()
+        assert(http2_support_checked)
+    end
+    t.skip_if(not http2_supported, 'This test requires HTTP/2 support in curl')
 end
 
 local test_extra_sites = function(ver)
@@ -449,6 +489,7 @@ g_hot_reload.test_extra_sites_http1 = function()
 end
 
 g_hot_reload.test_extra_sites_http2 = function()
+    ensure_http2()
     test_extra_sites '--http2'
 end
 
@@ -474,11 +515,12 @@ local test_add_primary_handler = function(ver)
 end
 
 g_hot_reload.test_add_primary_handler_http1 = function()
-        test_add_primary_handler '--http1.1'
+    test_add_primary_handler '--http1.1'
 end
 
 g_hot_reload.test_add_primary_handler_http2 = function()
-        test_add_primary_handler '--http2'
+    ensure_http2()
+    test_add_primary_handler '--http2'
 end
 
 local test_add_intermediate_site = function(ver)
@@ -508,6 +550,7 @@ g_hot_reload.test_add_intermediate_site_http1 = function()
 end
 
 g_hot_reload.test_add_intermediate_site_http2 = function()
+    ensure_http2()
     test_add_intermediate_site '--http2'
 end
 
@@ -537,6 +580,7 @@ g_hot_reload.test_add_intermediate_site_alt_http1 = function()
 end
 
 g_hot_reload.test_add_intermediate_site_alt_http2 = function()
+    ensure_http2()
     test_add_intermediate_site_alt '--http2'
 end
 
@@ -569,6 +613,7 @@ g_hot_reload.test_add_duplicate_paths_http1 = function()
 end
 
 g_hot_reload.test_add_duplicate_paths_http2 = function()
+    ensure_http2()
     test_add_duplicate_paths '--http2'
 end
 
@@ -600,6 +645,7 @@ g_hot_reload.test_add_duplicate_paths_alt_http1 = function()
 end
 
 g_hot_reload.test_add_duplicate_paths_alt_http2 = function()
+    ensure_http2()
     test_add_duplicate_paths_alt '--http2'
 end
 
@@ -633,6 +679,7 @@ g_hot_reload.test_remove_path_http1 = function()
 end
 
 g_hot_reload.test_remove_path_http2 = function()
+    ensure_http2()
     test_remove_path '--http2'
 end
 
@@ -660,6 +707,7 @@ g_hot_reload.test_remove_all_paths_http1 = function()
 end
 
 g_hot_reload.test_remove_all_paths_http2 = function()
+    ensure_http2()
     test_remove_all_paths '--http2'
 end
 
@@ -685,6 +733,7 @@ g_hot_reload.test_remove_all_paths_alt_http1 = function()
 end
 
 g_hot_reload.test_remove_all_paths_alt_http2 = function()
+    ensure_http2()
     test_remove_all_paths_alt '--http2'
 end
 
@@ -829,6 +878,7 @@ g_hot_reload_with_curls.test_FLAKY_decrease_stubborn_threads_http1 = function()
 end
 
 g_hot_reload_with_curls.test_FLAKY_decrease_stubborn_threads_http2 = function()
+    ensure_http2()
     test_FLAKY_decrease_stubborn_threads '--http2'
 end
 
@@ -880,6 +930,7 @@ end
 
 g_hot_reload_with_curls.test_FLAKY_decrease_stubborn_threads_with_timeout_h2 =
         function()
+    ensure_http2()
     test_FLAKY_decrease_stubborn_threads_with_timeout '--http2'
 end
 
@@ -925,6 +976,7 @@ end
 
 g_hot_reload_with_curls.test_FLAKY_decr_not_so_stubborn_thr_with_timeout_h2 =
         function()
+    ensure_http2()
     test_FLAKY_decrease_not_so_stubborn_thr_with_timeout '--http2'
 end
 
@@ -967,6 +1019,7 @@ g_hot_reload.test_replace_handlers_http1 = function()
 end
 
 g_hot_reload.test_replace_handlers_http2 = function()
+    ensure_http2()
     test_replace_handlers '--http2'
 end
 
@@ -1004,6 +1057,7 @@ g_good_handlers.test_expected_query_http1 = function()
 end
 
 g_good_handlers.test_expected_query_http2 = function()
+    ensure_http2()
     test_expected_query '--http2'
 end
 
@@ -1019,6 +1073,7 @@ g_good_handlers.test_unexpected_query_http1 = function()
 end
 
 g_good_handlers.test_unexpected_query_http2 = function()
+    ensure_http2()
     test_unexpected_query '--http2'
 end
 
@@ -1033,22 +1088,8 @@ g_good_handlers.test_no_query_http1 = function()
 end
 
 g_good_handlers.test_no_query_http2 = function()
+    ensure_http2()
     test_no_query '--http2'
-end
-
-local version_handler_launched = false
-local received_http1_req = false
-local received_http2_req = false
-local check_http_version_handler = function(req, io)
-    version_handler_launched = true
-    if (req.version_major == 2) then
-        received_http2_req = true
-    else
-        if (req.version_major == 1) then
-            received_http1_req = true
-        end
-    end
-    return {body = 'foo'}
 end
 
 g_good_handlers.test_curl_supports_v1 = function()
@@ -1064,14 +1105,10 @@ g_good_handlers.test_curl_supports_v1 = function()
 end
 
 g_good_handlers.test_curl_supports_v2 = function()
-    version_handler_launched = false
-    received_http1_req = false
-    received_http2_req = false
-    http.cfg{listen = listen_with_single_ssl_pair, handler = check_http_version_handler }
-    local cmd_alt = curl_bin .. ' -k -s --http2 https://localhost:8080'
-    check_site_content(cmd_alt, 'foo')
-    assert(version_handler_launched == true)
-    assert(received_http1_req == false,
+    if (not http2_support_checked) then
+        test_curl_supports_v2()
+        assert(http2_support_checked)
+    end
+    assert(http2_supported,
         'http/2 support in curl is required to test everything fully')
-    assert(received_http2_req == true)
 end
