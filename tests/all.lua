@@ -1294,3 +1294,15 @@ g_wrong_config.test_combo3 = function()
     http._cfg_debug{inject_shutdown_error = false}
     http.shutdown()
 end
+
+g_wrong_config.test_combo4 = function()
+    -- ASAN failure on broken versions.
+    http._cfg_debug{inject_shutdown_error = true}
+    pcall(g_shutdown.test_simple_shutdown)
+    pcall(g_wrong_config.test_no_handlers)
+    pcall(g_wrong_config.test_listen_port_root)
+    pcall(g_wrong_config.test_many_roots_alt)
+    pcall(g_wrong_config.test_paths_after_root)
+    http._cfg_debug{inject_shutdown_error = false}
+    http.shutdown()
+end
