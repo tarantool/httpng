@@ -409,6 +409,7 @@ static struct {
 	bool reaper_should_exit;
 	bool reaper_exited;
 	bool is_thr_term_timeout_active;
+	bool inject_shutdown_error;
 } conf = {
 	.tfo_queues = H2O_DEFAULT_LENGTH_TCP_FASTOPEN_QUEUE,
 	.on_shutdown_ref = LUA_REFNIL,
@@ -3645,6 +3646,9 @@ static int on_shutdown_internal(lua_State *L, bool called_from_callback)
 		fiber_sleep(0.001);
 	if (!conf.configured)
 		return luaL_error(L, "Server is not launched");
+	if (conf.inject_shutdown_error && !called_from_callback)
+		return luaL_error(L,
+			"Debugging: simulating broken shutdown support");
 	if (conf.is_shutdown_in_progress) {
 		if (!called_from_callback)
 			return luaL_error(L,
@@ -4954,10 +4958,35 @@ force_decrease_threads(lua_State *L)
 	return 0;
 }
 
+/* Launched in TX thread. */
+static int
+cfg_debug(lua_State *L)
+{
+	/* Lua parameters: table. */
+	enum {
+		LUA_STACK_DEBUG_IDX_TABLE = 1,
+	};
+	const char *lerr = NULL;
+	if (lua_gettop(L) < 1) {
+		lerr = "No parameters specified";
+		goto error_no_parameters;
+	}
+	lua_getfield(L, LUA_STACK_DEBUG_IDX_TABLE, "inject_shutdown_error");
+	if (!lua_isnil(L, -1))
+		conf.inject_shutdown_error = lua_toboolean(L, -1);
+	lua_pop(L, 1);
+	return 0;
+
+error_no_parameters:
+	assert(lerr != NULL);
+	return luaL_error(L, lerr);
+}
+
 static const struct luaL_Reg mylib[] = {
 	{"cfg", cfg},
 	{"shutdown", on_shutdown_for_user},
 	{"force_decrease_threads", force_decrease_threads},
+	{"_cfg_debug", cfg_debug},
 	{NULL, NULL}
 };
 
