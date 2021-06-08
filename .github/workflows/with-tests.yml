@@ -35,15 +35,25 @@ jobs:
 
     - name: Build and install Tarantool
       uses: ./.github/actions/build-tarantool
+      with:
+        cc: 'clang'
+        cxx: 'clang++'
+        cmake_defines: '-DENABLE_ASAN=ON'
 
     - name: Build httpng
       uses: ./.github/actions/build-httpng
+      with:
+        cc: 'clang'
+        cxx: 'clang++'
+        cmake_defines: '-DENABLE_ASAN=ON'
 
     - name: Install luatest
       working-directory: ${{github.workspace}}/build
-      run: ${{github.workspace}}/build/tarantool/build/extra/dist/tarantoolctl rocks install luatest
+      # Ignore all errors (some are caused by ASAN in Tarantool)
+      run: ASAN_OPTIONS=detect_leaks=0 ${{github.workspace}}/build/tarantool/build/extra/dist/tarantoolctl rocks install luatest
 
     - name: Test HTTPNG (luatest)
       working-directory: ${{github.workspace}}
       # FIXME: luatest doesn't understand neither absolute paths nor ".."!
-      run: LUA_CPATH="${{github.workspace}}/build/?.dylib;${{github.workspace}}/build/?.so" build/.rocks/bin/luatest -v -r 2 tests/all.lua
+      # FIXME: Should enable Leak Sanitizer some day...
+      run: ASAN_OPTIONS=detect_leaks=0 LUA_CPATH="${{github.workspace}}/build/?.dylib;${{github.workspace}}/build/?.so" build/.rocks/bin/luatest -v -r 2 tests/all.lua
