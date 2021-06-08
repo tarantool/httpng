@@ -4505,9 +4505,9 @@ Skip_lua_sites:
 		if (new_lua_sites == NULL)
 			goto error_lua_primary_site_malloc;
 		conf.lua_sites = new_lua_sites;
-		lua_site_t *lua_site =
-			&conf.lua_sites[conf.lua_site_count +
-				hot_reload_extra_sites++];
+		const unsigned new_root_idx = conf.lua_site_count +
+			hot_reload_extra_sites++;
+		lua_site_t *lua_site = &conf.lua_sites[new_root_idx];
 		lua_site->generation =
 			generation - ADD_NEW_SITE_GENERATION_SHIFT;
 
@@ -4517,6 +4517,7 @@ Skip_lua_sites:
 		lua_site->path_len = 1;
 		register_lua_handler_part_one(lua_site,
 			"/", luaL_ref(L, LUA_REGISTRYINDEX));
+		conf.idx_of_root_site = new_root_idx;
 		goto Apply_new_config_hot_reload;
 
 	Primary_handler_found:
