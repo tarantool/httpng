@@ -646,7 +646,7 @@ g_hot_reload.test_add_intermediate_site_alt_http2 = function()
     test_add_intermediate_site_alt '--http2'
 end
 
-local test_add_duplicate_paths = function(ver)
+local test_add_duplicate_paths = function(ver, use_tls)
     local cfg = {
         sites = { { path = '/foo', handler = foo_handler } },
         threads = 4,
@@ -673,9 +673,14 @@ g_hot_reload.test_add_duplicate_paths_http1_tls = function()
     test_add_duplicate_paths('--http1.1', true)
 end
 
-g_hot_reload.test_add_duplicate_paths_http2 = function()
+g_hot_reload.test_add_duplicate_paths_http2_insecure = function()
     ensure_http2()
     test_add_duplicate_paths '--http2'
+end
+
+g_hot_reload.test_add_duplicate_paths_http2_tls = function()
+    ensure_http2()
+    test_add_duplicate_paths('--http2', true)
 end
 
 local test_add_duplicate_paths_alt = function(ver, use_tls)
