@@ -28,6 +28,26 @@ local stubborn2_handler = function(req, io)
     goto again
 end
 
+local shutdown_support_checked = false
+local shutdown_works = false
+
+local test_shutdown = function()
+    http.cfg{handler = function() end}
+    local err
+    shutdown_works, err = pcall(http.shutdown)
+    shutdown_support_checked = true
+    return err
+end
+
+local ensure_shutdown_works = function()
+    if not shutdown_support_checked then
+        test_shutdown()
+        assert(shutdown_support_checked)
+    end
+    t.skip_if(not shutdown_works,
+        'This test requires httpng.shutdown() to work')
+end
+
 g_shuttle_size = t.group('shuttle_size')
 
 --[[ There is no point testing other values - parameters are automatically
@@ -46,7 +66,9 @@ g_wrong_config.test_empty_cfg = function()
     t.assert_error_msg_content_equals('No parameters specified', http.cfg)
 end
 
-g_wrong_config.test_no_handlers = function()
+g_wrong_config_requires_shutdown = t.group('wrong_config_requires_shutdown')
+g_wrong_config_requires_shutdown.before_each(ensure_shutdown_works)
+g_wrong_config_requires_shutdown.test_no_handlers = function()
     t.assert_error_msg_content_equals('No handlers specified', http.cfg, {})
 end
 
@@ -172,8 +194,9 @@ end
 g_shutdown = t.group('shutdown')
 
 g_shutdown.test_simple_shutdown = function()
-    http.cfg({ handler = function() end })
-    http.shutdown()
+    local err = test_shutdown()
+    assert(shutdown_support_checked)
+    t.fail_if(err ~= nil, err)
 end
 
 g_shutdown.test_shutdown_after_wrong_cfg = function()
@@ -196,6 +219,7 @@ g_shutdown.test_double_shutdown = function()
 end
 
 g_bad_handlers = t.group 'bad_handlers'
+g_bad_handlers.before_each(ensure_shutdown_works)
 g_bad_handlers.after_each(function() pcall(http.shutdown) end)
 
 local write_handler_launched = false
@@ -339,7 +363,6 @@ local test_write_params = function(ver, use_tls)
     t.assert(write_bad_shuttle_ok == false,
         'io:write() with corrupt io.shuttle didn\'t fail')
     t.assert_str_matches(write_bad_shuttle_err, 'shuttle is invalid')
-    http.shutdown()
 end
 
 g_bad_handlers.test_write_params_http1_insecure = function()
@@ -425,7 +448,6 @@ local test_write_header_params = function(ver, use_tls)
     t.assert(close_bad_shuttle_ok == false,
         'io:close() with corrupt io.shuttle didn\'t fail')
     t.assert_str_matches(close_bad_shuttle_err, 'shuttle is invalid')
-    http.shutdown()
 end
 
 g_bad_handlers.test_write_header_params_http1_insecure = function()
@@ -445,6 +467,7 @@ g_bad_handlers.test_write_header_params_http2_tls = function()
 end
 
 g_hot_reload = t.group 'hot_reload'
+g_hot_reload.before_each(ensure_shutdown_works)
 g_hot_reload.after_each(function() pcall(http.shutdown) end)
 
 local foo_handler = function(req, io)
@@ -901,6 +924,7 @@ function shutdown_and_kill_curls()
     end
     curls = nil
 end
+g_hot_reload_with_curls.before_each(ensure_shutdown_works)
 g_hot_reload_with_curls.after_each(shutdown_and_kill_curls)
 
 local launch_hungry_curls = function(path, ver, use_tls)
@@ -1172,6 +1196,7 @@ g_hot_reload.test_force_decrease_threads = function()
 end
 
 g_good_handlers = t.group 'good_handlers'
+g_good_handlers.before_each(ensure_shutdown_works)
 g_good_handlers.after_each(shutdown_and_kill_curls)
 
 local query_handler = function(req, io)
@@ -1293,6 +1318,7 @@ g_wrong_config.test_combo3 = function()
     pcall(g_wrong_config.test_sites_handler_is_not_a_function)
     http._cfg_debug{inject_shutdown_error = false}
     http.shutdown()
+    shutdown_works = true
 end
 
 g_wrong_config.test_combo4 = function()
@@ -1305,4 +1331,5 @@ g_wrong_config.test_combo4 = function()
     pcall(g_wrong_config.test_paths_after_root)
     http._cfg_debug{inject_shutdown_error = false}
     http.shutdown()
+    shutdown_works = true
 end
