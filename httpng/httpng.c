@@ -4855,12 +4855,14 @@ invalid_sites:
 	if (is_hot_reload) {
 		if (prev_idx_of_root_site != conf.idx_of_root_site) {
 			assert(conf.idx_of_root_site >= conf.lua_site_count);
-			/* Move root site back. */
-			const lua_site_t tmp =
-				conf.lua_sites[conf.idx_of_root_site];
-			conf.lua_sites[conf.idx_of_root_site] =
-				conf.lua_sites[prev_idx_of_root_site];
-			conf.lua_sites[prev_idx_of_root_site] = tmp;
+			if (prev_idx_of_root_site >= 0) {
+				/* Move root site back. */
+				const lua_site_t tmp =
+					conf.lua_sites[conf.idx_of_root_site];
+				conf.lua_sites[conf.idx_of_root_site] =
+					conf.lua_sites[prev_idx_of_root_site];
+				conf.lua_sites[prev_idx_of_root_site] = tmp;
+			}
 			conf.idx_of_root_site = prev_idx_of_root_site;
 		}
 		for (idx = 0; idx < conf.lua_site_count +
@@ -4882,9 +4884,12 @@ invalid_sites:
 			}
 		}
 		if (hot_reload_extra_sites) {
+			/* realloc(0) frees block. */
+			const size_t new_size = (conf.lua_site_count == 0) ?
+				1 : conf.lua_site_count * sizeof(lua_site_t);
 			lua_site_t *const new_lua_sites =
 				(lua_site_t *)realloc(conf.lua_sites,
-				sizeof(lua_site_t) * conf.lua_site_count);
+					new_size);
 			if (new_lua_sites != NULL)
 				conf.lua_sites = new_lua_sites;
 			/* We can complain about failed realloc(smaller),

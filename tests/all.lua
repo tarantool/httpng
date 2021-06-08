@@ -1284,3 +1284,13 @@ g_good_handlers.test_curl_supports_v2 = function()
     assert(http2_supported,
         'http/2 support in curl is required to test everything fully')
 end
+
+g_wrong_config.test_combo3 = function()
+    -- Crash or ASAN failure on broken versions.
+    http._cfg_debug{inject_shutdown_error = true}
+    pcall(g_shutdown.test_simple_shutdown)
+    pcall(g_wrong_config.test_no_handlers)
+    pcall(g_wrong_config.test_sites_handler_is_not_a_function)
+    http._cfg_debug{inject_shutdown_error = false}
+    http.shutdown()
+end
