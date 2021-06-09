@@ -127,11 +127,6 @@ g_wrong_config.test_listen_port_invalid = function()
         http.cfg, { handler = function() end, listen = { { port = 77777 } } })
 end
 
-g_wrong_config.test_listen_port_root = function()
-    t.assert_error_msg_content_equals('bind error',
-        http.cfg, { handler = function() end, listen = { { port = 80 } } })
-end
-
 g_wrong_config.test_min_proto_version_num = function()
     t.assert_error_msg_content_equals('min_proto_version is not a string',
         http.cfg, { handler = function() end, min_proto_version = 1 })
