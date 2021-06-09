@@ -1,7 +1,8 @@
 local t = require('luatest')
 local http = require 'httpng'
 local fiber = require 'fiber'
-local popen = require 'popen'
+local popen
+pcall(function() popen = require 'popen' end)
 local curl_bin = 'curl'
 
 local stubborn_handler = function(req, io)
@@ -46,6 +47,10 @@ local ensure_shutdown_works = function()
     end
     t.skip_if(not shutdown_works,
         'This test requires httpng.shutdown() to work')
+end
+
+local ensure_popen = function()
+    t.skip_if(popen == nil, 'This test requires popen')
 end
 
 g_shuttle_size = t.group('shuttle_size')
@@ -338,6 +343,7 @@ local function cfg_bad_handlers(use_tls)
 end
 
 local test_write_params = function(ver, use_tls)
+    ensure_popen()
     cfg_bad_handlers(use_tls)
     t.assert(write_handler_launched == false)
     local protocol
@@ -377,6 +383,7 @@ g_bad_handlers.test_write_params_http2_tls = function()
 end
 
 local test_write_header_params = function(ver, use_tls)
+    ensure_popen()
     cfg_bad_handlers(use_tls)
     t.assert(write_header_handler_launched == false)
     local protocol
@@ -489,6 +496,7 @@ local check_http_version_handler = function(req, io)
 end
 
 local check_site_content = function(cmd, str)
+    ensure_popen()
     local ph = popen.shell(cmd, "r")
     local output = ph:read()
     local result = ph:wait().exit_code
@@ -923,6 +931,7 @@ g_hot_reload_with_curls.before_each(ensure_shutdown_works)
 g_hot_reload_with_curls.after_each(shutdown_and_kill_curls)
 
 local launch_hungry_curls = function(path, ver, use_tls)
+    ensure_popen()
     assert(curls == nil)
     curls = {}
     local curl_count = 32
@@ -941,6 +950,7 @@ local launch_hungry_curls = function(path, ver, use_tls)
 end
 
 local test_FLAKY_decrease_stubborn_threads = function(ver, use_tls)
+    ensure_popen()
     local cfg = {
         handler = stubborn_handler,
         threads = 2,
@@ -1026,6 +1036,7 @@ end
 
 local test_FLAKY_decrease_stubborn_threads_with_timeout =
         function(ver, use_tls)
+    ensure_popen()
     local cfg = {
         handler = stubborn_handler,
         threads = 2,
@@ -1082,6 +1093,7 @@ end
 
 local test_FLAKY_decrease_not_so_stubborn_thr_with_timeout =
         function(ver, use_tls)
+    ensure_popen()
     local cfg = {
         handler = stubborn2_handler,
         threads = 2,
