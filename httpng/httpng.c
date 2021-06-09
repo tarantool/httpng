@@ -71,8 +71,6 @@
 #define SPLIT_LARGE_BODY
 //#undef SPLIT_LARGE_BODY
 
-
-
 #define H2O_DEFAULT_PORT_FOR_PROTOCOL_USED 65535
 #define H2O_CONTENT_LENGTH_UNSPECIFIED SIZE_MAX
 
@@ -427,8 +425,7 @@ static const char msg_cant_switch_ssl_ctx[] =
 	"Error while switching SSL context after scanning TLS SNI";
 #endif /* NDEBUG */
 
-/* Must be called in HTTP server thread.
- * Should only be called if disposed==true
+/* Should only be called if disposed==true
  * (anchor_dispose() does not set disposed=true for performance reasons).
  * Expected usage: handling disposed==true in postprocessing,
  * setting it as anchor->user_free_shuttle. */
@@ -456,7 +453,9 @@ static void close_async(thread_ctx_t *thread_ctx);
 static void async_cb(void *param);
 static int on_shutdown_callback(lua_State *L);
 
-static inline void my_xtm_delete_queue_from_tx(thread_ctx_t *thread_ctx)
+/* Launched in TX thread. */
+static inline void
+my_xtm_delete_queue_from_tx(thread_ctx_t *thread_ctx)
 {
 #ifndef USE_LIBUV
 	if (thread_ctx->queue_from_tx_fd_consumed)
@@ -466,18 +465,22 @@ static inline void my_xtm_delete_queue_from_tx(thread_ctx_t *thread_ctx)
 		xtm_delete(thread_ctx->queue_from_tx);
 }
 
-__attribute__((weak))
-void complain_loudly_about_leaked_fds(void)
+/* Launched in TX thread. */
+__attribute__((weak)) void
+complain_loudly_about_leaked_fds(void)
 {
 }
 
-static inline bool lua_isstring_strict(lua_State *L, int idx)
+/* Launched in TX thread. */
+static inline bool
+lua_isstring_strict(lua_State *L, int idx)
 {
 	return lua_type(L, idx) == LUA_TSTRING;
 }
 
-static inline void h2o_linklist_insert_fast(h2o_linklist_t *pos,
-	h2o_linklist_t *node)
+/* Launched in HTTP server thread. */
+static inline void
+h2o_linklist_insert_fast(h2o_linklist_t *pos, h2o_linklist_t *node)
 {
     node->prev = pos->prev;
     node->next = pos;
@@ -485,12 +488,15 @@ static inline void h2o_linklist_insert_fast(h2o_linklist_t *pos,
     node->next->prev = node;
 }
 
-static inline void h2o_linklist_unlink_fast(h2o_linklist_t *node)
+/* Launched in HTTP server thread. */
+static inline void
+h2o_linklist_unlink_fast(h2o_linklist_t *node)
 {
     node->next->prev = node->prev;
     node->prev->next = node->next;
 }
 
+/* Can be launched in TX thread or HTTP server thread. */
 static inline void
 xtm_fun_invoke_all(struct xtm_queue *queue)
 {
@@ -500,42 +506,52 @@ xtm_fun_invoke_all(struct xtm_queue *queue)
 }
 
 /* Launched in HTTP server thread. */
-static inline thread_ctx_t *get_curr_thread_ctx(void)
+static inline thread_ctx_t *
+get_curr_thread_ctx(void)
 {
 	return curr_thread_ctx;
 }
 
-/* Called when dispatch must not fail. */
-static inline void stubborn_dispatch(struct xtm_queue *queue,
+/* Can be launched in TX thread or HTTP server thread.
+ * Called when dispatch must not fail. */
+static inline void
+stubborn_dispatch(struct xtm_queue *queue,
 	void (*func)(shuttle_t *), shuttle_t *shuttle)
 {
 	stubborn_dispatch_uni(queue, (void *)func, (void *)shuttle);
 }
 
-/* FIXME: Use lua_tointegerx() when we would no longer care about
+/* Launched in TX thread.
+ * FIXME: Use lua_tointegerx() when we would no longer care about
  * older Tarantool versions. */
-static inline lua_Integer my_lua_tointegerx(lua_State *L, int idx, int *ok)
+static inline lua_Integer
+my_lua_tointegerx(lua_State *L, int idx, int *ok)
 {
 	return (*ok = lua_isnumber(L, idx)) ? lua_tointeger(L, idx) : 0;
 }
 
-/* FIXME: Use lua_tonumberx() when we would no longer care about
+/* Launched in TX thread.
+ * FIXME: Use lua_tonumberx() when we would no longer care about
  * older Tarantool versions. */
-static inline lua_Number my_lua_tonumberx(lua_State *L, int idx, int *ok)
+static inline lua_Number
+my_lua_tonumberx(lua_State *L, int idx, int *ok)
 {
 	return (*ok = lua_isnumber(L, idx)) ? lua_tonumber(L, idx) : 0;
 }
 
-static inline shuttle_t *get_shuttle_from_generator_lua(
-	h2o_generator_t *generator)
+/* Launched in HTTP server thread. */
+static inline shuttle_t *
+get_shuttle_from_generator_lua(h2o_generator_t *generator)
 {
 	lua_response_t *const response = container_of(generator,
 		lua_response_t, un.resp.any.generator);
 	return (shuttle_t *)((char *)response - offsetof(shuttle_t, payload));
 }
 
-/* Called when dispatch must not fail */
-void stubborn_dispatch_uni(struct xtm_queue *queue, void *func, void *param)
+/* Can be launched in TX thread or HTTP server thread.
+ * Called when dispatch must not fail. */
+void
+stubborn_dispatch_uni(struct xtm_queue *queue, void *func, void *param)
 {
 	while (xtm_fun_dispatch(queue, (void (*)(void*))func, param, 0)) {
 		/* Error; we must not fail so retry a little later. */
@@ -543,59 +559,70 @@ void stubborn_dispatch_uni(struct xtm_queue *queue, void *func, void *param)
 	}
 }
 
-/* Called when dispatch must not fail. */
-static inline void stubborn_dispatch_lua(struct xtm_queue *queue,
+/* Can be launched in TX thread or HTTP server thread.
+ * Called when dispatch must not fail. */
+static inline void
+stubborn_dispatch_lua(struct xtm_queue *queue,
 	void (*func)(lua_response_t *), lua_response_t *param)
 {
 	stubborn_dispatch_uni(queue, (void *)func, param);
 }
 
-/* Called when dispatch must not fail. */
-static inline void stubborn_dispatch_recv(struct xtm_queue *queue,
+/* Can be launched in TX thread or HTTP server thread.
+ * Called when dispatch must not fail. */
+static inline void
+stubborn_dispatch_recv(struct xtm_queue *queue,
 	void (*func)(recv_data_t *), recv_data_t *param)
 {
 	stubborn_dispatch_uni(queue, (void *)func, param);
 }
 
-/* Called when dispatch must not fail. */
-static inline void stubborn_dispatch_thr_to_tx(thread_ctx_t *thread_ctx,
+/* Launched in HTTP server thread.
+ * Called when dispatch must not fail. */
+static inline void
+stubborn_dispatch_thr_to_tx(thread_ctx_t *thread_ctx,
 	void (*func)(thread_ctx_t *))
 {
 	stubborn_dispatch_uni(thread_ctx->queue_to_tx,
 		(void *)func, thread_ctx);
 }
 
-/* Called when dispatch must not fail. */
-static inline void stubborn_dispatch_thr_from_tx(
-	thread_ctx_t *thread_ctx, void (*func)(thread_ctx_t *))
+/* Launched in TX thread.
+ * Called when dispatch must not fail. */
+static inline void
+stubborn_dispatch_thr_from_tx(thread_ctx_t *thread_ctx,
+	void (*func)(thread_ctx_t *))
 {
 	stubborn_dispatch_uni(thread_ctx->queue_from_tx,
 		(void *)func, thread_ctx);
 }
 
-/* Called when dispatch must not fail. */
-static inline void stubborn_dispatch_to_http_add_site(
-	thread_ctx_t *thread_ctx, void (*func)(add_site_t *),
-	add_site_t *param)
+/* Launched in TX thread.
+ * Called when dispatch must not fail. */
+static inline void
+stubborn_dispatch_to_http_add_site(thread_ctx_t *thread_ctx,
+	void (*func)(add_site_t *), add_site_t *param)
 {
 	stubborn_dispatch_uni(thread_ctx->queue_from_tx,
 		(void *)func, param);
 }
 
 /* Launched in HTTP server thread. */
-static inline recv_data_t *alloc_recv_data(void)
+static inline recv_data_t *
+alloc_recv_data(void)
 {
 	/* FIXME: Use per-thread pools? */
 	recv_data_t *const recv_data = (recv_data_t *)
 		malloc(conf.recv_data_size);
 	if (recv_data == NULL)
+		/* FIXME: Should terminate connection instead. */
 		h2o_fatal("no memory");
 	return recv_data;
 }
 
 /* Launched in HTTP server thread. */
-static inline recv_data_t *prepare_websocket_recv_data(shuttle_t *parent,
-	unsigned payload_bytes)
+static inline recv_data_t *
+prepare_websocket_recv_data(shuttle_t *parent, unsigned payload_bytes)
 {
 	recv_data_t *const recv_data = alloc_recv_data();
 	recv_data->parent_shuttle = parent;
@@ -605,7 +632,8 @@ static inline recv_data_t *prepare_websocket_recv_data(shuttle_t *parent,
 
 /* Launched in HTTP server thread or in TX thread when
  * !SHOULD_FREE_SHUTTLE_IN_HTTP_SERVER_THREAD. */
-static void free_shuttle_internal(shuttle_t *shuttle)
+static void
+free_shuttle_internal(shuttle_t *shuttle)
 {
 	assert(shuttle->disposed);
 	free_shuttle(shuttle);
@@ -614,14 +642,16 @@ static void free_shuttle_internal(shuttle_t *shuttle)
 /* Launched in HTTP server thread or in TX thread when
  * !SHOULD_FREE_SHUTTLE_IN_HTTP_SERVER_THREAD.
  * FIXME: Only assert is different, can optimize for release build. */
-static void free_lua_websocket_shuttle_internal(shuttle_t *shuttle)
+static void
+free_lua_websocket_shuttle_internal(shuttle_t *shuttle)
 {
 	assert(!shuttle->disposed);
 	free_shuttle(shuttle);
 }
 
 /* Launched in TX thread. */
-void free_shuttle_from_tx_in_http_thr(shuttle_t *shuttle)
+static void
+free_shuttle_from_tx_in_http_thr(shuttle_t *shuttle)
 {
 	stubborn_dispatch(shuttle->thread_ctx->queue_from_tx,
 		&free_shuttle_internal, shuttle);
@@ -629,11 +659,10 @@ void free_shuttle_from_tx_in_http_thr(shuttle_t *shuttle)
 
 /* Launched in TX thread.
  * It can queue request to HTTP server thread or free everything itself. */
-void free_shuttle_from_tx(shuttle_t *shuttle)
+void
+free_shuttle_from_tx(shuttle_t *shuttle)
 {
 #ifdef SHOULD_FREE_SHUTTLE_IN_HTTP_SERVER_THREAD
-	/* Can't call free_shuttle() from TX thread because it
-	 * [potentially] uses per-thread pools. */
 	free_shuttle_from_tx_in_http_thr(shuttle);
 #else /* SHOULD_FREE_SHUTTLE_IN_HTTP_SERVER_THREAD */
 	free_shuttle_internal(shuttle);
@@ -641,21 +670,24 @@ void free_shuttle_from_tx(shuttle_t *shuttle)
 }
 
 /* Launched in TX thread. */
-static inline void free_lua_shuttle_from_tx(shuttle_t *shuttle)
+static inline void
+free_lua_shuttle_from_tx(shuttle_t *shuttle)
 {
 	assert(!((lua_response_t *)&shuttle->payload)->upgraded_to_websocket);
 	free_shuttle_from_tx(shuttle);
 }
 
 /* Launched in TX thread. */
-static inline void free_lua_shuttle_from_tx_in_http_thr(shuttle_t *shuttle)
+static inline void
+free_lua_shuttle_from_tx_in_http_thr(shuttle_t *shuttle)
 {
 	assert(!((lua_response_t *)&shuttle->payload)->upgraded_to_websocket);
 	free_shuttle_from_tx_in_http_thr(shuttle);
 }
 
 /* Launched in TX thread. */
-static inline void free_lua_websocket_shuttle_from_tx(shuttle_t *shuttle)
+static inline void
+free_lua_websocket_shuttle_from_tx(shuttle_t *shuttle)
 {
 	lua_response_t *const response = (lua_response_t *)&shuttle->payload;
 	assert(response->upgraded_to_websocket);
@@ -670,8 +702,6 @@ static inline void free_lua_websocket_shuttle_from_tx(shuttle_t *shuttle)
 		luaL_unref(L, LUA_REGISTRYINDEX, response->lua_recv_state_ref);
 	}
 #ifdef SHOULD_FREE_SHUTTLE_IN_HTTP_SERVER_THREAD
-	/* Can't call free_shuttle() from TX thread because it
-	 * [potentially] uses per-thread pools. */
 	stubborn_dispatch(shuttle->thread_ctx->queue_from_tx,
 		&free_lua_websocket_shuttle_internal, shuttle);
 #else /* SHOULD_FREE_SHUTTLE_IN_HTTP_SERVER_THREAD */
@@ -681,20 +711,23 @@ static inline void free_lua_websocket_shuttle_from_tx(shuttle_t *shuttle)
 
 /* Launched in HTTP server thread or in TX thread when
  * !SHOULD_FREE_RECV_DATA_IN_HTTP_SERVER_THREAD. */
-static inline void free_recv_data(recv_data_t *recv_data)
+static inline void
+free_recv_data(recv_data_t *recv_data)
 {
 	free(recv_data);
 }
 
 /* Launched in HTTP server thread or in TX thread when
  * !SHOULD_FREE_RECV_DATA_IN_HTTP_SERVER_THREAD. */
-static void free_lua_websocket_recv_data_internal(recv_data_t *recv_data)
+static void
+free_lua_websocket_recv_data_internal(recv_data_t *recv_data)
 {
 	free_recv_data(recv_data);
 }
 
 /* Launched in TX thread. */
-static inline void free_lua_websocket_recv_data_from_tx(recv_data_t *recv_data)
+static inline void
+free_lua_websocket_recv_data_from_tx(recv_data_t *recv_data)
 {
 #ifdef SHOULD_FREE_RECV_DATA_IN_HTTP_SERVER_THREAD
 	/* Can't call free_recv_data() from TX thread because it
@@ -708,7 +741,8 @@ static inline void free_lua_websocket_recv_data_from_tx(recv_data_t *recv_data)
 }
 
 /* Launched in TX thread. */
-static void cancel_processing_lua_req_in_tx(shuttle_t *shuttle)
+static void
+cancel_processing_lua_req_in_tx(shuttle_t *shuttle)
 {
 	lua_response_t *const response = (lua_response_t *)&shuttle->payload;
 	assert(!response->upgraded_to_websocket);
@@ -734,7 +768,8 @@ static void cancel_processing_lua_req_in_tx(shuttle_t *shuttle)
 }
 
 /* Launched in HTTP server thread. */
-static void free_shuttle_lua(shuttle_t *shuttle)
+static void
+free_shuttle_lua(shuttle_t *shuttle)
 {
 	lua_response_t *const response = (lua_response_t *)(&shuttle->payload);
 	if (!response->upgraded_to_websocket) {
@@ -745,7 +780,8 @@ static void free_shuttle_lua(shuttle_t *shuttle)
 }
 
 /* Launched in TX thread. */
-static void continue_processing_lua_req_in_tx(lua_response_t *response)
+static void
+continue_processing_lua_req_in_tx(lua_response_t *response)
 {
 	assert(response->fiber != NULL);
 	assert(!response->fiber_done);
@@ -756,7 +792,8 @@ static void continue_processing_lua_req_in_tx(lua_response_t *response)
 
 /* Launched in HTTP server thread when H2O has sent everything
  * and asks for more. */
-static void proceed_sending_lua(h2o_generator_t *self, h2o_req_t *req)
+static void
+proceed_sending_lua(h2o_generator_t *self, h2o_req_t *req)
 {
 	shuttle_t *const shuttle = get_shuttle_from_generator_lua(self);
 	thread_ctx_t *const thread_ctx = get_curr_thread_ctx();
@@ -765,7 +802,9 @@ static void proceed_sending_lua(h2o_generator_t *self, h2o_req_t *req)
 		(lua_response_t *)&shuttle->payload);
 }
 
-static inline void send_lua(h2o_req_t *req, lua_response_t *const response)
+/* Launched in HTTP server thread. */
+static inline void
+send_lua(h2o_req_t *req, lua_response_t *const response)
 {
 	h2o_iovec_t buf;
 	buf.base = (char *)response->un.resp.any.payload;
@@ -776,7 +815,8 @@ static inline void send_lua(h2o_req_t *req, lua_response_t *const response)
 
 /* Launched in HTTP server thread to postprocess first response
  * (with HTTP headers). */
-static void postprocess_lua_req_first(shuttle_t *shuttle)
+static void
+postprocess_lua_req_first(shuttle_t *shuttle)
 {
 	lua_response_t *const response = (lua_response_t *)(&shuttle->payload);
 	if (shuttle->disposed)
@@ -813,7 +853,8 @@ static void postprocess_lua_req_first(shuttle_t *shuttle)
 }
 
 /* Launched in HTTP server thread to postprocess response (w/o HTTP headers) */
-static void postprocess_lua_req_others(shuttle_t *shuttle)
+static void
+postprocess_lua_req_others(shuttle_t *shuttle)
 {
 	lua_response_t *const response = (lua_response_t *)(&shuttle->payload);
 	if (shuttle->disposed)
@@ -822,8 +863,10 @@ static void postprocess_lua_req_others(shuttle_t *shuttle)
 	send_lua(req, response);
 }
 
-static inline void add_http_header_to_lua_response(
-	lua_first_response_only_t *response, const char *key, size_t key_len,
+/* Launched in TX thread. */
+static inline void
+add_http_header_to_lua_response(lua_first_response_only_t *response,
+	const char *key, size_t key_len,
 	const char *value, size_t value_len)
 {
 	if (response->num_headers >= conf.max_headers_lua)
@@ -836,7 +879,8 @@ static inline void add_http_header_to_lua_response(
 
 /* Launched in TX thread.
  * Makes sure earlier queued sends to HTTP server thread are done. */
-static void take_shuttle_ownership_lua(lua_response_t *response)
+static void
+take_shuttle_ownership_lua(lua_response_t *response)
 {
 	if (response->waiter == NULL)
 		return;
@@ -856,7 +900,8 @@ static void take_shuttle_ownership_lua(lua_response_t *response)
 /* Launched in TX thread.
  * Caller must call take_shuttle_ownership_lua() before filling in shuttle
  * and calling us. */
-static inline void wait_for_lua_shuttle_return(lua_response_t *response)
+static inline void
+wait_for_lua_shuttle_return(lua_response_t *response)
 {
 	/* Add us into head of waiting list. */
 	waiter_t waiter = { .next = response->waiter, .fiber = fiber_self() };
@@ -872,14 +917,16 @@ static inline void wait_for_lua_shuttle_return(lua_response_t *response)
 }
 
 /* Launched in TX thread. */
-static inline int get_default_http_code(lua_response_t *response)
+static inline int
+get_default_http_code(lua_response_t *response)
 {
 	assert(!response->sent_something);
 	return 200; /* FIXME: Could differ depending on HTTP request type. */
 }
 
 /* Launched in TX thread. */
-static int payload_writer_write(lua_State *L)
+static int
+payload_writer_write(lua_State *L)
 {
 	/* Lua parameters: self, payload, is_last. */
 	const unsigned num_params = lua_gettop(L);
@@ -933,8 +980,8 @@ static int payload_writer_write(lua_State *L)
 }
 
 /* Launched in TX thread. */
-static void fill_http_headers(lua_State *L, lua_response_t *response,
-	int param_lua_idx)
+static void
+fill_http_headers(lua_State *L, lua_response_t *response, int param_lua_idx)
 {
 	response->un.resp.first.content_length =
 		H2O_CONTENT_LENGTH_UNSPECIFIED;
@@ -977,7 +1024,8 @@ static void fill_http_headers(lua_State *L, lua_response_t *response,
 }
 
 /* Launched in TX thread */
-static int header_writer_write_header(lua_State *L)
+static int
+header_writer_write_header(lua_State *L)
 {
 	/* Lua parameters: self, code, headers, payload, is_last. */
 	const unsigned num_params = lua_gettop(L);
@@ -1043,20 +1091,24 @@ static int header_writer_write_header(lua_State *L)
 }
 
 /* Launched in TX thread. */
-static void cancel_processing_lua_websocket_in_tx(lua_response_t *response)
+static void
+cancel_processing_lua_websocket_in_tx(lua_response_t *response)
 {
 	assert(response->fiber != NULL);
 	assert(!response->fiber_done);
 	response->cancelled = true;
 }
 
-static inline char *get_websocket_recv_location(recv_data_t *const recv_data)
+/* Can be launched in TX thread or HTTP server thread. */
+static inline char *
+get_websocket_recv_location(recv_data_t *const recv_data)
 {
 	return recv_data->payload;
 }
 
 /* Launched in TX thread. */
-static void process_lua_websocket_received_data_in_tx(recv_data_t *recv_data)
+static void
+process_lua_websocket_received_data_in_tx(recv_data_t *recv_data)
 {
 	shuttle_t *const shuttle = recv_data->parent_shuttle;
 	assert(shuttle != NULL);
@@ -1079,7 +1131,8 @@ static void process_lua_websocket_received_data_in_tx(recv_data_t *recv_data)
 }
 
 /* Launched in HTTP server thread. */
-static void websocket_msg_callback(h2o_websocket_conn_t *conn,
+static void
+websocket_msg_callback(h2o_websocket_conn_t *conn,
 	const struct wslay_event_on_msg_recv_arg *arg)
 {
 	shuttle_t *const shuttle = (shuttle_t*)conn->data;
@@ -1123,7 +1176,8 @@ static void websocket_msg_callback(h2o_websocket_conn_t *conn,
 }
 
 /* Launched in HTTP server thread to postprocess upgrade to WebSocket. */
-static void postprocess_lua_req_upgrade_to_websocket(shuttle_t *shuttle)
+static void
+postprocess_lua_req_upgrade_to_websocket(shuttle_t *shuttle)
 {
 	lua_response_t *const response = (lua_response_t *)(&shuttle->payload);
 	if (shuttle->disposed)
@@ -1151,7 +1205,8 @@ static void postprocess_lua_req_upgrade_to_websocket(shuttle_t *shuttle)
 }
 
 /* Launched in HTTP server thread. */
-static void postprocess_lua_req_websocket_send_text(lua_response_t *response)
+static void
+postprocess_lua_req_websocket_send_text(lua_response_t *response)
 {
 	/* Do not check shuttle->disposed, this is a WebSocket now. */
 
@@ -1167,8 +1222,9 @@ static void postprocess_lua_req_websocket_send_text(lua_response_t *response)
 		continue_processing_lua_req_in_tx, response);
 }
 
-/* Launched in TX thread */
-static int websocket_send_text(lua_State *L)
+/* Launched in TX thread. */
+static int
+websocket_send_text(lua_State *L)
 {
 	/* Lua parameters: self, payload. */
 	const unsigned num_params = lua_gettop(L);
@@ -1209,7 +1265,8 @@ static int websocket_send_text(lua_State *L)
 }
 
 /* Launched in HTTP server thread. */
-static void close_websocket(lua_response_t *const response)
+static void
+close_websocket(lua_response_t *const response)
 {
 	if (response->ws_conn != NULL) {
 		h2o_websocket_close(response->ws_conn);
@@ -1220,7 +1277,8 @@ static void close_websocket(lua_response_t *const response)
 }
 
 /* Launched in TX thread. */
-static int close_lua_websocket(lua_State *L)
+static int
+close_lua_websocket(lua_State *L)
 {
 	/* Lua parameters: self. */
 	const unsigned num_params = lua_gettop(L);
@@ -1294,7 +1352,8 @@ lua_websocket_recv_fiber_func(va_list ap)
 }
 
 /* Launched in TX thread. */
-static int header_writer_upgrade_to_websocket(lua_State *L)
+static int
+header_writer_upgrade_to_websocket(lua_State *L)
 {
 	/* Lua parameters: self, headers, recv_function. */
 	const unsigned num_params = lua_gettop(L);
@@ -1382,7 +1441,8 @@ static int header_writer_upgrade_to_websocket(lua_State *L)
 
 #ifdef SPLIT_LARGE_BODY
 /* Launched in HTTP server thread. */
-static void retrieve_more_body(shuttle_t *const shuttle)
+static void
+retrieve_more_body(shuttle_t *const shuttle)
 {
 	if (shuttle->disposed)
 		return;
@@ -1413,8 +1473,8 @@ static void retrieve_more_body(shuttle_t *const shuttle)
 
 /* Launched in TX thread.
  * Returns !0 in case of error. */
-static inline int fill_received_headers_and_body(lua_State *L,
-	shuttle_t *shuttle)
+static inline int
+fill_received_headers_and_body(lua_State *L, shuttle_t *shuttle)
 {
 	lua_response_t *const response = (lua_response_t *)&shuttle->payload;
 	assert(!response->sent_something);
@@ -1498,7 +1558,8 @@ static inline int fill_received_headers_and_body(lua_State *L,
 }
 
 /* Launched in TX thread. */
-static int close_lua_req(lua_State *L)
+static int
+close_lua_req(lua_State *L)
 {
 	/* Lua parameters: self. */
 	const unsigned num_params = lua_gettop(L);
@@ -1550,7 +1611,8 @@ finish_handler_failure_processing(shuttle_t *shuttle, shuttle_func_t *func)
 }
 
 /* Launched in TX thread. */
-static inline void process_handler_failure_not_ws(shuttle_t *shuttle)
+static inline void
+process_handler_failure_not_ws(shuttle_t *shuttle)
 {
 	lua_response_t *const response = (lua_response_t *)&shuttle->payload;
 	take_shuttle_ownership_lua(response);
@@ -1584,10 +1646,9 @@ static inline void process_handler_failure_not_ws(shuttle_t *shuttle)
 	finish_handler_failure_processing(shuttle, func);
 }
 
-
 /* Launched in TX thread. */
-static inline void process_handler_success_not_ws_with_send(lua_State *L,
-	shuttle_t *shuttle)
+static inline void
+process_handler_success_not_ws_with_send(lua_State *L, shuttle_t *shuttle)
 {
 	lua_response_t *const response = (lua_response_t *)&shuttle->payload;
 	const bool old_sent_something = response->sent_something;
@@ -1654,9 +1715,9 @@ static inline void process_handler_success_not_ws_with_send(lua_State *L,
 		 * it would clean up because we have set fiber_done=true */
 }
 
-
 /* Launched in TX thread. */
-static int get_query(lua_State *L)
+static int
+get_query(lua_State *L)
 {
 	/* Lua parameters: self. */
 	const unsigned num_params = lua_gettop(L);
@@ -1689,13 +1750,15 @@ static int get_query(lua_State *L)
 }
 
 /* Launched in TX thread. */
-static void exit_tx_fiber(thread_ctx_t *thread_ctx)
+static void
+exit_tx_fiber(thread_ctx_t *thread_ctx)
 {
 	thread_ctx->tx_fiber_should_exit = true;
 }
 
 /* Launched in HTTP server thread. */
-static void tx_done(thread_ctx_t *thread_ctx)
+static void
+tx_done(thread_ctx_t *thread_ctx)
 {
 #ifdef USE_LIBUV
 	uv_stop(&thread_ctx->loop);
@@ -1922,7 +1985,8 @@ Done:
 }
 
 /* Launched in TX thread. */
-static void process_lua_req_in_tx(shuttle_t *shuttle)
+static void
+process_lua_req_in_tx(shuttle_t *shuttle)
 {
 	lua_response_t *const response = (lua_response_t *)&shuttle->payload;
 
@@ -1962,7 +2026,8 @@ static void process_lua_req_in_tx(shuttle_t *shuttle)
 #undef RETURN_WITH_ERROR
 
 /* Launched in HTTP server thread */
-static int lua_req_handler(lua_h2o_handler_t *self, h2o_req_t *req)
+static int
+lua_req_handler(lua_h2o_handler_t *self, h2o_req_t *req)
 {
 	shuttle_t *const shuttle = prepare_shuttle(req);
 	lua_response_t *const response = (lua_response_t *)&shuttle->payload;
@@ -2123,7 +2188,9 @@ static int lua_req_handler(lua_h2o_handler_t *self, h2o_req_t *req)
 	return 0;
 }
 
-static h2o_pathconf_t *register_handler(h2o_hostconf_t *hostconf,
+/* Launched in TX thread. */
+static h2o_pathconf_t *
+register_handler(h2o_hostconf_t *hostconf,
 	const char *path, int (*on_req)(h2o_handler_t *, h2o_req_t *))
 {
 	/* These functions never return NULL, dying instead */
@@ -2135,7 +2202,8 @@ static h2o_pathconf_t *register_handler(h2o_hostconf_t *hostconf,
 }
 
 /* Launched in TX thread. */
-static void register_lua_handler_part_one(lua_site_t *lua_site,
+static void
+register_lua_handler_part_one(lua_site_t *lua_site,
 	const char *path, int lua_handler_ref)
 {
 	memcpy(lua_site->path, path, lua_site->path_len);
@@ -2144,7 +2212,8 @@ static void register_lua_handler_part_one(lua_site_t *lua_site,
 }
 
 /* Can be launched in TX thread or HTTP server thread. */
-static h2o_pathconf_t *register_lua_handler_part_two(h2o_hostconf_t *hostconf,
+static h2o_pathconf_t *
+register_lua_handler_part_two(h2o_hostconf_t *hostconf,
 	lua_site_t *lua_site, unsigned thread_idx)
 {
 	/* These functions never return NULL, dying instead */
@@ -2163,7 +2232,8 @@ static h2o_pathconf_t *register_lua_handler_part_two(h2o_hostconf_t *hostconf,
 }
 
 /* Launched in TX thread. */
-static void register_lua_handler(lua_site_t *lua_site,
+static void
+register_lua_handler(lua_site_t *lua_site,
 	const char *path, int lua_handler_ref)
 {
 	register_lua_handler_part_one(lua_site, path, lua_handler_ref);
@@ -2174,25 +2244,29 @@ static void register_lua_handler(lua_site_t *lua_site,
 }
 
 /* Launched in HTTP server thread. */
-static inline shuttle_t *alloc_shuttle(thread_ctx_t *thread_ctx)
+static inline shuttle_t *
+alloc_shuttle(thread_ctx_t *thread_ctx)
 {
 	/* FIXME: Use per-thread pools */
 	(void)thread_ctx;
 	shuttle_t *const shuttle = (shuttle_t *)malloc(conf.shuttle_size);
 	if (shuttle == NULL)
+		/* FIXME: Should fail HTTP(S) request instead. */
 		h2o_fatal("no memory");
 	return shuttle;
 }
 
 /* Launched in HTTP server thread or in TX thread
  * when !SHOULD_FREE_SHUTTLE_IN_HTTP_SERVER_THREAD. */
-void free_shuttle(shuttle_t *shuttle)
+void
+free_shuttle(shuttle_t *shuttle)
 {
 	free(shuttle);
 }
 
 /* Launched in HTTP server thread. */
-void free_shuttle_with_anchor(shuttle_t *shuttle)
+void
+free_shuttle_with_anchor(shuttle_t *shuttle)
 {
 	assert(!shuttle->disposed);
 	shuttle->anchor->shuttle = NULL;
@@ -2200,7 +2274,8 @@ void free_shuttle_with_anchor(shuttle_t *shuttle)
 }
 
 /* Launched in HTTP server thread. */
-static void anchor_dispose(void *param)
+static void
+anchor_dispose(void *param)
 {
 	anchor_t *const anchor = (anchor_t*)param;
 	shuttle_t *const shuttle = anchor->shuttle;
@@ -2219,7 +2294,8 @@ static void anchor_dispose(void *param)
 }
 
 /* Launched in HTTP server thread. */
-shuttle_t *prepare_shuttle(h2o_req_t *req)
+shuttle_t *
+prepare_shuttle(h2o_req_t *req)
 {
 	anchor_t *const anchor = (anchor_t *)h2o_mem_alloc_shared(&req->pool,
 		sizeof(anchor_t), &anchor_dispose);
@@ -2235,7 +2311,9 @@ shuttle_t *prepare_shuttle(h2o_req_t *req)
 	return shuttle;
 }
 
-static void on_underlying_socket_free(void *data)
+/* Launched in HTTP server thread. */
+static void
+on_underlying_socket_free(void *data)
 {
 	h2o_linklist_unlink_fast(&my_container_of(data,
 		our_sock_t, super)->accepted_list);
@@ -2248,7 +2326,9 @@ static void on_underlying_socket_free(void *data)
 
 #ifdef USE_LIBUV
 
-static void on_call_from_tx(uv_poll_t *handle, int status, int events)
+/* Launched in HTTP server thread. */
+static void
+on_call_from_tx(uv_poll_t *handle, int status, int events)
 {
 	(void)handle;
 	(void)events;
@@ -2259,7 +2339,9 @@ static void on_call_from_tx(uv_poll_t *handle, int status, int events)
 
 #else /* USE_LIBUV */
 
-static void on_call_from_tx(h2o_socket_t *listener, const char *err)
+/* Launched in HTTP server thread. */
+static void
+on_call_from_tx(h2o_socket_t *listener, const char *err)
 {
 	if (err != NULL)
 		return;
@@ -2271,7 +2353,9 @@ static void on_call_from_tx(h2o_socket_t *listener, const char *err)
 
 #ifdef USE_LIBUV
 
-static void on_accept(uv_stream_t *uv_listener, int status)
+/* Launched in HTTP server thread. */
+static void
+on_accept(uv_stream_t *uv_listener, int status)
 {
 	if (status != 0)
 		return;
@@ -2305,7 +2389,9 @@ static void on_accept(uv_stream_t *uv_listener, int status)
 
 #else /* USE_LIBUV */
 
-static void on_accept(h2o_socket_t *listener, const char *err)
+/* Launched in HTTP server thread. */
+static void
+on_accept(h2o_socket_t *listener, const char *err)
 {
 	if (err != NULL)
 		return;
@@ -2339,7 +2425,9 @@ static void on_accept(h2o_socket_t *listener, const char *err)
 
 #endif /* USE_LIBUV */
 
-static inline void set_cloexec(int fd)
+/* Can be launched in TX thread or HTTP server thread. */
+static inline void
+set_cloexec(int fd)
 {
 	/* For performance reasons do not check result in production builds
 	 * (should not fail anyway).
@@ -3026,8 +3114,10 @@ reset_thread_ctx(unsigned idx)
 #endif /* USE_LIBUV */
 }
 
-/* Returns false in case of error. */
-static bool init_worker_thread(unsigned thread_idx)
+/* Launched in TX thread.
+ * Returns false in case of error. */
+static bool
+init_worker_thread(unsigned thread_idx)
 {
 #ifdef USE_LIBUV
 	int fd_consumed = 0;
@@ -3124,7 +3214,8 @@ alloc_xtm_failed:
 }
 
 /* Launched in TX thread. */
-static void finish_processing_lua_reqs_in_tx(thread_ctx_t *thread_ctx)
+static void
+finish_processing_lua_reqs_in_tx(thread_ctx_t *thread_ctx)
 {
 	if (thread_ctx->active_lua_fibers == 0)
 		stubborn_dispatch_thr_from_tx(thread_ctx, &tx_done);
@@ -3133,7 +3224,8 @@ static void finish_processing_lua_reqs_in_tx(thread_ctx_t *thread_ctx)
 }
 
 /* Launched in HTTP server thread. */
-static inline void tell_close_connection(our_sock_t *item)
+static inline void
+tell_close_connection(our_sock_t *item)
 {
 	static const char err[] = "shutting down";
 	/* Using read callback is faster and futureproof but, alas,
@@ -3158,7 +3250,8 @@ static inline void tell_close_connection(our_sock_t *item)
 		h2o_http1_reqread_on_read(sock, err);
 		break;
 	case SOCK_PROTO_HTTP2:
-		h2o_force_http2_close_connection_now((h2o_http2_conn_t *)sock->data);
+		h2o_force_http2_close_connection_now(
+			(h2o_http2_conn_t *)sock->data);
 		break;
 	case SOCK_PROTO_EXPECT_PROXY:
 		/* FIXME: Looks like this would never happen. */
@@ -3173,7 +3266,8 @@ static inline void tell_close_connection(our_sock_t *item)
 }
 
 /* Launched in HTTP server thread. */
-static void close_existing_connections(thread_ctx_t *thread_ctx)
+static void
+close_existing_connections(thread_ctx_t *thread_ctx)
 {
 	our_sock_t *item =
 		container_of(thread_ctx->accepted_sockets.next,
@@ -3187,7 +3281,8 @@ static void close_existing_connections(thread_ctx_t *thread_ctx)
 }
 
 /* Launched in HTTP server thread. */
-static void prepare_for_shutdown(thread_ctx_t *thread_ctx)
+static void
+prepare_for_shutdown(thread_ctx_t *thread_ctx)
 {
 	/* FIXME: If we want to send something through existing
 	 * connections, should do it now (accepts are already
@@ -3207,7 +3302,8 @@ static void prepare_for_shutdown(thread_ctx_t *thread_ctx)
 }
 
 /* Launched in HTTP server thread. */
-static void handle_graceful_shutdown(thread_ctx_t *thread_ctx)
+static void
+handle_graceful_shutdown(thread_ctx_t *thread_ctx)
 {
 	if (!thread_ctx->use_graceful_shutdown)
 		goto done;
@@ -3231,9 +3327,9 @@ done:
 }
 
 /* This is HTTP server thread main function. */
-static void *worker_func(void *param)
+static void *
+worker_func(void *param)
 {
-	/* FIXME: SIGTERM should terminate loop. */
 	const unsigned thread_idx = (unsigned)(uintptr_t)param;
 	thread_ctx_t *const thread_ctx = &conf.thread_ctxs[thread_idx];
 	curr_thread_ctx = thread_ctx;
@@ -3312,7 +3408,9 @@ static void *worker_func(void *param)
 	return NULL;
 }
 
-static void deinit_worker_thread(unsigned thread_idx)
+/* Launched in TX thread. */
+static void
+deinit_worker_thread(unsigned thread_idx)
 {
 	thread_ctx_t *const thread_ctx = &conf.thread_ctxs[thread_idx];
 
@@ -3375,7 +3473,8 @@ tx_fiber_func(va_list ap)
 }
 
 /* Launched in HTTP server thread. */
-static void async_cb(void *param)
+static void
+async_cb(void *param)
 {
 	thread_ctx_t *const thread_ctx =
 		my_container_of(param, thread_ctx_t, async);
@@ -3387,7 +3486,8 @@ static void async_cb(void *param)
 
 #ifndef USE_LIBUV
 /* Launched in HTTP server thread. */
-static void on_async_read(h2o_socket_t *sock, const char *err)
+static void
+on_async_read(h2o_socket_t *sock, const char *err)
 {
 	if (err != NULL) {
 		fprintf(stderr, "pipe error: %s\n", err);
@@ -3398,9 +3498,12 @@ static void on_async_read(h2o_socket_t *sock, const char *err)
 	thread_ctx_t *const thread_ctx = get_curr_thread_ctx();
 	async_cb(&thread_ctx->async);
 }
+#endif /* USE_LIBUV */
 
+#ifndef USE_LIBUV
 /* Launched in HTTP server thread. */
-static void init_async(thread_ctx_t *thread_ctx)
+static void
+init_async(thread_ctx_t *thread_ctx)
 {
 	h2o_loop_t *const loop = thread_ctx->ctx.loop;
 	int fds[2];
@@ -3421,7 +3524,9 @@ static void init_async(thread_ctx_t *thread_ctx)
 }
 #endif /* USE_LIBUV */
 
-static void close_async(thread_ctx_t *thread_ctx)
+/* Launched in HTTP server thread. */
+static void
+close_async(thread_ctx_t *thread_ctx)
 {
 #ifdef USE_LIBUV
 	/* FIXME: Such call in h2o proper uses free()
@@ -3435,7 +3540,8 @@ static void close_async(thread_ctx_t *thread_ctx)
 }
 
 /* Launched in TX thread. */
-static void tell_thread_to_terminate_internal(thread_ctx_t *thread_ctx,
+static void
+tell_thread_to_terminate_internal(thread_ctx_t *thread_ctx,
 	bool use_graceful_shutdown)
 {
 	thread_ctx->use_graceful_shutdown = use_graceful_shutdown;
@@ -3450,19 +3556,22 @@ static void tell_thread_to_terminate_internal(thread_ctx_t *thread_ctx,
 }
 
 /* Launched in TX thread. */
-static inline void tell_thread_to_terminate(thread_ctx_t *thread_ctx)
+static inline void
+tell_thread_to_terminate(thread_ctx_t *thread_ctx)
 {
 	tell_thread_to_terminate_internal(thread_ctx, false);
 }
 
 /* Launched in TX thread. */
-static inline void tell_thread_to_terminate_gracefully(
-	thread_ctx_t *thread_ctx)
+static inline void
+tell_thread_to_terminate_gracefully(thread_ctx_t *thread_ctx)
 {
 	tell_thread_to_terminate_internal(thread_ctx, true);
 }
 
-static void configure_shutdown_callback(lua_State *L, bool setup)
+/* Launched in TX thread. */
+static void
+configure_shutdown_callback(lua_State *L, bool setup)
 {
 	if (lua_pcall(L, 2, 0, 0) == LUA_OK) {
 		conf.is_on_shutdown_setup = setup;
@@ -3476,8 +3585,8 @@ static void configure_shutdown_callback(lua_State *L, bool setup)
 }
 
 /* Launched in TX thread. */
-static void setup_on_shutdown(lua_State *L, bool setup,
-	bool called_from_callback)
+static void
+setup_on_shutdown(lua_State *L, bool setup, bool called_from_callback)
 {
 	if (conf.on_shutdown_ref == LUA_REFNIL && !called_from_callback) {
 		assert(setup);
@@ -3513,7 +3622,8 @@ static void setup_on_shutdown(lua_State *L, bool setup,
 }
 
 /* Launched in TX thread. */
-static void reap_finished_thread(thread_ctx_t *thread_ctx)
+static void
+reap_finished_thread(thread_ctx_t *thread_ctx)
 {
 	pthread_join(thread_ctx->tid, NULL);
 
@@ -3544,7 +3654,8 @@ static void reap_finished_thread(thread_ctx_t *thread_ctx)
 
 /* Launched in TX thread.
  * Returns error message in case of error. */
-static const char *reap_gracefully_terminating_threads(void)
+static const char *
+reap_gracefully_terminating_threads(void)
 {
 	const char *result;
 	assert(!(conf.reaping_flags & REAPING_GRACEFUL));
@@ -3574,13 +3685,15 @@ Exit:
 
 /* Launched in HTTP server thread.
  * N. b.: It may never be launched if thread terminates. */
-static void become_ungraceful(thread_ctx_t *thread_ctx)
+static void
+become_ungraceful(thread_ctx_t *thread_ctx)
 {
 	close_existing_connections(thread_ctx);
 }
 
 /* Launched in TX thread. */
-static void reap_terminating_threads_ungracefully(void)
+static void
+reap_terminating_threads_ungracefully(void)
 {
 	assert(!(conf.reaping_flags & REAPING_UNGRACEFUL));
 	if (!(conf.reaping_flags & REAPING_GRACEFUL) &&
@@ -3618,7 +3731,8 @@ static void reap_terminating_threads_ungracefully(void)
 }
 
 /* Launched in TX thread. */
-static void terminate_reaper_fiber(void)
+static void
+terminate_reaper_fiber(void)
 {
 	if (conf.reaper_fiber == NULL)
 		return;
@@ -3640,7 +3754,8 @@ static void terminate_reaper_fiber(void)
 }
 
 /* Launched in TX thread. */
-static int on_shutdown_internal(lua_State *L, bool called_from_callback)
+static int
+on_shutdown_internal(lua_State *L, bool called_from_callback)
 {
 	while (conf.cfg_in_progress)
 		fiber_sleep(0.001);
@@ -3703,25 +3818,29 @@ static int on_shutdown_internal(lua_State *L, bool called_from_callback)
 }
 
 /* Launched in TX thread. */
-static int on_shutdown_callback(lua_State *L)
+static int
+on_shutdown_callback(lua_State *L)
 {
 	return on_shutdown_internal(L, true);
 }
 
 /* Launched in TX thread. */
-static int on_shutdown_for_user(lua_State *L)
+static int
+on_shutdown_for_user(lua_State *L)
 {
 	return on_shutdown_internal(L, false);
 }
 
 /* Launched in TX thread. */
-static void flush_tx_lua_handlers(thread_ctx_t *thread_ctx)
+static void
+flush_tx_lua_handlers(thread_ctx_t *thread_ctx)
 {
 	thread_ctx->http_and_tx_lua_handlers_flushed = true;
 }
 
 /* Launched in HTTP server thread. */
-static void flush_http_lua_handlers(thread_ctx_t *thread_ctx)
+static void
+flush_http_lua_handlers(thread_ctx_t *thread_ctx)
 {
 	stubborn_dispatch_thr_to_tx(thread_ctx, flush_tx_lua_handlers);
 }
@@ -3732,7 +3851,8 @@ enum {
 };
 
 /* Launched in TX thread. */
-static void replace_lua_handler_ref(lua_site_t *site)
+static void
+replace_lua_handler_ref(lua_site_t *site)
 {
 	assert(site->lua_handler_ref != site->new_lua_handler_ref);
 	site->old_lua_handler_ref = site->lua_handler_ref;
@@ -3746,7 +3866,8 @@ static void replace_lua_handler_ref(lua_site_t *site)
 }
 
 /* Launched in TX thread. */
-static void flush_lua_ref_handlers(void)
+static void
+flush_lua_ref_handlers(void)
 {
 	__sync_synchronize();
 	/* Now we should call useless function in HTTP thread
@@ -3791,8 +3912,9 @@ replace_lua_handlers(lua_State *L)
 	}
 }
 
-/* Launched in TX thread.*/
-static void done_with_new_site(void *param)
+/* Launched in TX thread. */
+static void
+done_with_new_site(void *param)
 {
 	(void)param;
 	--conf.add_new_sites_counter;
@@ -3801,7 +3923,8 @@ static void done_with_new_site(void *param)
 /* Launched in HTTP server thread.
  * Moves root to the end of list.
  * FIXME: Support all kinds of "overlapped" paths maybe? */
-static void reorder_paths(thread_ctx_t *thread_ctx)
+static void
+reorder_paths(thread_ctx_t *thread_ctx)
 {
 	int root_idx = -1;
 	int non_root_idx = -1;
@@ -3832,7 +3955,8 @@ static void reorder_paths(thread_ctx_t *thread_ctx)
 }
 
 /* Can be launched in TX thread or HTTP server thread. */
-static void hot_reload_add_remove_sites_in_some_thr(thread_ctx_t *thread_ctx,
+static void
+hot_reload_add_remove_sites_in_some_thr(thread_ctx_t *thread_ctx,
 	add_site_t *new_site, bool is_tx_thread)
 {
 	/* FIXME: More than one. */
@@ -3892,22 +4016,25 @@ static void hot_reload_add_remove_sites_in_some_thr(thread_ctx_t *thread_ctx,
 }
 
 /* Launched in HTTP server thread. */
-static void hot_reload_add_remove_sites_in_http_thr(add_site_t *new_site)
+static void
+hot_reload_add_remove_sites_in_http_thr(add_site_t *new_site)
 {
 	return hot_reload_add_remove_sites_in_some_thr(get_curr_thread_ctx(),
 		new_site, false);
 }
 
 /* Launched in TX thread. */
-static void hot_reload_add_remove_sites_in_tx_thr(thread_ctx_t *thread_ctx,
+static void
+hot_reload_add_remove_sites_in_tx_thr(thread_ctx_t *thread_ctx,
 	add_site_t *new_site)
 {
 	return hot_reload_add_remove_sites_in_some_thr(thread_ctx,
 		new_site, true);
 }
 
-/* Launched in TX thread.*/
-static void hot_reload_add_remove_sites(unsigned extra_sites)
+/* Launched in TX thread. */
+static void
+hot_reload_add_remove_sites(unsigned extra_sites)
 {
 	add_site_t new_site = (add_site_t){extra_sites};
 	conf.add_new_sites_counter = conf.num_threads;
@@ -3940,7 +4067,8 @@ prepare_thread_ctx(unsigned thread_idx)
 }
 
 /* Launched in TX thread. */
-static const char *hot_reload_add_threads(unsigned threads)
+static const char *
+hot_reload_add_threads(unsigned threads)
 {
 	const char *lerr = NULL;
 	unsigned xtm_to_tx_idx;
@@ -4076,14 +4204,16 @@ reaper_fiber_func(va_list ap)
 }
 
 /* Launched in TX thread. */
-static void deactivate_reaper_fiber(void)
+static void
+deactivate_reaper_fiber(void)
 {
 	conf.is_thr_term_timeout_active = false;
 	/* There is no point in awaking it. */
 }
 
 /* Launched in TX thread. */
-static void hot_reload_remove_threads(unsigned threads)
+static void
+hot_reload_remove_threads(unsigned threads)
 {
 	if (threads >= conf.num_threads)
 		return;
@@ -4109,7 +4239,8 @@ static void hot_reload_remove_threads(unsigned threads)
 }
 
 /* Launched in TX thread. */
-static void configure_and_start_reaper_fiber(void)
+static void
+configure_and_start_reaper_fiber(void)
 {
 	fiber_set_joinable(conf.reaper_fiber, true);
 	conf.reaper_exited = false;
@@ -4121,9 +4252,10 @@ static void configure_and_start_reaper_fiber(void)
 	fiber_start(conf.reaper_fiber);
 }
 
-/* Lua parameters: lua_sites, function_to_call, function_param */
+/* Launched in TX thread. */
 int cfg(lua_State *L)
 {
+	/* Lua parameters: lua_sites, function_to_call, function_param. */
 	const char *lerr = NULL; /* Error message for caller. */
 	unsigned removed_sites = 0;
 	unsigned thr_init_idx = 0;
@@ -4935,7 +5067,9 @@ error_something:
 	return luaL_error(L, lerr);
 }
 
-unsigned get_shuttle_size(void)
+/* Can be launched in TX thread or HTTP server thread. */
+unsigned
+get_shuttle_size(void)
 {
 	assert(conf.shuttle_size >= MIN_shuttle_size);
 	assert(conf.shuttle_size <= MAX_shuttle_size);
@@ -4996,7 +5130,8 @@ static const struct luaL_Reg mylib[] = {
 	{NULL, NULL}
 };
 
-int luaopen_httpng_c(lua_State *L)
+int
+luaopen_httpng_c(lua_State *L)
 {
 	luaL_newlib(L, mylib);
 	return 1;
