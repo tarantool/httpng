@@ -925,7 +925,7 @@ g_hot_reload_with_curls.after_each(shutdown_and_kill_curls)
 local launch_hungry_curls = function(path, ver, use_tls)
     assert(curls == nil)
     curls = {}
-    local curl_count = 16
+    local curl_count = 32
     local i
     local proto
     if use_tls then
@@ -955,7 +955,7 @@ local test_FLAKY_decrease_stubborn_threads = function(ver, use_tls)
     fiber.sleep(0.1)
 
     launch_hungry_curls('localhost:3300', ver, use_tls)
-    fiber.sleep(0.1)
+    fiber.sleep(0.3)
 
     cfg.threads = 1
     http.cfg(cfg)

@@ -17,12 +17,11 @@ jobs:
     # cross-platform coverage.
     # See: https://docs.github.com/en/free-pro-team@latest/actions/learn-github-actions/managing-complex-workflows#using-a-build-matrix
 
-    #strategy:
-    #  fail-fast: false
-    #  matrix:
-    #    os: ['ubuntu-latest', 'macos-latest']
-    #runs-on: ${{matrix.os}}
-    runs-on: 'ubuntu-latest'
+    strategy:
+      fail-fast: false
+      matrix:
+        os: ['ubuntu-latest', 'macos-latest']
+    runs-on: ${{matrix.os}}
 
     steps:
     - name: Where we are?
@@ -56,4 +55,4 @@ jobs:
       working-directory: ${{github.workspace}}
       # FIXME: luatest doesn't understand neither absolute paths nor ".."!
       # FIXME: Should enable Leak Sanitizer some day...
-      run: ASAN_OPTIONS=detect_leaks=0 LUA_CPATH="${{github.workspace}}/build/?.dylib;${{github.workspace}}/build/?.so" build/.rocks/bin/luatest -v -r 2 tests/all.lua
+      run: ASAN_OPTIONS=detect_leaks=0 LUA_CPATH="${{github.workspace}}/build/?.dylib;${{github.workspace}}/build/?.so" build/.rocks/bin/luatest -v -r 1 tests/all.lua
