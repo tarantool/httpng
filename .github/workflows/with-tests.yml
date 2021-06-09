@@ -21,7 +21,10 @@ jobs:
       fail-fast: false
       matrix:
         os: ['ubuntu-latest', 'macos-latest']
-        tarantool-ref: ['2.7']
+        tarantool-ref: ['1.10', '2.7']
+        exclude:
+          - os: 'macos-latest'
+            tarantool-ref: '1.10'
     runs-on: ${{matrix.os}}
 
     steps:
