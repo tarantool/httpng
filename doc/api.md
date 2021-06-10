@@ -96,16 +96,16 @@ This is what HTTPNG is about - handling HTTP(S) requests. Handlers are Lua funct
   - `path`: String, contains "path" of HTTP(S) request - that is, '/en/download?a=b' for 'https://www.tarantool.io/en/download?a=b'.
   - `peer`: Function, returns table which contains IP address and port of HTTP(S) client in `socket.getaddrinfo()` format.
   - `query`: Function, returns "query" (everything after "?" in path) or `nil`.
-  - `shuttle`: Userdata, please do not touch.
   - `version_major`: Number, contains "major" part of HTTP version ('2' for 'HTTP 2.0').
   - `version_minor`: Number, contains "minor" part of HTTP version ('0' for 'HTTP 2.0').
+  - `_shuttle`: Userdata, please do not touch.
 
 - `io`: Table with the following entries:
   - `close`: function(`io`), equivalent to `io:write(nil, True)` - finishes HTTP(S) request handling. You do not need that in most cases because return from handler always does that.
   - `headers`: Empty table where you can create entries containing HTTP(S) response headers like `['content-type'] = 'text/html'`. It is used if you do not specify `headers` when calling `write_header()` or `write()`.
-  - `shuttle`: Userdata, please do not touch.
   - `upgrade_to_websocket`: function, to be documented.
   - `write_header`: function(`io, code, headers, body, is_last`), sends HTTP(S) `code` (Integer), `headers` (optional Table with entries like `['content-type'] = 'text/plain; charset=utf-8'`; if it is not specified then `io.headers` is used) and `body` (optional String). `is_last` is optional Boolean, set to `True` if there would be no more sends for this request, defaults to `False`. Returns `True` if the connection has already been closed so there is no point in trying to send anything else. `io` is a reference to self - `io:write_header(code, headers, payload, is_last)`. `write_header()` can be called only once per HTTP(S) request. Note that libh2o may add some headers to handle chunked encoding etc.
   - `write`: function(`body, is_last`), sends `body` (String). `is_last` is Boolean, set to `True` if there would be no more sends for this request, defaults to `False`. Returns `True` if the connection has already been closed so there is no point in trying to send anything else. `io` is a reference to self - `io:write(payload, is_last)`. If there was no call to `write_header()` earlier, HTTP(S) code would be 200 and `io.headers` would be used. Note that libh2o may add some headers to handle chunked encoding etc.
+  - `_shuttle`: Userdata, please do not touch.
 
 `handler()` can optionally return a table with `status`, `headers` and `body`, the effect is the same as a call to `io:write_header(status, headers, body, True)` (if `io:write_header()` was not called; note that `io.headers` is *not* used) or `io:write(body, True)` (if `io:write_header()` was called earlier; `status` and `headers` are silently ignored).

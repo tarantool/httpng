@@ -416,6 +416,7 @@ static struct {
 
 __thread thread_ctx_t *curr_thread_ctx;
 
+static const char shuttle_field_name[] = "_shuttle";
 static const char msg_cant_reap[] =
 	"Unable to reconfigure until threads will shut down";
 static const char msg_bad_cert_num[] =
@@ -933,7 +934,7 @@ payload_writer_write(lua_State *L)
 	if (num_params < 2)
 		return luaL_error(L, "Not enough parameters");
 
-	lua_getfield(L, 1, "shuttle");
+	lua_getfield(L, 1, shuttle_field_name);
 	if (!lua_islightuserdata(L, -1))
 		return luaL_error(L, "shuttle is invalid");
 	shuttle_t *const shuttle = (shuttle_t *)lua_touserdata(L, -1);
@@ -1032,7 +1033,7 @@ header_writer_write_header(lua_State *L)
 	if (num_params < 2)
 		return luaL_error(L, "Not enough parameters");
 
-	lua_getfield(L, 1, "shuttle");
+	lua_getfield(L, 1, shuttle_field_name);
 
 	if (!lua_islightuserdata(L, -1))
 		return luaL_error(L, "shuttle is invalid");
@@ -1231,7 +1232,7 @@ websocket_send_text(lua_State *L)
 	if (num_params < 2)
 		return luaL_error(L, "Not enough parameters");
 
-	lua_getfield(L, 1, "shuttle");
+	lua_getfield(L, 1, shuttle_field_name);
 	if (!lua_islightuserdata(L, -1))
 		return luaL_error(L, "shuttle is invalid");
 	shuttle_t *const shuttle = (shuttle_t *)lua_touserdata(L, -1);
@@ -1285,7 +1286,7 @@ close_lua_websocket(lua_State *L)
 	if (num_params < 1)
 		return luaL_error(L, "Not enough parameters");
 
-	lua_getfield(L, 1, "shuttle");
+	lua_getfield(L, 1, shuttle_field_name);
 	if (!lua_islightuserdata(L, -1))
 		return luaL_error(L, "shuttle is invalid");
 	shuttle_t *const shuttle = (shuttle_t *)lua_touserdata(L, -1);
@@ -1360,7 +1361,7 @@ header_writer_upgrade_to_websocket(lua_State *L)
 	if (num_params < 1)
 		return luaL_error(L, "Not enough parameters");
 
-	lua_getfield(L, 1, "shuttle");
+	lua_getfield(L, 1, shuttle_field_name);
 	if (!lua_islightuserdata(L, -1))
 		return luaL_error(L, "shuttle is invalid");
 	shuttle_t *const shuttle = (shuttle_t *)lua_touserdata(L, -1);
@@ -1434,7 +1435,7 @@ header_writer_upgrade_to_websocket(lua_State *L)
 		lua_pushcfunction(L, close_lua_websocket);
 		lua_setfield(L, -2, "close");
 		lua_pushlightuserdata(L, shuttle);
-		lua_setfield(L, -2, "shuttle");
+		lua_setfield(L, -2, shuttle_field_name);
 	}
 	return 1;
 }
@@ -1566,7 +1567,7 @@ close_lua_req(lua_State *L)
 	if (num_params < 1)
 		return luaL_error(L, "Not enough parameters");
 
-	lua_getfield(L, 1, "shuttle");
+	lua_getfield(L, 1, shuttle_field_name);
 	if (!lua_islightuserdata(L, -1))
 		return luaL_error(L, "shuttle is invalid");
 	shuttle_t *const shuttle = (shuttle_t *)lua_touserdata(L, -1);
@@ -1778,7 +1779,7 @@ get_addr_internal(lua_State *L, ptrdiff_t offset)
 	if (num_params < 1)
 		return luaL_error(L, "Not enough parameters");
 
-	lua_getfield(L, 1, "shuttle");
+	lua_getfield(L, 1, shuttle_field_name);
 	if (!lua_islightuserdata(L, -1))
 		return luaL_error(L, "shuttle is invalid");
 	shuttle_t *const shuttle = (shuttle_t *)lua_touserdata(L, -1);
@@ -1901,7 +1902,7 @@ lua_fiber_func(va_list ap)
 	lua_pushboolean(L, !!response->un.req.ws_client_key_len);
 	lua_setfield(L, -2, "is_websocket");
 	lua_pushlightuserdata(L, shuttle);
-	lua_setfield(L, -2, "shuttle");
+	lua_setfield(L, -2, shuttle_field_name);
 	lua_pushcfunction(L, get_peer);
 	lua_setfield(L, -2, "peer");
 	lua_pushcfunction(L, get_ouraddr);
@@ -1927,7 +1928,7 @@ lua_fiber_func(va_list ap)
 	lua_pushcfunction(L, close_lua_req);
 	lua_setfield(L, -2, "close");
 	lua_pushlightuserdata(L, shuttle);
-	lua_setfield(L, -2, "shuttle");
+	lua_setfield(L, -2, shuttle_field_name);
 	lua_createtable(L, 0, 2);
 	lua_setfield(L, -2, "headers");
 

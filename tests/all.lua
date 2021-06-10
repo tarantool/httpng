@@ -260,10 +260,10 @@ local write_handler = function(req, io)
     write_handler_launched = true
     bad_write_ok, bad_write_err = pcall(io.write, io)
 
-    local saved_shuttle = io.shuttle
-    io.shuttle = 42
+    local saved_shuttle = io._shuttle
+    io._shuttle = 42
     write_bad_shuttle_ok, write_bad_shuttle_err = pcall(io.write, io, 'a')
-    io.shuttle = saved_shuttle
+    io._shuttle = saved_shuttle
 
     io:close()
 end
@@ -272,20 +272,20 @@ local write_header_handler = function(req, io)
     write_header_handler_launched = true
     bad_write_header_ok, bad_write_header_err = pcall(io.write_header, io)
 
-    local saved_shuttle = io.shuttle
-    io.shuttle = 42
+    local saved_shuttle = io._shuttle
+    io._shuttle = 42
     write_header_bad_shuttle_ok, write_header_bad_shuttle_err =
         pcall(io.write_header, io, 200)
-    io.shuttle = saved_shuttle
+    io._shuttle = saved_shuttle
 
     write_header_invalid_ok, write_header_invalid_err =
         pcall(io.write_header, io, 'a')
 
-    local saved_shuttle = io.shuttle
-    io.shuttle = 42
+    local saved_shuttle = io._shuttle
+    io._shuttle = 42
     upgrade_to_websocket_bad_shuttle_ok, upgrade_to_websocket_bad_shuttle_err =
         pcall(io.upgrade_to_websocket, io)
-    io.shuttle = saved_shuttle
+    io._shuttle = saved_shuttle
 
     query_ok, query_err = pcall(req.query)
 
@@ -311,10 +311,10 @@ local write_header_handler = function(req, io)
 
     close_ok, close_err = pcall(io.close)
 
-    local saved_shuttle = io.shuttle
-    io.shuttle = 42
+    local saved_shuttle = io._shuttle
+    io._shuttle = 42
     close_bad_shuttle_ok, close_bad_shuttle_err = pcall(io.close, io)
-    io.shuttle = saved_shuttle
+    io._shuttle = saved_shuttle
 
     io:close()
 end
@@ -362,7 +362,7 @@ local test_write_params = function(ver, use_tls)
     t.assert_str_matches(bad_write_err, 'Not enough parameters')
 
     t.assert(write_bad_shuttle_ok == false,
-        'io:write() with corrupt io.shuttle didn\'t fail')
+        'io:write() with corrupt io._shuttle didn\'t fail')
     t.assert_str_matches(write_bad_shuttle_err, 'shuttle is invalid')
 end
 
@@ -402,7 +402,7 @@ local test_write_header_params = function(ver, use_tls)
     t.assert_str_matches(bad_write_header_err, 'Not enough parameters')
 
     t.assert(write_header_bad_shuttle_ok == false,
-        'io:write_header() with corrupt io.shuttle didn\'t fail')
+        'io:write_header() with corrupt io._shuttle didn\'t fail')
     t.assert_str_matches(write_header_bad_shuttle_err, 'shuttle is invalid')
 
     t.assert(write_header_invalid_ok == false,
@@ -411,7 +411,7 @@ local test_write_header_params = function(ver, use_tls)
         'HTTP code is not an integer')
 
     t.assert(upgrade_to_websocket_bad_shuttle_ok == false,
-        'io:upgrade_to_websocket() with corrupt io.shuttle didn\'t fail')
+        'io:upgrade_to_websocket() with corrupt io._shuttle didn\'t fail')
     t.assert_str_matches(upgrade_to_websocket_bad_shuttle_err,
         'shuttle is invalid')
 
@@ -448,7 +448,7 @@ local test_write_header_params = function(ver, use_tls)
     t.assert_str_matches(close_err, 'Not enough parameters')
 
     t.assert(close_bad_shuttle_ok == false,
-        'io:close() with corrupt io.shuttle didn\'t fail')
+        'io:close() with corrupt io._shuttle didn\'t fail')
     t.assert_str_matches(close_bad_shuttle_err, 'shuttle is invalid')
 end
 
