@@ -30,7 +30,7 @@ http.cfg{
     openssl_security_level = 0,
     handler = function(req, io)
         local payload
-        local req_query = req:query()
+        local req_query = req.query
         if req_query then
             local query_str = string.match(req_query, '^id=%d+')
             if query_str then
