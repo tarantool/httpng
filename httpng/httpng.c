@@ -498,6 +498,21 @@ h2o_linklist_unlink_fast(h2o_linklist_t *node)
     node->prev->next = node->next;
 }
 
+/* Launched in TX thread. */
+static inline bool
+is_site_added(const lua_site_t *lua_site, unsigned generation)
+{
+	return (lua_site->generation ==
+		generation - ADD_NEW_SITE_GENERATION_SHIFT);
+}
+
+/* Launched in TX thread. */
+static inline bool
+is_site_obsoleted(const lua_site_t *lua_site, unsigned generation)
+{
+	return (generation - lua_site->generation == GENERATION_INCREMENT);
+}
+
 /* Can be launched in TX thread or HTTP server thread. */
 static inline void
 xtm_fun_invoke_all(struct xtm_queue *queue)
@@ -4450,9 +4465,7 @@ Skip_inits_on_hot_reload:
 				lua_site = &conf.lua_sites[lua_site_idx];
 				if (path_len == lua_site->path_len &&
 				    !memcmp(lua_site->path, path, path_len)) {
-					if (lua_site->generation ==
-					    generation -
-					    ADD_NEW_SITE_GENERATION_SHIFT) {
+					if (is_site_added(lua_site, generation)) {
 						lerr =
 						"Can't add duplicate paths";
 						goto invalid_sites;
@@ -4843,9 +4856,7 @@ Apply_new_config_hot_reload:
 	for (idx = 0; idx < conf.lua_site_count + hot_reload_extra_sites -
 	    removed_sites;) {
 		lua_site_t *const lua_site = &conf.lua_sites[idx];
-		if (lua_site->generation != generation &&
-		    lua_site->generation != generation -
-			    ADD_NEW_SITE_GENERATION_SHIFT) {
+		if (is_site_obsoleted(lua_site, generation)) {
 			if (conf.idx_of_root_site == idx)
 				conf.idx_of_root_site = -1;
 			free(lua_site->path);
@@ -4964,8 +4975,7 @@ invalid_sites:
 				luaL_unref(L, LUA_REGISTRYINDEX,
 					lua_site->new_lua_handler_ref);
 			else {
-				if (lua_site->generation == generation -
-				    ADD_NEW_SITE_GENERATION_SHIFT) {
+				if (is_site_added(lua_site, generation)) {
 					if (lua_site->lua_handler_ref !=
 					    LUA_REFNIL)
 						luaL_unref(L, LUA_REGISTRYINDEX,
