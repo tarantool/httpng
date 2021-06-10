@@ -1079,7 +1079,7 @@ local test_FLAKY_decrease_not_so_stubborn_thr_with_timeout =
     if (ok) then
         assert(fiber.clock() - start >= 0.4,
             'threads have terminated too early');
-        assert(fiber.clock() - start < cfg.thread_termination_timeout,
+        assert(fiber.clock() - start < cfg.thread_termination_timeout + 0.5,
             'threads have terminated too late');
         return
     end
