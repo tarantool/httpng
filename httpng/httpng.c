@@ -105,7 +105,8 @@
 #define TLS1_2_STR "tls1.2"
 #define TLS1_3_STR "tls1.3"
 
-#define ADD_NEW_SITE_GENERATION_SHIFT 2
+#define ADD_NEW_SITE_GENERATION_SHIFT 1
+#define GENERATION_INCREMENT 2
 
 #define REAPING_GRACEFUL (1 << 0)
 #define REAPING_UNGRACEFUL (1 << 1)
@@ -4212,6 +4213,8 @@ configure_and_start_reaper_fiber(void)
 int cfg(lua_State *L)
 {
 	/* Lua parameters: lua_sites, function_to_call, function_param. */
+	STATIC_ASSERT(GENERATION_INCREMENT > ADD_NEW_SITE_GENERATION_SHIFT,
+		"GENERATION_INCREMENT is not large enough");
 	const char *lerr = NULL; /* Error message for caller. */
 	unsigned removed_sites = 0;
 	unsigned thr_init_idx = 0;
@@ -4406,7 +4409,7 @@ Skip_inits_on_hot_reload:
 	unsigned hot_reload_extra_sites = 0;
 	lua_getfield(L, LUA_STACK_IDX_TABLE, "sites");
 	unsigned lua_site_count = 0;
-	const unsigned generation = ++conf.generation;
+	const unsigned generation = (conf.generation += GENERATION_INCREMENT);
 	if (lua_isnil(L, -1))
 		goto Skip_lua_sites;
 	if (!lua_istable(L, -1)) {

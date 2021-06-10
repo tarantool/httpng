@@ -1299,3 +1299,15 @@ g_wrong_config.test_combo4 = function()
     http.shutdown()
     shutdown_works = true
 end
+
+g_wrong_config.test_combo5 = function()
+    -- ASAN failure on broken versions.
+    http._cfg_debug{inject_shutdown_error = true}
+    pcall(g_shutdown.test_simple_shutdown)
+    pcall(g_wrong_config.test_invalid_sites)
+    pcall(g_wrong_config.test_handler_is_not_a_function)
+    pcall(g_wrong_config.test_sites_handler_is_not_a_function)
+    http._cfg_debug{inject_shutdown_error = false}
+    http.shutdown()
+    shutdown_works = true
+end
