@@ -4588,11 +4588,8 @@ Skip_inits_on_hot_reload:
 
 Skip_lua_sites:
 	lua_getfield(L, LUA_STACK_IDX_TABLE, "handler");
-	if (lua_isnil(L, -1)) {
-		if (is_hot_reload)
-			goto Apply_new_config_hot_reload;
+	if (lua_isnil(L, -1))
 		goto Skip_main_lua_handler;
-	}
 	if (lua_type(L, -1) != LUA_TFUNCTION) {
 		lerr = "handler is not a function";
 		goto invalid_handler;
@@ -4622,7 +4619,7 @@ Skip_lua_sites:
 		register_lua_handler_part_one(lua_site,
 			"/", luaL_ref(L, LUA_REGISTRYINDEX));
 		conf.idx_of_root_site = new_root_idx;
-		goto Apply_new_config_hot_reload;
+		goto Skip_creating_primary_handler_structs;
 
 	Primary_handler_found:
 		lua_site = &conf.lua_sites[conf.idx_of_root_site];
@@ -4632,12 +4629,7 @@ Skip_lua_sites:
 		}
 		lua_site->new_lua_handler_ref = luaL_ref(L, LUA_REGISTRYINDEX);
 		lua_site->generation = generation;
-
-		/* FIXME: Actually we should check other parameters for sanity,
-		 * not doing that for easier merging of multilisten. */
-		//goto Skip_creating_primary_handler_structs;
-
-		goto Apply_new_config_hot_reload;
+		goto Skip_creating_primary_handler_structs;
 	}
 
 	if (conf.idx_of_root_site >= 0) {
@@ -4666,9 +4658,9 @@ Skip_lua_sites:
 		luaL_ref(L, LUA_REGISTRYINDEX));
 	lua_site->generation = generation;
 
-//Skip_creating_primary_handler_structs:
+Skip_creating_primary_handler_structs:
 Skip_main_lua_handler:
-	if (c_handlers + lua_site_count == 0) {
+	if (!is_hot_reload && c_handlers + lua_site_count == 0) {
 		lerr = "No handlers specified";
 		goto no_handlers;
 	}
@@ -4754,6 +4746,8 @@ Skip_min_proto_version:
 	}
 
 Skip_openssl_security_level:
+	if (is_hot_reload)
+		goto Apply_new_config_hot_reload;
 	if (load_and_handle_listen_from_lua(L, LUA_STACK_IDX_TABLE, &lerr) != 0)
 		goto listen_invalid;
 
