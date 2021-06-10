@@ -92,10 +92,10 @@ This is what HTTPNG is about - handling HTTP(S) requests. Handlers are Lua funct
   - `headers`: Table containing HTTP(S) request headers with entries like `['user-agent'] = 'godzilla'`
   - `is_websocket`: Boolean, is this WebSockets request.
   - `method`: String, 'GET', 'PUT' etc.
-  - `ouraddr`: Function, returns table which contains an IP address and port connection has been received on in `socket.getaddrinfo()` format.
+  - `ouraddr`: Table, contains an IP address and port connection has been received on in `socket.getaddrinfo()` format.
   - `path`: String, contains "path" of HTTP(S) request - that is, '/en/download?a=b' for 'https://www.tarantool.io/en/download?a=b'.
-  - `peer`: Function, returns table which contains IP address and port of HTTP(S) client in `socket.getaddrinfo()` format.
-  - `query`: Function, returns "query" (everything after "?" in path) or `nil`.
+  - `peer`: Table, contains IP address and port of HTTP(S) client in `socket.getaddrinfo()` format.
+  - `query`: String, everything after "?" in path or `nil`.
   - `version_major`: Number, contains "major" part of HTTP version ('2' for 'HTTP 2.0').
   - `version_minor`: Number, contains "minor" part of HTTP version ('0' for 'HTTP 2.0').
   - `_shuttle`: Userdata, please do not touch.

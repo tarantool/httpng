@@ -1717,37 +1717,26 @@ process_handler_success_not_ws_with_send(lua_State *L, shuttle_t *shuttle)
 }
 
 /* Launched in TX thread. */
-static int
-get_query(lua_State *L)
+static inline void
+push_query(lua_State *L, lua_response_t *response)
 {
-	/* Lua parameters: self. */
-	const unsigned num_params = lua_gettop(L);
-	if (num_params < 1)
-		return luaL_error(L, "Not enough parameters");
+	if (response->un.req.query_at == LUA_QUERY_NONE)
+		return;
 
-	/* Do not extract data from shuttle -
-	 * they may have already been overwritten. */
+	int64_t query_at = response->un.req.query_at;
+	const unsigned len = response->un.req.path_len;
 
-	lua_getfield(L, -1, "query_at");
-	if (!lua_isnumber(L, -1))
-		return luaL_error(L, "query_at is not an integer");
-	const int64_t query_at = lua_tointeger(L, -1);
-	if (-1 == query_at) {
-		lua_pushnil(L);
-		return 1;
+	if ((uint64_t)query_at > (uint64_t)len) {
+		assert(false);
+		return;
 	}
-	lua_getfield(L, -2, "path");
-	if (!lua_isstring_strict(L, -1))
-		return luaL_error(L, "path is not a string");
 
-	size_t len;
-	const char *path = lua_tolstring(L, -1, &len);
-	if ((uint64_t)query_at - 1 > (uint64_t)len)
-		return luaL_error(L, "query_at value is invalid");
+	const char *const path = response->un.req.buffer;
+	query_at += 1;
 
 	/* N.b.: query_at is 1-based; we also skip '?'. */
 	lua_pushlstring(L, path + query_at, len - query_at);
-	return 1;
+	lua_setfield(L, -2, "query");
 }
 
 /* Launched in TX thread. */
@@ -1771,20 +1760,10 @@ tx_done(thread_ctx_t *thread_ctx)
 }
 
 /* Launched in TX thread. */
-static int
-get_addr_internal(lua_State *L, ptrdiff_t offset)
+static void
+push_addr_table(lua_State *L, lua_response_t *response,
+	const char *name, ptrdiff_t offset)
 {
-	/* Lua parameters: self. */
-	const unsigned num_params = lua_gettop(L);
-	if (num_params < 1)
-		return luaL_error(L, "Not enough parameters");
-
-	lua_getfield(L, 1, shuttle_field_name);
-	if (!lua_islightuserdata(L, -1))
-		return luaL_error(L, "shuttle is invalid");
-	shuttle_t *const shuttle = (shuttle_t *)lua_touserdata(L, -1);
-	lua_response_t *const response = (lua_response_t *)&shuttle->payload;
-
 	const struct sockaddr_storage *const ss =
 		(struct sockaddr_storage *)((char *)response + offset);
 	char tmp[(INET6_ADDRSTRLEN > INET_ADDRSTRLEN
@@ -1808,9 +1787,9 @@ get_addr_internal(lua_State *L, ptrdiff_t offset)
 		family = str_af_inet6;
 		family_len = sizeof(str_af_inet6) - 1;
 	} else
-		return 0;
+		return;
 	if (inet_ntop(ss->ss_family, addr, tmp, sizeof(tmp)) == NULL)
-		return 0;
+		return;
 
 	lua_createtable(L, 0, 5);
 	const size_t addr_len = strlen(tmp);
@@ -1826,22 +1805,7 @@ get_addr_internal(lua_State *L, ptrdiff_t offset)
 	lua_setfield(L, -2, "protocol");
 	lua_pushlstring(L, "SOCK_STREAM", 11);
 	lua_setfield(L, -2, "type");
-
-	return 1;
-}
-
-/* Launched in TX thread. */
-static inline int
-get_peer(lua_State *L)
-{
-	return get_addr_internal(L, offsetof(lua_response_t, peer));
-}
-
-/* Launched in TX thread. */
-static inline int
-get_ouraddr(lua_State *L)
-{
-	return get_addr_internal(L, offsetof(lua_response_t, ouraddr));
+	lua_setfield(L, -2, name);
 }
 
 /* Launched in TX thread. */
@@ -1880,22 +1844,14 @@ lua_fiber_func(va_list ap)
 	lua_rawgeti(L, LUA_REGISTRYINDEX, response->un.req.lua_handler_ref);
 
 	/* First param for Lua handler - req. */
-	lua_createtable(L, 0, 12);
+	lua_createtable(L, 0, 11);
 	lua_pushinteger(L, response->un.req.version_major);
 	lua_setfield(L, -2, "version_major");
 	lua_pushinteger(L, response->un.req.version_minor);
 	lua_setfield(L, -2, "version_minor");
 	lua_pushlstring(L, response->un.req.buffer, response->un.req.path_len);
 	lua_setfield(L, -2, "path");
-
-	/* Lua indexes start from 1. */
-	lua_pushinteger(L, (response->un.req.query_at == LUA_QUERY_NONE)
-		? -1LL : (response->un.req.query_at + 1));
-
-	lua_setfield(L, -2, "query_at");
-	lua_pushcfunction(L, get_query);
-	lua_setfield(L, -2, "query");
-
+	push_query(L, response);
 	lua_pushlstring(L, response->un.req.method,
 		response->un.req.method_len);
 	lua_setfield(L, -2, "method");
@@ -1903,10 +1859,9 @@ lua_fiber_func(va_list ap)
 	lua_setfield(L, -2, "is_websocket");
 	lua_pushlightuserdata(L, shuttle);
 	lua_setfield(L, -2, shuttle_field_name);
-	lua_pushcfunction(L, get_peer);
-	lua_setfield(L, -2, "peer");
-	lua_pushcfunction(L, get_ouraddr);
-	lua_setfield(L, -2, "ouraddr");
+	push_addr_table(L, response, "peer", offsetof(lua_response_t, peer));
+	push_addr_table(L, response, "ouraddr",
+		offsetof(lua_response_t, ouraddr));
 	const int lua_state_ref = response->lua_state_ref;
 	if (fill_received_headers_and_body(L, shuttle)) {
 		process_internal_error(shuttle);

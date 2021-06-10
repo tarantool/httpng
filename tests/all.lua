@@ -246,14 +246,6 @@ local close_ok
 local close_err
 local close_bad_shuttle_ok
 local close_bad_shuttle_err
-local query_ok
-local query_err
-local query_bad_ok
-local query_bad_err
-local query_large_query_at_ok
-local query_large_query_at_err
-local query_bad_path_ok
-local query_bad_path_err
 local _
 
 local write_handler = function(req, io)
@@ -286,21 +278,6 @@ local write_header_handler = function(req, io)
     upgrade_to_websocket_bad_shuttle_ok, upgrade_to_websocket_bad_shuttle_err =
         pcall(io.upgrade_to_websocket, io)
     io._shuttle = saved_shuttle
-
-    query_ok, query_err = pcall(req.query)
-
-    local saved_query_at = req.query_at
-    req.query_at = 'x'
-    query_bad_ok, query_bad_err = pcall(req.query, req)
-    req.query_at = 999999
-    query_large_query_at_ok, query_large_query_at_err = pcall(req.query, req)
-    req.query_at = saved_query_at
-
-    saved_query_at = req.query_at
-    req.query_at = 1 -- Most not be -1 or we wouldn't test properly.
-    req.path = 42
-    query_bad_path_ok, query_bad_path_err = pcall(req.query, req)
-    req.query_at = saved_query_at
 
     write_first_header_ok, _ = io:write_header(200, nil, 'a', true)
     write_second_header_ok, write_second_header_err =
@@ -420,23 +397,6 @@ local test_write_header_params = function(ver, use_tls)
         'Second io:write_header() didn\'t fail')
     t.assert_str_matches(write_second_header_err,
         'Handler has already written header')
-
-    t.assert(query_ok == false,
-        'req:query() with invalid parameter set didn\'t fail')
-    t.assert_str_matches(query_err, 'Not enough parameters')
-
-    t.assert(query_bad_ok == false,
-        'req:query() with invalid query_at didn\'t fail')
-    t.assert_str_matches(query_bad_err, 'query_at is not an integer')
-
-    t.assert(query_large_query_at_ok == false,
-        'req:query() with large query_at didn\'t fail')
-    t.assert_str_matches(query_large_query_at_err,
-        'query_at value is invalid')
-
-    t.assert(query_bad_path_ok == false,
-        'req:query() with invalid path didn\'t fail')
-    t.assert_str_matches(query_bad_path_err, 'path is not a string')
 
     t.assert(upgrade_to_websocket_ok == false,
         'io:upgrade_to_websocket() after write_header() didn\'t fail')
@@ -1211,8 +1171,7 @@ local query_handler = function(req, io)
         return {status = 500, body = 'Unsupported HTTP method'}
     end
     local payload
-    local req_query = req:query()
-    if req_query == 'id=2' then
+    if req.query == 'id=2' then
         payload = 'good'
     else
         payload = 'bad'
