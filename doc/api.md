@@ -90,6 +90,7 @@ This is what HTTPNG is about - handling HTTP(S) requests. Handlers are Lua funct
 - `req`: Table with the following entries:
   - `body`: String, HTTP(S) request body.
   - `headers`: Table containing HTTP(S) request headers with entries like `['user-agent'] = 'godzilla'`
+  - `host`: String, virtual host name.
   - `is_websocket`: Boolean, is this WebSockets request.
   - `method`: String, 'GET', 'PUT' etc.
   - `ouraddr`: Table, contains an IP address and port connection has been received on in `socket.getaddrinfo()` format.

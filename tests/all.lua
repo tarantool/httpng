@@ -1352,3 +1352,53 @@ g_good_handlers.test_cancellation_http2_insecure = function()
     ensure_http2()
     test_cancellation('--http2')
 end
+
+local test_host = function(ver, use_tls)
+    local cfg = { handler = function(req) return {body = req.host} end }
+    local proto
+    if use_tls then
+        proto = 'https'
+        cfg.listen = {
+            tls = { ssl_pairs['foo'], ssl_pairs['bar'] },
+            uses_sni = true
+        }
+    else
+        proto = 'http'
+    end
+    http.cfg(cfg)
+
+    local cmd_foo = curl_bin .. ' -k -s ' .. ver .. ' ' .. proto ..
+        '://foo.tarantool.io:3300'
+    check_site_content(cmd_foo, 'foo.tarantool.io')
+
+    local cmd_bar = curl_bin .. ' -k -s ' .. ver .. ' ' .. proto ..
+        '://bar.tarantool.io:3300'
+    check_site_content(cmd_bar, 'bar.tarantool.io')
+
+    local cmd_localhost = curl_bin .. ' -k -s ' .. ver .. ' ' .. proto ..
+        '://localhost:3300'
+    if use_tls then
+        local ok, err = pcall(check_site_content, cmd_localhost, 'localhost')
+        assert(ok == false)
+    else
+        check_site_content(cmd_localhost, 'localhost')
+    end
+end
+
+g_good_handlers.test_host_http1_tls = function()
+    test_host('--http1.1', true)
+end
+
+g_good_handlers.test_host_http1_insecure = function()
+    test_host('--http1.1')
+end
+
+g_good_handlers.test_host_http2_tls = function()
+    ensure_http2()
+    test_host('--http2', true)
+end
+
+g_good_handlers.test_host_http2_insecure = function()
+    ensure_http2()
+    test_host('--http2')
+end

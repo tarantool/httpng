@@ -316,6 +316,7 @@ typedef struct {
 #endif /* SPLIT_LARGE_BODY */
 	int lua_handler_ref; /* Reference to user Lua handler. */
 	unsigned path_len;
+	unsigned authority_len;
 	unsigned query_at;
 	unsigned num_headers;
 	unsigned body_len;
@@ -1521,7 +1522,8 @@ fill_received_headers_and_body(lua_State *L, shuttle_t *shuttle)
 	assert(!response->sent_something);
 	const received_http_header_handle_t *const handles =
 		(received_http_header_handle_t *)&response->un.req.buffer[
-			response->un.req.path_len];
+			response->un.req.path_len +
+				response->un.req.authority_len];
 	const unsigned num_headers = response->un.req.num_headers;
 	lua_createtable(L, 0, num_headers);
 	unsigned current_offset = response->un.req.path_len + num_headers *
@@ -1882,13 +1884,16 @@ lua_fiber_func(va_list ap)
 	lua_rawgeti(L, LUA_REGISTRYINDEX, response->un.req.lua_handler_ref);
 
 	/* First param for Lua handler - req. */
-	lua_createtable(L, 0, 11);
+	lua_createtable(L, 0, 12);
 	lua_pushinteger(L, response->un.req.version_major);
 	lua_setfield(L, -2, "version_major");
 	lua_pushinteger(L, response->un.req.version_minor);
 	lua_setfield(L, -2, "version_minor");
 	lua_pushlstring(L, response->un.req.buffer, response->un.req.path_len);
 	lua_setfield(L, -2, "path");
+	lua_pushlstring(L, &response->un.req.buffer[response->un.req.path_len],
+		response->un.req.authority_len);
+	lua_setfield(L, -2, "host");
 	push_query(L, response);
 	lua_pushlstring(L, response->un.req.method,
 		response->un.req.method_len);
@@ -2019,7 +2024,32 @@ process_lua_req_in_tx(shuttle_t *shuttle)
 }
 #undef RETURN_WITH_ERROR
 
-/* Launched in HTTP server thread */
+/* Launched in HTTP server thread.
+ * Returns normalized authority ("virtual host" name) length. */
+static inline unsigned
+prepare_authority(h2o_req_t *req)
+{
+	assert(req->authority.len >= 0);
+	assert(req->authority.len <= INT_MAX);
+	unsigned authority_len = req->authority.len;
+	/* Formats: "foo.tarantool.io", "foo.tarantool.io:8443",
+	 * cut port number if present. */
+	int pos = authority_len - 1;
+	while (pos >= 0) {
+		const char c = req->authority.base[pos];
+		if (c == ':') {
+			authority_len = pos;
+			break;
+		}
+		if (c == '.')
+			/* Just optimization. */
+			break;
+		--pos;
+	}
+	return authority_len;
+}
+
+/* Launched in HTTP server thread. */
 static int
 lua_req_handler(lua_h2o_handler_t *self, h2o_req_t *req)
 {
@@ -2034,7 +2064,9 @@ lua_req_handler(lua_h2o_handler_t *self, h2o_req_t *req)
 		h2o_send_inline(req, H2O_STRLIT("Method name is too long\n"));
 		return 0;
 	}
-	if ((response->un.req.path_len = req->path.len) >
+	unsigned current_offset = response->un.req.path_len = req->path.len;
+	response->un.req.authority_len = prepare_authority(req);
+	if (current_offset + response->un.req.authority_len >
 	    conf.max_path_len_lua) {
 		/* Error. */
 		free_shuttle_with_anchor(shuttle);
@@ -2058,6 +2090,9 @@ lua_req_handler(lua_h2o_handler_t *self, h2o_req_t *req)
 		response->un.req.method_len);
 	memcpy(response->un.req.buffer, req->path.base,
 		response->un.req.path_len);
+	memcpy(&response->un.req.buffer[current_offset], req->authority.base,
+		response->un.req.authority_len);
+	current_offset += response->un.req.authority_len;
 
 	STATIC_ASSERT(LUA_QUERY_NONE <
 		(1ULL << (8 * sizeof(response->un.req.query_at))),
@@ -2069,11 +2104,10 @@ lua_req_handler(lua_h2o_handler_t *self, h2o_req_t *req)
 
 	const h2o_header_t *const headers = req->headers.entries;
 	const size_t num_headers = req->headers.size;
-	unsigned current_offset = response->un.req.path_len;
-
 	/* response->un.req.buffer[] format:
 	 *
-	 * char path[req->path.len]
+	 * char path[response->un.req.path.len]
+	 * char authority[response->un.req.authority_len]
 	 * FIXME: Alignment to at least to header_offset_t should be here
 	 *   (compatibility/performance).
 	 * received_http_header_handle_t handles[num_headers]
