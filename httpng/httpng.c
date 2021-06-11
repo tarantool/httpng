@@ -348,7 +348,11 @@ typedef struct {
 	bool sent_something;
 	bool cancelled; /* Changed by TX thread. */
 	bool ws_send_failed;
+
+	/* FIXME: It is changed by HTTP server thread w/o barriers
+	 * but checked everywhere. */
 	bool upgraded_to_websocket;
+
 	bool is_recv_fiber_waiting;
 	bool is_recv_fiber_cancelled;
 	bool in_recv_handler;
@@ -704,6 +708,26 @@ free_lua_shuttle_from_tx_in_http_thr(shuttle_t *shuttle)
 
 /* Launched in TX thread. */
 static inline void
+free_cancelled_lua_not_ws_shuttle_from_tx(shuttle_t *shuttle)
+{
+#ifdef SHOULD_FREE_SHUTTLE_IN_HTTP_SERVER_THREAD
+	free_shuttle_from_tx_in_http_thr(shuttle);
+#else /* SHOULD_FREE_SHUTTLE_IN_HTTP_SERVER_THREAD */
+	lua_response_t *const response = (lua_response_t *)&shuttle->payload;
+	if (response->sent_something)
+		/* FIXME: We may check that all send operations has already
+		 * been executed and skip going into HTTP server thread
+		 * but this would made code more complex and require barriers.
+		 * It is doubtful this would significantly improve
+		 * real-world performance. */
+		free_lua_shuttle_from_tx_in_http_thr(shuttle);
+	else
+		free_lua_shuttle_from_tx(shuttle);
+#endif /* SHOULD_FREE_SHUTTLE_IN_HTTP_SERVER_THREAD */
+}
+
+/* Launched in TX thread. */
+static inline void
 free_lua_websocket_shuttle_from_tx(shuttle_t *shuttle)
 {
 	lua_response_t *const response = (lua_response_t *)&shuttle->payload;
@@ -768,20 +792,18 @@ cancel_processing_lua_req_in_tx(shuttle_t *shuttle)
 	 * in Lua code so Lua handler have to use pcall() and even
 	 * that is not 100% guarantee because such exception
 	 * can theoretically happen before pcall().
-	 * Also we have unref Lua state.
-	 * Shuttle must be freed from HTTP thread because
-	 * it can be already queued. */
-	if (response->fiber == NULL)
-		free_lua_shuttle_from_tx_in_http_thr(shuttle);
-	else if (response->waiter != NULL) {
+	 * Also we have to unref Lua state. */
+	if (response->waiter != NULL) {
 		assert(!response->fiber_done);
 		response->cancelled = true;
 		fiber_wakeup(response->waiter->fiber);
-	} else if (response->fiber_done)
-		free_lua_shuttle_from_tx_in_http_thr(shuttle);
-	else
+	} else if (response->fiber_done) {
+		assert(!response->cancelled);
+		free_cancelled_lua_not_ws_shuttle_from_tx(shuttle);
+	} else {
 		response->cancelled = true;
 		; /* Fiber would clean up because we have set cancelled=true */
+	}
 }
 
 /* Launched in HTTP server thread. */
@@ -835,9 +857,9 @@ send_lua(h2o_req_t *req, lua_response_t *const response)
 static void
 postprocess_lua_req_first(shuttle_t *shuttle)
 {
-	lua_response_t *const response = (lua_response_t *)(&shuttle->payload);
 	if (shuttle->disposed)
 		return;
+	lua_response_t *const response = (lua_response_t *)(&shuttle->payload);
 	h2o_req_t *const req = shuttle->never_access_this_req_from_tx_thread;
 	req->res.status = response->un.resp.first.http_code;
 	req->res.reason = "OK"; /* FIXME: Customizable? */
@@ -895,7 +917,8 @@ add_http_header_to_lua_response(lua_first_response_only_t *response,
 }
 
 /* Launched in TX thread.
- * Makes sure earlier queued sends to HTTP server thread are done. */
+ * Makes sure earlier queued sends to HTTP server thread are done
+ * OR cancellation request is received. */
 static void
 take_shuttle_ownership_lua(lua_response_t *response)
 {
@@ -916,7 +939,8 @@ take_shuttle_ownership_lua(lua_response_t *response)
 
 /* Launched in TX thread.
  * Caller must call take_shuttle_ownership_lua() before filling in shuttle
- * and calling us. */
+ * and calling us.
+ * N. b.: We may have been awoken by cancellation request. */
 static inline void
 wait_for_lua_shuttle_return(lua_response_t *response)
 {
@@ -1542,6 +1566,10 @@ fill_received_headers_and_body(lua_State *L, shuttle_t *shuttle)
 	do {
 		/* FIXME: Not needed on first iteration. */
 		take_shuttle_ownership_lua(response);
+		if (response->cancelled) {
+			free(body_buf);
+			return 1;
+		}
 
 		stubborn_dispatch(shuttle->thread_ctx
 			->queue_from_tx, &retrieve_more_body, shuttle);
@@ -1620,7 +1648,7 @@ finish_handler_failure_processing(shuttle_t *shuttle, shuttle_func_t *func)
 	if (response->cancelled)
 		/* There would be no more calls from HTTP server thread,
 		 * must clean up. */
-		free_lua_shuttle_from_tx(shuttle);
+		free_lua_shuttle_from_tx_in_http_thr(shuttle);
 	else
 		response->fiber_done = true;
 		/* cancel_processing_lua_req_in_tx() is not yet called,
@@ -1636,7 +1664,7 @@ process_handler_failure_not_ws(shuttle_t *shuttle)
 	if (response->cancelled) {
 		/* There would be no more calls from HTTP server thread,
 		 * must clean up. */
-		free_lua_shuttle_from_tx(shuttle);
+		free_cancelled_lua_not_ws_shuttle_from_tx(shuttle);
 		return;
 	}
 
@@ -1668,6 +1696,13 @@ static inline void
 process_handler_success_not_ws_with_send(lua_State *L, shuttle_t *shuttle)
 {
 	lua_response_t *const response = (lua_response_t *)&shuttle->payload;
+	take_shuttle_ownership_lua(response);
+	if (response->cancelled) {
+		/* There would be no more calls from HTTP server
+		 * thread, must clean up. */
+		free_cancelled_lua_not_ws_shuttle_from_tx(shuttle);
+		return;
+	}
 	const bool old_sent_something = response->sent_something;
 	if (!old_sent_something) {
 		lua_getfield(L, -1, "status");
@@ -1698,16 +1733,6 @@ process_handler_success_not_ws_with_send(lua_State *L, shuttle_t *shuttle)
 		response->un.resp.any.payload_len = 0;
 
 	response->un.resp.any.is_last_send = true;
-	take_shuttle_ownership_lua(response);
-	if (response->cancelled) {
-		/* There would be no more calls from HTTP server
-		 * thread, must clean up. */
-		if (response->upgraded_to_websocket)
-			free_lua_websocket_shuttle_from_tx(shuttle);
-		else
-			free_lua_shuttle_from_tx(shuttle);
-		return;
-	}
 
 	if (old_sent_something)
 		stubborn_dispatch(shuttle->thread_ctx->queue_from_tx,
@@ -1719,14 +1744,11 @@ process_handler_success_not_ws_with_send(lua_State *L, shuttle_t *shuttle)
 			postprocess_lua_req_first, shuttle);
 	}
 	wait_for_lua_shuttle_return(response);
-	if (response->cancelled) {
+	if (response->cancelled)
 		/* There would be no more calls from HTTP
 		 * server thread, must clean up. */
-		if (response->upgraded_to_websocket)
-			free_lua_websocket_shuttle_from_tx(shuttle);
-		else
-			free_lua_shuttle_from_tx(shuttle);
-	} else
+		free_lua_shuttle_from_tx_in_http_thr(shuttle);
+	else
 		response->fiber_done = true;
 		/* cancel_processing_lua_req_in_tx() is not yet called,
 		 * it would clean up because we have set fiber_done=true */
@@ -1916,7 +1938,7 @@ lua_fiber_func(va_list ap)
 			if (response->upgraded_to_websocket)
 				free_lua_websocket_shuttle_from_tx(shuttle);
 			else
-				free_lua_shuttle_from_tx_in_http_thr(shuttle);
+				free_cancelled_lua_not_ws_shuttle_from_tx(shuttle);
 		} else if (response->upgraded_to_websocket) {
 			take_shuttle_ownership_lua(response);
 			stubborn_dispatch_lua(thread_ctx->queue_from_tx,
@@ -1932,7 +1954,7 @@ lua_fiber_func(va_list ap)
 		if (response->upgraded_to_websocket)
 			free_lua_websocket_shuttle_from_tx(shuttle);
 		else
-			free_lua_shuttle_from_tx_in_http_thr(shuttle);
+			free_cancelled_lua_not_ws_shuttle_from_tx(shuttle);
 	} else if (response->upgraded_to_websocket) {
 		take_shuttle_ownership_lua(response);
 		assert(!response->cancelled);
