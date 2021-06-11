@@ -876,8 +876,8 @@ end
 
 local curls
 g_hot_reload_with_curls = t.group 'hot_reload_with_curls'
-function shutdown_and_kill_curls()
-    pcall(http.shutdown)
+
+local function kill_curls()
     if (curls == nil) then
         return
     end
@@ -887,6 +887,12 @@ function shutdown_and_kill_curls()
     end
     curls = nil
 end
+
+local function shutdown_and_kill_curls()
+    pcall(http.shutdown)
+    kill_curls()
+end
+
 g_hot_reload_with_curls.before_each(ensure_shutdown_works)
 g_hot_reload_with_curls.after_each(shutdown_and_kill_curls)
 
@@ -1310,4 +1316,39 @@ g_wrong_config.test_combo5 = function()
     http._cfg_debug{inject_shutdown_error = false}
     http.shutdown()
     shutdown_works = true
+end
+
+local test_cancellation = function(ver, use_tls)
+    local cfg = {
+        handler = query_handler, -- Almost any (not stubborn!)
+        threads = 4,
+    }
+    if use_tls then
+        cfg.listen = listen_with_single_ssl_pair
+    end
+
+    http.cfg(cfg)
+    for _ = 1, 100 do
+        launch_hungry_curls('localhost:3300', ver, use_tls)
+        fiber.sleep(0.01)
+        kill_curls()
+    end
+end
+
+g_good_handlers.test_cancellation_http1_tls = function()
+    test_cancellation('--http1.1', true)
+end
+
+g_good_handlers.test_cancellation_http2_tls = function()
+    ensure_http2()
+    test_cancellation('--http2', true)
+end
+
+g_good_handlers.test_cancellation_http1_insecure = function()
+    test_cancellation('--http1.1')
+end
+
+g_good_handlers.test_cancellation_http2_insecure = function()
+    ensure_http2()
+    test_cancellation('--http2')
 end
