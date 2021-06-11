@@ -51,6 +51,9 @@ jobs:
         cxx: 'clang++'
         cmake_defines: '-DENABLE_ASAN=ON'
 
+    - name: Add entries to /etc/hosts
+      run: sudo tests/mangle_etc_hosts.sh
+
     - name: Install luatest
       working-directory: ${{github.workspace}}/build
       # Ignore all errors (some are caused by ASAN in Tarantool)
