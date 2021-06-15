@@ -679,6 +679,7 @@ free_shuttle_from_tx_in_http_thr(shuttle_t *shuttle)
 		&free_shuttle_internal, shuttle);
 }
 
+#ifndef SHOULD_FREE_SHUTTLE_IN_HTTP_SERVER_THREAD
 /* Launched in TX thread.
  * It can queue request to HTTP server thread or free everything itself. */
 void
@@ -690,7 +691,9 @@ free_shuttle_from_tx(shuttle_t *shuttle)
 	free_shuttle_internal(shuttle);
 #endif /* SHOULD_FREE_SHUTTLE_IN_HTTP_SERVER_THREAD */
 }
+#endif /* SHOULD_FREE_SHUTTLE_IN_HTTP_SERVER_THREAD */
 
+#ifndef SHOULD_FREE_SHUTTLE_IN_HTTP_SERVER_THREAD
 /* Launched in TX thread. */
 static inline void
 free_lua_shuttle_from_tx(shuttle_t *shuttle)
@@ -698,6 +701,7 @@ free_lua_shuttle_from_tx(shuttle_t *shuttle)
 	assert(!((lua_response_t *)&shuttle->payload)->upgraded_to_websocket);
 	free_shuttle_from_tx(shuttle);
 }
+#endif /* SHOULD_FREE_SHUTTLE_IN_HTTP_SERVER_THREAD */
 
 /* Launched in TX thread. */
 static inline void
@@ -1687,7 +1691,7 @@ process_handler_failure_not_ws(shuttle_t *shuttle)
 		response->un.resp.any.payload = error_str;
 		response->un.resp.any.payload_len = sizeof(error_str) - 1;
 		response->un.resp.first.content_length = sizeof(error_str) - 1;
-		/* Not setting sent_something because no one would check it. */
+		response->sent_something = true;
 		func = &postprocess_lua_req_first;
 	}
 	finish_handler_failure_processing(shuttle, func);
@@ -1865,7 +1869,7 @@ process_internal_error(shuttle_t *shuttle)
 	response->un.resp.any.payload = error_str;
 	response->un.resp.any.payload_len = sizeof(error_str) - 1;
 	response->un.resp.first.content_length = sizeof(error_str) - 1;
-	/* Not setting sent_something because no one would check it. */
+	response->sent_something = true;
 
 	finish_handler_failure_processing(shuttle, &postprocess_lua_req_first);
 }
@@ -2002,8 +2006,7 @@ process_lua_req_in_tx(shuttle_t *shuttle)
 		response->un.resp.first.http_code = 500; \
 		response->un.resp.any.payload = error_str; \
 		response->un.resp.any.payload_len = sizeof(error_str) - 1; \
-		/* Not setting sent_something */ \
-		/* because no one would check it. */ \
+		response->sent_something = true; \
 		response->un.resp.first.content_length = \
 			sizeof(error_str) - 1; \
 		stubborn_dispatch(shuttle->thread_ctx->queue_from_tx, \
