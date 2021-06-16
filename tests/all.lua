@@ -227,6 +227,9 @@ local bad_write_ok
 local bad_write_err
 local write_bad_shuttle_ok
 local write_bad_shuttle_err
+local write_after_write_with_is_last_ok
+local write_after_write_with_is_last_err
+local write_after_write_with_is_last_result
 
 local write_header_handler_launched = false
 local bad_write_header_ok
@@ -256,6 +259,10 @@ local write_handler = function(req, io)
     io._shuttle = 42
     write_bad_shuttle_ok, write_bad_shuttle_err = pcall(io.write, io, 'a')
     io._shuttle = saved_shuttle
+
+    io:write('foo', true)
+    write_after_write_with_is_last_ok, write_after_write_with_is_last_err,
+        write_after_write_with_is_last_result = pcall(io.write, io, 'foo')
 
     io:close()
 end
@@ -341,6 +348,11 @@ local test_write_params = function(ver, use_tls)
     t.assert(write_bad_shuttle_ok == false,
         'io:write() with corrupt io._shuttle didn\'t fail')
     t.assert_str_matches(write_bad_shuttle_err, 'shuttle is invalid')
+
+    t.assert(write_after_write_with_is_last_ok == false or
+        write_after_write_with_is_last_result ~= false,
+        'io:write() after io:write(is_last == true) should either error or return true')
+    --t.assert_str_matches(write_after_write_with_is_last_err, 'TODO')
 end
 
 g_bad_handlers.test_write_params_http1_insecure = function()
