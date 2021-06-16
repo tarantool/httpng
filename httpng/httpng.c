@@ -1610,22 +1610,13 @@ fill_received_headers_and_body(lua_State *L, shuttle_t *shuttle)
 }
 
 /* Launched in TX thread. */
-static int
-close_lua_req(lua_State *L)
+static void
+close_lua_req_internal(lua_State *L, shuttle_t *shuttle)
 {
-	/* Lua parameters: self. */
-	const unsigned num_params = lua_gettop(L);
-	if (num_params < 1)
-		return luaL_error(L, "Not enough parameters");
-
-	lua_getfield(L, 1, shuttle_field_name);
-	if (!lua_islightuserdata(L, -1))
-		return luaL_error(L, "shuttle is invalid");
-	shuttle_t *const shuttle = (shuttle_t *)lua_touserdata(L, -1);
 	lua_response_t *const response = (lua_response_t *)&shuttle->payload;
 	take_shuttle_ownership_lua(response);
 	if (response->cancelled)
-		return 0;
+		return;
 
 	response->un.resp.any.payload_len = 0;
 	response->un.resp.any.is_last_send = true;
@@ -1642,6 +1633,22 @@ close_lua_req(lua_State *L)
 			&postprocess_lua_req_first, shuttle);
 	}
 	wait_for_lua_shuttle_return(response);
+}
+
+/* Launched in TX thread. */
+static int
+close_lua_req(lua_State *L)
+{
+	/* Lua parameters: self. */
+	const unsigned num_params = lua_gettop(L);
+	if (num_params < 1)
+		return luaL_error(L, "Not enough parameters");
+
+	lua_getfield(L, 1, shuttle_field_name);
+	if (!lua_islightuserdata(L, -1))
+		return luaL_error(L, "shuttle is invalid");
+	shuttle_t *const shuttle = (shuttle_t *)lua_touserdata(L, -1);
+	close_lua_req_internal(L, shuttle);
 	return 0;
 }
 
@@ -1876,6 +1883,26 @@ process_internal_error(shuttle_t *shuttle)
 }
 
 /* Launched in TX thread. */
+static inline void
+process_handler_success_not_ws_without_send(lua_State *L, shuttle_t *shuttle)
+{
+	lua_response_t *const response = (lua_response_t *)&shuttle->payload;
+	if (response->un.resp.any.is_last_send) {
+	Done:
+		response->fiber_done = true;
+		/* cancel_processing_lua_req_in_tx() is not yet called,
+		 * it would clean up because we have set fiber_done=true. */
+		return;
+	}
+
+	close_lua_req_internal(L, shuttle);
+	if (!response->cancelled)
+		goto Done;
+
+	free_cancelled_lua_not_ws_shuttle_from_tx(shuttle);
+}
+
+/* Launched in TX thread. */
 static int
 lua_fiber_func(va_list ap)
 {
@@ -1977,9 +2004,8 @@ lua_fiber_func(va_list ap)
 		wait_for_lua_shuttle_return(response);
 		free_lua_websocket_shuttle_from_tx(shuttle);
 	} else if (lua_isnil(L, -1))
-		response->fiber_done = true;
-		/* cancel_processing_lua_req_in_tx() is not yet called,
-		 * it would clean up because we have set fiber_done=true. */
+		process_handler_success_not_ws_without_send(L,
+			shuttle);
 	else
 		process_handler_success_not_ws_with_send(L, shuttle);
 

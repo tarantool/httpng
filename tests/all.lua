@@ -1185,8 +1185,8 @@ local query_handler = function(req, io)
     return {body = payload}
 end
 
-local test_some_query = function(ver, use_tls, query, expected)
-    local cfg = {handler = query_handler}
+local test_something = function(ver, use_tls, query, handler, expected)
+    local cfg = {handler = handler}
     local proto
     if use_tls then
         cfg.listen = listen_with_single_ssl_pair
@@ -1198,6 +1198,10 @@ local test_some_query = function(ver, use_tls, query, expected)
     local cmd_main = curl_bin .. ' ' .. ver .. ' -k -s ' ..
         proto .. '://localhost:3300' .. query
     check_site_content(cmd_main, expected)
+end
+
+local test_some_query = function(ver, use_tls, query, expected)
+    test_something(ver, use_tls, query, query_handler, expected)
 end
 
 local test_expected_query = function(ver, use_tls)
@@ -1432,4 +1436,87 @@ end
 g_good_handlers.test_req_encryption_info_http2 = function()
     ensure_http2()
     test_req_encryption_info('--http2')
+end
+
+local write_header_handler2 = function(req, io)
+    io:write_header(200, nil, 'foo')
+end
+
+local write_handler2 = function(req, io)
+    io:write('foo')
+end
+
+local faulty_handler = function()
+    error 'foo'
+end
+
+local test_some_handler = function(ver, use_tls, handler)
+    test_something(ver, use_tls, '', handler, 'foo')
+end
+
+local test_write_header_handler = function(ver, use_tls)
+    test_some_handler(ver, use_tls, write_header_handler2)
+end
+
+local test_write_handler = function(ver, use_tls)
+    test_some_handler(ver, use_tls, write_handler2)
+end
+
+local test_faulty_handler = function(ver, use_tls)
+    test_something(ver, use_tls, '', faulty_handler,
+        'Path handler execution error')
+end
+
+g_good_handlers.test_write_header_handler_http2_tls = function()
+    ensure_http2()
+    test_write_header_handler('--http2', true)
+end
+
+g_good_handlers.test_write_header_handler_http2_insecure = function()
+    ensure_http2()
+    test_req_encryption_info('--http2')
+end
+
+g_good_handlers.test_write_header_handler_http1_tls = function()
+    test_write_header_handler('--http1.1', true)
+end
+
+g_good_handlers.test_write_header_handler_http1_insecure = function()
+    test_req_encryption_info('--http1.1')
+end
+
+g_good_handlers.test_write_handler_http2_tls = function()
+    ensure_http2()
+    test_write_handler('--http2', true)
+end
+
+g_good_handlers.test_write_handler_http2_insecure = function()
+    ensure_http2()
+    test_write_handler('--http2')
+end
+
+g_good_handlers.test_write_handler_http1_tls = function()
+    test_write_handler('--http1.1', true)
+end
+
+g_good_handlers.test_write_handler_http1_insecure = function()
+    test_write_handler('--http1.1')
+end
+
+g_bad_handlers.test_faulty_handler_http2_tls = function()
+    ensure_http2()
+    test_faulty_handler('--http2', true)
+end
+
+g_bad_handlers.test_faulty_handler_http2_insecure = function()
+    ensure_http2()
+    test_faulty_handler('--http2')
+end
+
+g_bad_handlers.test_faulty_handler_http1_tls = function()
+    test_faulty_handler('--http1.1', true)
+end
+
+g_bad_handlers.test_faulty_handler_http1_insecure = function()
+    test_faulty_handler('--http1.1')
 end
