@@ -1037,7 +1037,7 @@ local test_FLAKY_decrease_stubborn_threads_with_timeout =
 ::retry::
     local ok, err = pcall(http.cfg, cfg)
     if (ok) then
-        assert(fiber.clock() - start >= cfg.thread_termination_timeout,
+        assert(fiber.clock() - start >= cfg.thread_termination_timeout - 0.2,
             'threads have terminated too early');
         return
     end
