@@ -324,6 +324,7 @@ typedef struct {
 	unsigned char ws_client_key_len;
 	unsigned char version_major;
 	unsigned char version_minor;
+	bool is_encrypted;
 #ifdef SPLIT_LARGE_BODY
 	bool is_body_incomplete;
 #endif /* SPLIT_LARGE_BODY */
@@ -1888,7 +1889,7 @@ lua_fiber_func(va_list ap)
 	lua_rawgeti(L, LUA_REGISTRYINDEX, response->un.req.lua_handler_ref);
 
 	/* First param for Lua handler - req. */
-	lua_createtable(L, 0, 12);
+	lua_createtable(L, 0, 13);
 	lua_pushinteger(L, response->un.req.version_major);
 	lua_setfield(L, -2, "version_major");
 	lua_pushinteger(L, response->un.req.version_minor);
@@ -1909,6 +1910,10 @@ lua_fiber_func(va_list ap)
 	push_addr_table(L, response, "peer", offsetof(lua_response_t, peer));
 	push_addr_table(L, response, "ouraddr",
 		offsetof(lua_response_t, ouraddr));
+	if (response->un.req.is_encrypted) {
+		lua_pushboolean(L, true);
+		lua_setfield(L, -2, "https");
+	}
 	const int lua_state_ref = response->lua_state_ref;
 	if (fill_received_headers_and_body(L, shuttle)) {
 		process_internal_error(shuttle);
@@ -2203,6 +2208,9 @@ lua_req_handler(lua_h2o_handler_t *self, h2o_req_t *req)
 	socklen = req->conn->callbacks->get_sockname(req->conn,
 		(struct sockaddr *)&response->ouraddr);
 	assert(socklen <= sizeof(response->ouraddr));
+	/* FIXME: Modify libh2o to avoid calling function through pointer */
+	response->un.req.is_encrypted =
+		(req->conn->callbacks->get_socket(req->conn)->ssl != NULL);
 
 	thread_ctx_t *const thread_ctx = get_curr_thread_ctx();
 	if (xtm_fun_dispatch(thread_ctx->queue_to_tx,

@@ -1402,3 +1402,34 @@ g_good_handlers.test_host_http2_insecure = function()
     ensure_http2()
     test_host('--http2')
 end
+
+local encryption_handler = function(req, io)
+    if req.https then
+        return {body = 'encrypted'}
+    end
+    return {body = 'insecure'}
+end
+
+local test_req_encryption_info = function(ver)
+    http.cfg{
+        listen = { 8080, { port = 3300, tls = { ssl_pairs['foo'] } } },
+        handler = encryption_handler,
+    }
+
+    local cmd_insecure = curl_bin .. ' -k -s ' .. ver ..
+        ' http://foo.tarantool.io:8080'
+    check_site_content(cmd_insecure, 'insecure')
+    local cmd_encrypted = curl_bin .. ' -k -s ' .. ver ..
+        ' https://foo.tarantool.io:3300'
+    check_site_content(cmd_encrypted, 'encrypted')
+end
+
+g_good_handlers.test_req_encryption_info_http1 = function()
+    ensure_http2()
+    test_req_encryption_info('--http1.1')
+end
+
+g_good_handlers.test_req_encryption_info_http2 = function()
+    ensure_http2()
+    test_req_encryption_info('--http2')
+end
