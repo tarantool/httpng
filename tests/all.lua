@@ -1076,7 +1076,7 @@ local test_FLAKY_decrease_not_so_stubborn_thr_with_timeout =
     local cfg = {
         handler = stubborn2_handler,
         threads = 2,
-        thread_termination_timeout = 1,
+        thread_termination_timeout = 2,
     }
     if use_tls then
         cfg.listen = listen_with_single_ssl_pair
