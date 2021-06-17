@@ -262,7 +262,6 @@ typedef struct {
 typedef struct {
 	char *path;
 	lua_h2o_handler_t *(lua_handlers[MAX_threads]);
-	h2o_pathconf_t *(pathconfs[MAX_threads]);
 	const char *real_path; /* NULL for Lua handlers. */
 	int lua_handler_ref;
 	int old_lua_handler_ref;
@@ -2294,7 +2293,6 @@ register_lua_handler_part_two(h2o_hostconf_t *hostconf,
 	handler->path = lua_site->path;
 	handler->path_len = lua_site->path_len;
 	lua_site->lua_handlers[thread_idx] = handler;
-	lua_site->pathconfs[thread_idx] = pathconf;
 	return pathconf;
 }
 
@@ -2313,7 +2311,6 @@ register_file_handler_part_two(h2o_hostconf_t *hostconf,
 		h2o_file_register(pathconf, real_path,
 		/* index_files */ NULL, /* mimemap */ NULL, /* flags */ 0);
 	lua_site->lua_handlers[thread_idx] = (lua_h2o_handler_t *)handler;
-	lua_site->pathconfs[thread_idx] = pathconf;
 	lua_site->real_path = real_path;
 	return pathconf;
 }
