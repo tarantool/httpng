@@ -123,7 +123,8 @@ g_wrong_config.test_handler_is_not_a_function = function()
 end
 
 g_wrong_config.test_sites_handler_is_not_a_function = function()
-    t.assert_error_msg_content_equals('sites[].handler is not a function',
+    t.assert_error_msg_content_equals(
+        'sites[].handler is not a function or string',
         http.cfg, { sites = { { path = '/', handler = 42 }, } })
 end
 
