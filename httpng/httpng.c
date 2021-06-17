@@ -263,6 +263,7 @@ typedef struct {
 	char *path;
 	lua_h2o_handler_t *(lua_handlers[MAX_threads]);
 	h2o_pathconf_t *(pathconfs[MAX_threads]);
+	const char *real_path; /* NULL for Lua handlers. */
 	int lua_handler_ref;
 	int old_lua_handler_ref;
 	int new_lua_handler_ref;
@@ -2274,6 +2275,7 @@ register_lua_handler_part_one(lua_site_t *lua_site,
 	memcpy(lua_site->path, path, lua_site->path_len);
 	lua_site->path[lua_site->path_len] = 0;
 	lua_site->lua_handler_ref = lua_handler_ref;
+	lua_site->real_path = NULL;
 }
 
 /* Can be launched in TX thread or HTTP server thread. */
@@ -2296,6 +2298,26 @@ register_lua_handler_part_two(h2o_hostconf_t *hostconf,
 	return pathconf;
 }
 
+/* Can be launched in TX thread or HTTP server thread.
+ * *real_path content is copied inside libh2o, we do NOT
+ * use saved *real_path (it is just "not NULL" flag)
+ * except in hot reload where it is treated specifically. */
+static h2o_pathconf_t *
+register_file_handler_part_two(h2o_hostconf_t *hostconf,
+	lua_site_t *lua_site, unsigned thread_idx, const char *real_path)
+{
+	/* These functions never return NULL, dying instead */
+	h2o_pathconf_t *const pathconf =
+		h2o_config_register_path(hostconf, lua_site->path, 0);
+	h2o_file_handler_t *const handler =
+		h2o_file_register(pathconf, real_path,
+		/* index_files */ NULL, /* mimemap */ NULL, /* flags */ 0);
+	lua_site->lua_handlers[thread_idx] = (lua_h2o_handler_t *)handler;
+	lua_site->pathconfs[thread_idx] = pathconf;
+	lua_site->real_path = real_path;
+	return pathconf;
+}
+
 /* Launched in TX thread. */
 static void
 register_lua_handler(lua_site_t *lua_site,
@@ -2306,6 +2328,25 @@ register_lua_handler(lua_site_t *lua_site,
 	for (thread_idx = 0; thread_idx < MAX_threads; ++thread_idx)
 		register_lua_handler_part_two(conf.thread_ctxs[thread_idx]
 			.hostconf, lua_site, thread_idx);
+}
+
+/* Launched in TX thread. */
+static inline void
+register_file_handler_part_one(lua_site_t *lua_site, const char *path)
+{
+	register_lua_handler_part_one(lua_site, path, LUA_REFNIL);
+}
+
+/* Launched in TX thread. */
+static void
+register_file_handler(lua_site_t *lua_site, const char *path,
+	const char *real_path)
+{
+	register_file_handler_part_one(lua_site, path);
+	unsigned thread_idx;
+	for (thread_idx = 0; thread_idx < MAX_threads; ++thread_idx)
+		register_file_handler_part_two(conf.thread_ctxs[thread_idx]
+			.hostconf, lua_site, thread_idx, real_path);
 }
 
 /* Launched in HTTP server thread. */
@@ -3927,9 +3968,13 @@ enum {
 static void
 replace_lua_handler_ref(lua_site_t *site)
 {
-	assert(site->lua_handler_ref != site->new_lua_handler_ref);
+	assert(site->real_path != NULL ||
+		site->lua_handler_ref != site->new_lua_handler_ref);
 	site->old_lua_handler_ref = site->lua_handler_ref;
 	site->lua_handler_ref = site->new_lua_handler_ref;
+
+	if (site->real_path != NULL)
+		return;
 
 	unsigned thread_idx;
 	for (thread_idx = 0; thread_idx < MAX_threads;
@@ -4028,6 +4073,33 @@ reorder_paths(thread_ctx_t *thread_ctx)
 }
 
 /* Can be launched in TX thread or HTTP server thread. */
+static inline void
+replace_file_path(thread_ctx_t *thread_ctx, lua_site_t *site)
+{
+	if (site->real_path == NULL)
+		return;
+	h2o_hostconf_t *const hostconf = thread_ctx->hostconf;
+	/* We do not maintain 1:1 correlation between indexes,
+	 * have to search for this path. */
+	const char *const path = site->path;
+	const unsigned path_len = site->path_len;
+	unsigned path_idx;
+	for (path_idx = 0; path_idx < hostconf->paths.size; ++path_idx)
+		if (hostconf->paths.entries[path_idx].path.len == path_len &&
+		    !memcmp(path, hostconf->paths.entries[path_idx].path.base,
+			   path_len))
+			goto found;
+	assert(false); /* Should never happen. */
+	return;
+
+found:
+	;
+	h2o_file_handler_t *const handler =
+		(h2o_file_handler_t *)site->lua_handlers[thread_ctx->idx];
+	h2o_replace_file_handler_real_path(handler, site->real_path);
+}
+
+/* Can be launched in TX thread or HTTP server thread. */
 static void
 hot_reload_add_remove_sites_in_some_thr(thread_ctx_t *thread_ctx,
 	add_site_t *new_site, bool is_tx_thread)
@@ -4042,8 +4114,10 @@ hot_reload_add_remove_sites_in_some_thr(thread_ctx_t *thread_ctx,
 	    new_site->extra_sites; ++idx) {
 		lua_site_t *const lua_site = &conf.lua_sites[idx];
 		if (lua_site->generation != added_generation) {
-			if (lua_site->generation == conf.generation)
+			if (lua_site->generation == conf.generation) {
+				replace_file_path(thread_ctx, lua_site);
 				continue;
+			}
 			/* Remove.
 			 * We do not maintain 1:1 correlation between indexes,
 			 * have to search for this path. */
@@ -4074,6 +4148,10 @@ hot_reload_add_remove_sites_in_some_thr(thread_ctx_t *thread_ctx,
 			continue;
 		}
 		h2o_pathconf_t *const pathconf =
+			(lua_site->real_path != NULL) ?
+			register_file_handler_part_two(thread_ctx->hostconf,
+				lua_site, thread_ctx->idx,
+				lua_site->real_path) :
 			register_lua_handler_part_two(thread_ctx->hostconf,
 				lua_site, thread_ctx->idx);
 		if (!is_tx_thread)
@@ -4658,27 +4736,64 @@ Skip_inits_on_hot_reload:
 
 	Skip_creating_sites_structs:
 		lua_getfield(L, -2, "handler");
-		if (lua_type(L, -1) != LUA_TFUNCTION) {
-			lerr = "sites[].handler is not a function";
+		if (lua_type(L, -1) != LUA_TFUNCTION &&
+		    !lua_isstring_strict(L, -1)) {
+			lerr = "sites[].handler is not a function or string";
 			goto invalid_sites;
 		}
 
 		if (is_hot_reload) {
-			if (is_adding_site)
-				register_lua_handler_part_one(lua_site,
-					path, luaL_ref(L, LUA_REGISTRYINDEX));
-			else {
+			if (is_adding_site) {
+				if (lua_isstring_strict(L, -1)) {
+					register_file_handler_part_one(
+						lua_site, path);
+					size_t len;
+					lua_site->real_path =
+						lua_tolstring(L, -1, &len);
+					/* Hacky: we rely of string buffer not
+					 * being collected until return
+					 * from cfg(). */
+					lua_pop(L, 1);
+				} else
+					register_lua_handler_part_one(lua_site,
+						path, luaL_ref(L,
+							LUA_REGISTRYINDEX));
+			} else {
 				if (lua_site->generation == generation) {
 					lerr = "duplicated site description";
 					goto invalid_sites;
 				}
-				lua_site->new_lua_handler_ref =
-					luaL_ref(L, LUA_REGISTRYINDEX);
+				if (lua_isstring_strict(L, -1)) {
+					if (lua_site->real_path == NULL) {
+	lerr = "replacing Lua handler with file handler is not supported";
+						goto invalid_sites;
+					}
+					size_t len;
+					lua_site->real_path =
+						lua_tolstring(L, -1, &len);
+					/* Hacky: we rely of string buffer not
+					 * being collected until return
+					 * from cfg(). */
+					lua_pop(L, 1);
+				} else {
+					if (lua_site->real_path != NULL) {
+	lerr = "replacing file handler with Lua handler is not supported";
+						goto invalid_sites;
+					}
+					lua_site->new_lua_handler_ref =
+						luaL_ref(L, LUA_REGISTRYINDEX);
+				}
 				lua_site->generation = generation;
 			}
 		} else {
-			register_lua_handler(lua_site, path,
-				luaL_ref(L, LUA_REGISTRYINDEX));
+			if (lua_isstring_strict(L, -1)) {
+				size_t len;
+				register_file_handler(lua_site, path,
+					lua_tolstring(L, -1, &len));
+				lua_pop(L, 1);
+			} else
+				register_lua_handler(lua_site, path,
+					luaL_ref(L, LUA_REGISTRYINDEX));
 			lua_site->generation = generation;
 		}
 
@@ -5067,10 +5182,11 @@ invalid_sites:
 		for (idx = 0; idx < conf.lua_site_count +
 		    hot_reload_extra_sites; ++idx) {
 			lua_site_t *const lua_site = &conf.lua_sites[idx];
-			if (lua_site->generation == generation)
-				luaL_unref(L, LUA_REGISTRYINDEX,
-					lua_site->new_lua_handler_ref);
-			else {
+			if (lua_site->generation == generation) {
+				if (lua_site->real_path == NULL)
+					luaL_unref(L, LUA_REGISTRYINDEX,
+						lua_site->new_lua_handler_ref);
+			} else {
 				if (is_site_added(lua_site, generation)) {
 					if (lua_site->lua_handler_ref !=
 					    LUA_REFNIL)
