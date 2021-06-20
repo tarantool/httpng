@@ -11,12 +11,13 @@ env:
   BUILD_TYPE: Release
 
 jobs:
-  build-and-test:
+  test:
     strategy:
       fail-fast: false
       matrix:
         os: ['ubuntu-latest', 'macos-latest']
         tarantool-ref: ['1.10', '2.7']
+        enable_asan: [true, false]
         exclude:
           - os: 'macos-latest'
             tarantool-ref: '1.10'
@@ -31,20 +32,28 @@ jobs:
     - name: Checkout submodules
       run: git submodule update --init --recursive
 
-    - name: Build and install Tarantool
+    - name: Build and install Tarantool (with ASAN)
       uses: ./.github/actions/build-tarantool
+      if: ${{matrix.enable_asan}}
       with:
         cc: 'clang'
         cxx: 'clang++'
         cmake_defines: '-DENABLE_ASAN=ON'
         ref: ${{matrix.tarantool-ref}}
 
+    - name: Build and install Tarantool (without ASAN)
+      uses: ./.github/actions/build-tarantool
+      if: ${{!matrix.enable_asan}}
+      with:
+        cc: 'gcc'
+        cxx: 'g++'
+        cmake_defines: ''
+        ref: ${{matrix.tarantool-ref}}
+
     - name: Build httpng
       uses: ./.github/actions/build-httpng
       with:
-        cc: 'clang'
-        cxx: 'clang++'
-        cmake_defines: '-DENABLE_ASAN=ON'
+        enable_asan: ${{matrix.enable_asan}}
 
     - name: Add entries to /etc/hosts
       run: sudo tests/mangle_etc_hosts.sh
