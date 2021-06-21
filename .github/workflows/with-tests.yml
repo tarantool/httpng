@@ -45,15 +45,19 @@ jobs:
       uses: ./.github/actions/build-tarantool
       if: ${{!matrix.enable_asan}}
       with:
-        cc: 'gcc'
-        cxx: 'g++'
-        cmake_defines: ''
         ref: ${{matrix.tarantool-ref}}
 
-    - name: Build httpng
+    - name: Build httpng (with ASAN)
       uses: ./.github/actions/build-httpng
+      if: ${{matrix.enable_asan}}
       with:
-        enable_asan: ${{matrix.enable_asan}}
+        cc: 'clang'
+        cxx: 'clang++'
+        cmake_defines: '-DENABLE_ASAN=ON'
+
+    - name: Build httpng (without ASAN)
+      uses: ./.github/actions/build-httpng
+      if: ${{!matrix.enable_asan}}
 
     - name: Add entries to /etc/hosts
       run: sudo tests/mangle_etc_hosts.sh
