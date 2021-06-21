@@ -901,6 +901,17 @@ local function kill_curls()
     curls = nil
 end
 
+local function kill_curls_ungracefully()
+    if (curls == nil) then
+        return
+    end
+    local k, curl
+    for k, curl in pairs(curls) do
+        curl:kill()
+    end
+    curls = nil
+end
+
 local function shutdown_and_kill_curls()
     pcall(http.shutdown)
     kill_curls()
@@ -1335,21 +1346,45 @@ g_wrong_config.test_combo5 = function()
     shutdown_works = true
 end
 
+local check_curls_did_not_fail = function()
+    if (curls == nil) then
+        return
+    end
+    for k, curl in pairs(curls) do
+        local exit_code = curl:info().status.exit_code
+	if exit_code ~= nil then print('exit_code=', exit_code) end--TO_REMOVE
+        assert(not (exit_code ~= nil and exit_code ~= 0),
+            'at least one of curls failed')
+    end
+end
+
 local test_cancellation = function(ver, use_tls)
     local cfg = {
         handler = query_handler, -- Almost any (not stubborn!)
-        threads = 4,
+        --threads = 4,
+        threads = 1,
     }
+    local proto
     if use_tls then
+        proto = 'https'
         cfg.listen = listen_with_single_ssl_pair
+    else
+        proto = 'http'
     end
 
     http.cfg(cfg)
+    local cmd_foo = curl_bin .. ' -k -s ' .. ver .. ' ' .. proto ..
+        '://localhost:3300'
+    --check_site_content(cmd_foo, 'bad') --FIXME: Works around real problem
     for _ = 1, 100 do
+        print('iteration=', _) --TO_REMOVE
         launch_hungry_curls('localhost:3300', ver, use_tls)
         fiber.sleep(0.01)
-        kill_curls()
+        check_curls_did_not_fail()
+        --kill_curls()
+        kill_curls_ungracefully()
     end
+    check_site_content(cmd_foo, 'bad')
 end
 
 g_good_handlers.test_cancellation_http1_tls = function()
