@@ -15,9 +15,12 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        os: ['ubuntu-latest', 'macos-latest']
-        tarantool-ref: ['1.10', '2.7']
-        enable_asan: [true, false]
+        #os: ['ubuntu-latest', 'macos-latest']
+        os: ['macos-latest']
+        #tarantool-ref: ['1.10', '2.7']
+        tarantool-ref: ['1.10', 'void234/hunt-for-httpng-macos-deadlock']
+        #enable_asan: [true, false]
+        enable_asan: [false]
         exclude:
           - os: 'macos-latest'
             tarantool-ref: '1.10'
@@ -71,4 +74,7 @@ jobs:
       working-directory: ${{github.workspace}}
       # FIXME: luatest doesn't understand neither absolute paths nor ".."!
       # FIXME: Should enable Leak Sanitizer some day...
-      run: ASAN_OPTIONS=detect_leaks=0 LUA_CPATH="${{github.workspace}}/build/?.dylib;${{github.workspace}}/build/?.so" build/.rocks/bin/luatest -v -r 1 tests/all.lua --shuffle all
+      #run: ulimit -n 65536 && ASAN_OPTIONS=detect_leaks=0 LUA_CPATH="${{github.workspace}}/build/?.dylib;${{github.workspace}}/build/?.so" build/.rocks/bin/luatest -v -r 1 tests/all.lua --shuffle all
+      run: |
+        bash ./5.sh &
+        ulimit -n 65536 && echo "set startup-with-shell off" >> ~/.gdbinit && LUA_PATH="${{github.workspace}}/build/.rocks/share/tarantool/?/init.lua;${{github.workspace}}/build/.rocks/share/tarantool/?.lua;" LUA_CPATH="${{github.workspace}}/build/?.dylib;${{github.workspace}}/build/?.so" ASAN_OPTIONS=detect_leaks=0 tarantool 3.lua

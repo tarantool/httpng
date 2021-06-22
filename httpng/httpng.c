@@ -716,6 +716,7 @@ free_lua_shuttle_from_tx_in_http_thr(shuttle_t *shuttle)
 static inline void
 free_cancelled_lua_not_ws_shuttle_from_tx(shuttle_t *shuttle)
 {
+	//fprintf(stderr, "%s(): line %d\n", __func__, __LINE__);//TO_REMOVE
 #ifdef SHOULD_FREE_SHUTTLE_IN_HTTP_SERVER_THREAD
 	free_shuttle_from_tx_in_http_thr(shuttle);
 #else /* SHOULD_FREE_SHUTTLE_IN_HTTP_SERVER_THREAD */
@@ -741,8 +742,11 @@ free_lua_websocket_shuttle_from_tx(shuttle_t *shuttle)
 	if (response->recv_fiber != NULL) {
 		response->is_recv_fiber_cancelled = true;
 		assert(response->is_recv_fiber_waiting);
+		fprintf(stderr, "%s(): line %d\n", __func__, __LINE__);//TO_REMOVE
 		fiber_wakeup(response->recv_fiber);
+		fprintf(stderr, "%s(): line %d\n", __func__, __LINE__);//TO_REMOVE
 		fiber_yield();
+		fprintf(stderr, "%s(): line %d\n", __func__, __LINE__);//TO_REMOVE
 		struct lua_State *const L = luaT_state();
 		luaL_unref(L, LUA_REGISTRYINDEX,
 			response->lua_recv_handler_ref);
@@ -791,6 +795,7 @@ free_lua_websocket_recv_data_from_tx(recv_data_t *recv_data)
 static void
 cancel_processing_lua_req_in_tx(shuttle_t *shuttle)
 {
+	//fprintf(stderr, "%s(): line %d\n", __func__, __LINE__);//TO_REMOVE
 	lua_response_t *const response = (lua_response_t *)&shuttle->payload;
 	assert(!response->upgraded_to_websocket);
 
@@ -802,7 +807,9 @@ cancel_processing_lua_req_in_tx(shuttle_t *shuttle)
 	if (response->waiter != NULL) {
 		assert(!response->fiber_done);
 		response->cancelled = true;
+		//fprintf(stderr, "%s(): line %d\n", __func__, __LINE__);//TO_REMOVE
 		fiber_wakeup(response->waiter->fiber);
+		//fprintf(stderr, "%s(): line %d\n", __func__, __LINE__);//TO_REMOVE
 	} else if (response->fiber_done) {
 		assert(!response->cancelled);
 		free_cancelled_lua_not_ws_shuttle_from_tx(shuttle);
@@ -816,11 +823,15 @@ cancel_processing_lua_req_in_tx(shuttle_t *shuttle)
 static void
 free_shuttle_lua(shuttle_t *shuttle)
 {
+	//fprintf(stderr, "%s(): line %d\n", __func__, __LINE__);//TO_REMOVE
 	lua_response_t *const response = (lua_response_t *)(&shuttle->payload);
 	if (!response->upgraded_to_websocket) {
 		shuttle->disposed = true;
+		//fprintf(stderr, "%s(): line %d\n", __func__, __LINE__);//TO_REMOVE
 		stubborn_dispatch(get_curr_thread_ctx()->queue_to_tx,
 			&cancel_processing_lua_req_in_tx, shuttle);
+	} else {
+		//fprintf(stderr, "%s(): line %d\n", __func__, __LINE__);//TO_REMOVE
 	}
 }
 
@@ -863,6 +874,7 @@ send_lua(h2o_req_t *req, lua_response_t *const response)
 static void
 postprocess_lua_req_first(shuttle_t *shuttle)
 {
+	fprintf(stderr, "%s(): line %d\n", __func__, __LINE__);//TO_REMOVE
 	if (shuttle->disposed)
 		return;
 	lua_response_t *const response = (lua_response_t *)(&shuttle->payload);
@@ -901,6 +913,7 @@ postprocess_lua_req_first(shuttle_t *shuttle)
 static void
 postprocess_lua_req_others(shuttle_t *shuttle)
 {
+	fprintf(stderr, "%s(): line %d\n", __func__, __LINE__);//TO_REMOVE
 	lua_response_t *const response = (lua_response_t *)(&shuttle->payload);
 	if (shuttle->disposed)
 		return;
@@ -940,7 +953,9 @@ take_shuttle_ownership_lua(lua_response_t *response)
 	while (last_waiter->next != NULL)
 		last_waiter = last_waiter->next;
 	last_waiter->next = &waiter;
+	fprintf(stderr, "%s(): line %d\n", __func__, __LINE__);//TO_REMOVE
 	fiber_yield();
+	fprintf(stderr, "%s(): line %d\n", __func__, __LINE__);//TO_REMOVE
 }
 
 /* Launched in TX thread.
@@ -953,14 +968,19 @@ wait_for_lua_shuttle_return(lua_response_t *response)
 	/* Add us into head of waiting list. */
 	waiter_t waiter = { .next = response->waiter, .fiber = fiber_self() };
 	response->waiter = &waiter;
+	fprintf(stderr, "%s(): line %d\n", __func__, __LINE__);//TO_REMOVE
 	fiber_yield();
+	fprintf(stderr, "%s(): line %d\n", __func__, __LINE__);//TO_REMOVE
 	assert(response->waiter == &waiter);
 	response->waiter = waiter.next;
 	if (response->waiter) {
 		struct fiber *fiber = response->waiter->fiber;
 		response->waiter = response->waiter->next;
+		fprintf(stderr, "%s(): line %d\n", __func__, __LINE__);//TO_REMOVE
 		fiber_wakeup(fiber);
+		fprintf(stderr, "%s(): line %d\n", __func__, __LINE__);//TO_REMOVE
 	}
+	fprintf(stderr, "%s(): line %d\n", __func__, __LINE__);//TO_REMOVE
 }
 
 /* Launched in TX thread. */
@@ -1167,8 +1187,11 @@ process_lua_websocket_received_data_in_tx(recv_data_t *recv_data)
 	if (response->recv_fiber != NULL) {
 		if (response->is_recv_fiber_waiting) {
 			response->recv_data = recv_data;
+			fprintf(stderr, "%s(): line %d\n", __func__, __LINE__);//TO_REMOVE
 			fiber_wakeup(response->recv_fiber);
+			fprintf(stderr, "%s(): line %d\n", __func__, __LINE__);//TO_REMOVE
 			fiber_yield();
+			fprintf(stderr, "%s(): line %d\n", __func__, __LINE__);//TO_REMOVE
 		} else
 			fprintf(stderr, "User WebSocket recv handler for "
 				"\"\%s\" is NOT allowed to yield, data has "
@@ -1364,10 +1387,14 @@ lua_websocket_recv_fiber_func(va_list ap)
 
 	while (1) {
 		response->is_recv_fiber_waiting = true;
+		fprintf(stderr, "%s(): line %d\n", __func__, __LINE__);//TO_REMOVE
 		fiber_yield();
+		fprintf(stderr, "%s(): line %d\n", __func__, __LINE__);//TO_REMOVE
 		if (response->is_recv_fiber_cancelled) {
 			/* FIXME: Can we leak recv_data? */
+			fprintf(stderr, "%s(): line %d\n", __func__, __LINE__);//TO_REMOVE
 			fiber_wakeup(response->fiber);
+			fprintf(stderr, "%s(): line %d\n", __func__, __LINE__);//TO_REMOVE
 			return 0;
 		}
 		response->is_recv_fiber_waiting = false;
@@ -1392,7 +1419,9 @@ lua_websocket_recv_fiber_func(va_list ap)
 				response->site_path, lua_tostring(L, -1));
 		response->in_recv_handler = false;
 		free_lua_websocket_recv_data_from_tx(recv_data);
+		fprintf(stderr, "%s(): line %d\n", __func__, __LINE__);//TO_REMOVE
 		fiber_wakeup(response->tx_fiber);
+		fprintf(stderr, "%s(): line %d\n", __func__, __LINE__);//TO_REMOVE
 	}
 
 	return 0;
@@ -1462,7 +1491,9 @@ header_writer_upgrade_to_websocket(lua_State *L)
 		}
 		response->is_recv_fiber_waiting = false;
 		response->is_recv_fiber_cancelled = false;
+		fprintf(stderr, "%s(): line %d\n", __func__, __LINE__);//TO_REMOVE
 		fiber_start(response->recv_fiber, shuttle, new_L);
+		fprintf(stderr, "%s(): line %d\n", __func__, __LINE__);//TO_REMOVE
 	}
 
 	response->sent_something = true;
@@ -1656,6 +1687,7 @@ close_lua_req(lua_State *L)
 static void
 finish_handler_failure_processing(shuttle_t *shuttle, shuttle_func_t *func)
 {
+	fprintf(stderr, "%s(): line %d\n", __func__, __LINE__);//TO_REMOVE
 	stubborn_dispatch(shuttle->thread_ctx->queue_from_tx, func, shuttle);
 	lua_response_t *const response = (lua_response_t *)&shuttle->payload;
 	wait_for_lua_shuttle_return(response);
@@ -1758,10 +1790,13 @@ process_handler_success_not_ws_with_send(lua_State *L, shuttle_t *shuttle)
 			postprocess_lua_req_first, shuttle);
 	}
 	wait_for_lua_shuttle_return(response);
-	if (response->cancelled)
+	if (response->cancelled) {
 		/* There would be no more calls from HTTP
 		 * server thread, must clean up. */
+		fprintf(stderr, "%s(): line %d\n", __func__, __LINE__);//TO_REMOVE
 		free_lua_shuttle_from_tx_in_http_thr(shuttle);
+		fprintf(stderr, "%s(): line %d\n", __func__, __LINE__);//TO_REMOVE
+	}
 	else
 		response->fiber_done = true;
 		/* cancel_processing_lua_req_in_tx() is not yet called,
@@ -1990,12 +2025,14 @@ lua_fiber_func(va_list ap)
 			process_handler_failure_not_ws(shuttle);
 		}
 	} else if (response->cancelled) {
+		fprintf(stderr, "%s(): line %d\n", __func__, __LINE__);//TO_REMOVE
 		/* There would be no more calls from HTTP server thread,
 		 * must clean up. */
 		if (response->upgraded_to_websocket)
 			free_lua_websocket_shuttle_from_tx(shuttle);
 		else
 			free_cancelled_lua_not_ws_shuttle_from_tx(shuttle);
+		fprintf(stderr, "%s(): line %d\n", __func__, __LINE__);//TO_REMOVE
 	} else if (response->upgraded_to_websocket) {
 		take_shuttle_ownership_lua(response);
 		assert(!response->cancelled);
@@ -2003,17 +2040,25 @@ lua_fiber_func(va_list ap)
 			&close_websocket, response);
 		wait_for_lua_shuttle_return(response);
 		free_lua_websocket_shuttle_from_tx(shuttle);
-	} else if (lua_isnil(L, -1))
+	} else if (lua_isnil(L, -1)) {
+		fprintf(stderr, "%s(): line %d\n", __func__, __LINE__);//TO_REMOVE
 		process_handler_success_not_ws_without_send(L,
 			shuttle);
-	else
+		fprintf(stderr, "%s(): line %d\n", __func__, __LINE__);//TO_REMOVE
+	} else {
+		fprintf(stderr, "%s(): line %d\n", __func__, __LINE__);//TO_REMOVE
 		process_handler_success_not_ws_with_send(L, shuttle);
+		fprintf(stderr, "%s(): line %d\n", __func__, __LINE__);//TO_REMOVE
+	}
 
 Done:
 	luaL_unref(luaT_state(), LUA_REGISTRYINDEX, lua_state_ref);
 	if (--thread_ctx->active_lua_fibers == 0 &&
-	    thread_ctx->should_notify_tx_done)
+	    thread_ctx->should_notify_tx_done) {
+		fprintf(stderr, "%s(): line %d\n", __func__, __LINE__);//TO_REMOVE
 		stubborn_dispatch_thr_from_tx(thread_ctx, &tx_done);
+		fprintf(stderr, "%s(): line %d\n", __func__, __LINE__);//TO_REMOVE
+	}
 
 	return 0;
 }
@@ -2022,10 +2067,12 @@ Done:
 static void
 process_lua_req_in_tx(shuttle_t *shuttle)
 {
+	fprintf(stderr, "%s(): line %d\n", __func__, __LINE__);//TO_REMOVE
 	lua_response_t *const response = (lua_response_t *)&shuttle->payload;
 
 #define RETURN_WITH_ERROR(err) \
 	do { \
+		fprintf(stderr, "%s(): line %d\n", __func__, __LINE__); /*TO_REMOVE*/ \
 		luaL_unref(L, LUA_REGISTRYINDEX, response->lua_state_ref); \
 		static const char key[] = "content-type"; \
 		static const char value[] = "text/plain; charset=utf-8"; \
@@ -2054,7 +2101,9 @@ process_lua_req_in_tx(shuttle_t *shuttle)
 	response->fiber_done = false;
 	response->tx_fiber = fiber_self();
 	++shuttle->thread_ctx->active_lua_fibers;
+	fprintf(stderr, "%s(): line %d\n", __func__, __LINE__);//TO_REMOVE
 	fiber_start(response->fiber, shuttle, new_L);
+	fprintf(stderr, "%s(): line %d\n", __func__, __LINE__);//TO_REMOVE
 }
 #undef RETURN_WITH_ERROR
 
@@ -2087,6 +2136,7 @@ prepare_authority(h2o_req_t *req)
 static int
 lua_req_handler(lua_h2o_handler_t *self, h2o_req_t *req)
 {
+	fprintf(stderr, "%s(): line %d\n", __func__, __LINE__);//TO_REMOVE
 	shuttle_t *const shuttle = prepare_shuttle(req);
 	lua_response_t *const response = (lua_response_t *)&shuttle->payload;
 	if ((response->un.req.method_len = req->method.len) >
@@ -2096,6 +2146,7 @@ lua_req_handler(lua_h2o_handler_t *self, h2o_req_t *req)
 		req->res.status = 500;
 		req->res.reason = "Method name is too long";
 		h2o_send_inline(req, H2O_STRLIT("Method name is too long\n"));
+		fprintf(stderr, "%s(): line %d\n", __func__, __LINE__);//TO_REMOVE
 		return 0;
 	}
 	unsigned current_offset = response->un.req.path_len = req->path.len;
@@ -2107,6 +2158,7 @@ lua_req_handler(lua_h2o_handler_t *self, h2o_req_t *req)
 		req->res.status = 500;
 		req->res.reason = "Request is too long";
 		h2o_send_inline(req, H2O_STRLIT("Request is too long\n"));
+		fprintf(stderr, "%s(): line %d\n", __func__, __LINE__);//TO_REMOVE
 		return 0;
 	}
 
@@ -2163,6 +2215,7 @@ lua_req_handler(lua_h2o_handler_t *self, h2o_req_t *req)
 		req->res.reason = "Request Header Fields Too Large";
 		h2o_send_inline(req,
 			H2O_STRLIT("Request Header Fields Too Large\n"));
+		fprintf(stderr, "%s(): line %d\n", __func__, __LINE__);//TO_REMOVE
 		return 0;
 	}
 	received_http_header_handle_t *const handles =
@@ -2206,6 +2259,7 @@ lua_req_handler(lua_h2o_handler_t *self, h2o_req_t *req)
 			req->res.reason = "Payload Too Large";
 			h2o_send_inline(req,
 				H2O_STRLIT("Payload Too Large\n"));
+			fprintf(stderr, "%s(): line %d\n", __func__, __LINE__);//TO_REMOVE
 			return 0;
 		}
 	} else {
@@ -2239,6 +2293,7 @@ lua_req_handler(lua_h2o_handler_t *self, h2o_req_t *req)
 		(req->conn->callbacks->get_socket(req->conn)->ssl != NULL);
 
 	thread_ctx_t *const thread_ctx = get_curr_thread_ctx();
+	fprintf(stderr, "%s(): line %d\n", __func__, __LINE__);//TO_REMOVE
 	if (xtm_fun_dispatch(thread_ctx->queue_to_tx,
 	    (void(*)(void *))&process_lua_req_in_tx, shuttle, 0)) {
 		/* Error */
@@ -2246,10 +2301,12 @@ lua_req_handler(lua_h2o_handler_t *self, h2o_req_t *req)
 		req->res.status = 500;
 		req->res.reason = "Queue overflow";
 		h2o_send_inline(req, H2O_STRLIT("Queue overflow\n"));
+		fprintf(stderr, "%s(): line %d\n", __func__, __LINE__);//TO_REMOVE
 		return 0;
 	}
 	shuttle->anchor->user_free_shuttle = &free_shuttle_lua;
 
+	fprintf(stderr, "%s(): line %d\n", __func__, __LINE__);//TO_REMOVE
 	return 0;
 }
 
@@ -2418,10 +2475,12 @@ prepare_shuttle(h2o_req_t *req)
 static void
 on_underlying_socket_free(void *data)
 {
+	//fprintf(stderr, "%s(): line %d\n", __func__, __LINE__);//TO_REMOVE
 	h2o_linklist_unlink_fast(&my_container_of(data,
 		our_sock_t, super)->accepted_list);
 	thread_ctx_t *const thread_ctx = get_curr_thread_ctx();
 	--thread_ctx->num_connections;
+	//fprintf(stderr, "%s(): line %d num=%u\n", __func__, __LINE__, (unsigned)thread_ctx->num_connections);//TO_REMOVE
 #ifdef USE_LIBUV
 	free(data);
 #endif /* USE_LIBUV */
@@ -2496,21 +2555,31 @@ on_accept(uv_stream_t *uv_listener, int status)
 static void
 on_accept(h2o_socket_t *listener, const char *err)
 {
+	//fprintf(stderr, "%s(): line %d\n", __func__, __LINE__);//TO_REMOVE
 	if (err != NULL)
 		return;
 
+	//fprintf(stderr, "%s(): line %d\n", __func__, __LINE__);//TO_REMOVE
 	listener_ctx_t *const listener_ctx = (listener_ctx_t *)listener->data;
 	thread_ctx_t *const thread_ctx = listener_ctx->thread_ctx;
 	unsigned remain = conf.num_accepts;
 
 	do {
+		//fprintf(stderr, "%s(): line %d\n", __func__, __LINE__);//TO_REMOVE
 		if (thread_ctx->num_connections >= conf.max_conn_per_thread)
 			break;
+		fprintf(stderr, "%s(): line %d\n", __func__, __LINE__);//TO_REMOVE
 		struct st_h2o_evloop_socket_t *const sock =
 			h2o_evloop_socket_accept_ex(listener,
 				sizeof(our_sock_t));
-		if (sock == NULL)
+		if (sock == NULL) {
+			fprintf(stderr, "%s(): line %d failed; num=%u\n", __func__, __LINE__, (unsigned)thread_ctx->num_connections);//TO_REMOVE
 			return;
+		}
+#if 0//TO_REMOVE
+		else
+			fprintf(stderr, "%s(): line %d success\n", __func__, __LINE__);//TO_REMOVE
+#endif//0
 
 		our_sock_t *const item =
 			container_of(sock, our_sock_t, super);
@@ -2518,6 +2587,7 @@ on_accept(h2o_socket_t *listener, const char *err)
 			&item->accepted_list);
 
 		++thread_ctx->num_connections;
+		//fprintf(stderr, "%s(): line %d num=%u\n", __func__, __LINE__, (unsigned)thread_ctx->num_connections);//TO_REMOVE
 
 		sock->super.on_close.cb = on_underlying_socket_free;
 		sock->super.on_close.data = sock;
@@ -3577,7 +3647,9 @@ tx_fiber_func(va_list ap)
 		struct fiber *const fiber =
 			thread_ctx->fiber_to_wake_on_shutdown;
 		thread_ctx->fiber_to_wake_on_shutdown = NULL;
+		fprintf(stderr, "%s(): line %d\n", __func__, __LINE__);//TO_REMOVE
 		fiber_wakeup(fiber);
+		fprintf(stderr, "%s(): line %d\n", __func__, __LINE__);//TO_REMOVE
 	}
 	return 0;
 }
@@ -3753,7 +3825,9 @@ reap_finished_thread(thread_ctx_t *thread_ctx)
 	if (!thread_ctx->tx_fiber_finished) {
 		assert(thread_ctx->fiber_to_wake_on_shutdown == NULL);
 		thread_ctx->fiber_to_wake_on_shutdown = fiber_self();
+		fprintf(stderr, "%s(): line %d\n", __func__, __LINE__);//TO_REMOVE
 		fiber_yield();
+		fprintf(stderr, "%s(): line %d\n", __func__, __LINE__);//TO_REMOVE
 	}
 	assert(thread_ctx->tx_fiber_finished);
 
@@ -3788,7 +3862,9 @@ Exit:
 	if (conf.fiber_to_wake_on_reaping_done != NULL) {
 		struct fiber *const fiber = conf.fiber_to_wake_on_reaping_done;
 		conf.fiber_to_wake_on_reaping_done = NULL;
+		fprintf(stderr, "%s(): line %d\n", __func__, __LINE__);//TO_REMOVE
 		fiber_wakeup(fiber);
+		fprintf(stderr, "%s(): line %d\n", __func__, __LINE__);//TO_REMOVE
 	}
 	return result;
 }
@@ -3831,7 +3907,9 @@ reap_terminating_threads_ungracefully(void)
 	if (conf.reaping_flags & REAPING_GRACEFUL) {
 		assert(conf.fiber_to_wake_on_reaping_done == NULL);
 		conf.fiber_to_wake_on_reaping_done = fiber_self();
+		fprintf(stderr, "%s(): line %d\n", __func__, __LINE__);//TO_REMOVE
 		fiber_yield();
+		fprintf(stderr, "%s(): line %d\n", __func__, __LINE__);//TO_REMOVE
 		assert(!(conf.reaping_flags & REAPING_GRACEFUL));
 	}
 	const char *const err = reap_gracefully_terminating_threads();
@@ -3854,9 +3932,13 @@ terminate_reaper_fiber(void)
 	assert(conf.fiber_to_wake_by_reaper_fiber == NULL);
 	conf.fiber_to_wake_by_reaper_fiber = fiber_self();
 	conf.reaper_should_exit = true;
+	fprintf(stderr, "%s(): line %d\n", __func__, __LINE__);//TO_REMOVE
 	fiber_wakeup(conf.reaper_fiber);
+	fprintf(stderr, "%s(): line %d\n", __func__, __LINE__);//TO_REMOVE
 	if (!conf.reaper_exited) {
+		fprintf(stderr, "%s(): line %d\n", __func__, __LINE__);//TO_REMOVE
 		fiber_yield();
+		fprintf(stderr, "%s(): line %d\n", __func__, __LINE__);//TO_REMOVE
 		assert(conf.reaper_exited);
 	}
 	fiber_join(conf.reaper_fiber);
@@ -4240,7 +4322,9 @@ hot_reload_add_threads(unsigned threads)
 			goto add_thr_fibers_fail;
 		}
 		fiber_set_joinable(conf.tx_fiber_ptrs[fiber_idx], true);
+		fprintf(stderr, "%s(): line %d\n", __func__, __LINE__);//TO_REMOVE
 		fiber_start(conf.tx_fiber_ptrs[fiber_idx], fiber_idx);
+		fprintf(stderr, "%s(): line %d\n", __func__, __LINE__);//TO_REMOVE
 	}
 
 	unsigned thr_init_idx;
@@ -4329,7 +4413,9 @@ reaper_fiber_func(va_list ap)
 			struct fiber *const fiber =
 				conf.fiber_to_wake_by_reaper_fiber;
 			conf.fiber_to_wake_by_reaper_fiber = NULL;
+			fprintf(stderr, "%s(): line %d\n", __func__, __LINE__);//TO_REMOVE
 			fiber_wakeup(fiber);
+			fprintf(stderr, "%s(): line %d\n", __func__, __LINE__);//TO_REMOVE
 		}
 		if (conf.reaper_should_exit) {
 			conf.reaper_exited = true;
@@ -4346,8 +4432,11 @@ reaper_fiber_func(va_list ap)
 				conf.thr_timeout_start = now;
 				fiber_sleep(conf.thread_termination_timeout);
 			}
-		} else
+		} else {
+			fprintf(stderr, "%s(): line %d\n", __func__, __LINE__);//TO_REMOVE
 			fiber_yield();
+			fprintf(stderr, "%s(): line %d\n", __func__, __LINE__);//TO_REMOVE
+		}
 	}
 }
 
@@ -4383,7 +4472,9 @@ hot_reload_remove_threads(unsigned threads)
 	conf.thr_timeout_start = now;
 	conf.is_thr_term_timeout_active = true;
 	assert(conf.reaper_fiber != NULL);
+	fprintf(stderr, "%s(): line %d\n", __func__, __LINE__);//TO_REMOVE
 	fiber_wakeup(conf.reaper_fiber);
+	fprintf(stderr, "%s(): line %d\n", __func__, __LINE__);//TO_REMOVE
 }
 
 /* Launched in TX thread. */
@@ -4397,7 +4488,9 @@ configure_and_start_reaper_fiber(void)
 	conf.fiber_to_wake_on_reaping_done = NULL;
 	conf.is_thr_term_timeout_active = false;
 	conf.reaping_flags = 0;
+	fprintf(stderr, "%s(): line %d\n", __func__, __LINE__);//TO_REMOVE
 	fiber_start(conf.reaper_fiber);
+	fprintf(stderr, "%s(): line %d\n", __func__, __LINE__);//TO_REMOVE
 }
 
 /* Launched in TX thread. */
@@ -4995,7 +5088,9 @@ Skip_openssl_security_level:
 		}
 		reset_thread_ctx(fiber_idx);
 		fiber_set_joinable(conf.tx_fiber_ptrs[fiber_idx], true);
+		fprintf(stderr, "%s(): line %d\n", __func__, __LINE__);//TO_REMOVE
 		fiber_start(conf.tx_fiber_ptrs[fiber_idx], fiber_idx);
+		fprintf(stderr, "%s(): line %d\n", __func__, __LINE__);//TO_REMOVE
 	}
 
 	if ((conf.reaper_fiber =
