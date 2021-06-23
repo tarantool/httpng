@@ -53,6 +53,24 @@ local ensure_popen = function()
     t.skip_if(popen == nil, 'This test requires popen')
 end
 
+local my_shell_internal = function(cmd, stdout)
+    local opts = {}
+    opts.shell = true
+    opts.setsid = true
+    opts.groupsignal = true
+    opts.stdout = stdout
+    opts.close_fds = false -- That's the point
+    return popen.new({cmd}, opts)
+end
+
+local my_shell = function(cmd)
+    return my_shell_internal(cmd)
+end
+
+local my_shell_r = function(cmd)
+    return my_shell_internal(cmd, popen.opts.PIPE)
+end
+
 g_shuttle_size = t.group('shuttle_size')
 
 --[[ There is no point testing other values - parameters are automatically
@@ -337,7 +355,7 @@ local test_write_params = function(ver, use_tls)
     else
         protocol = 'http'
     end
-    local ph = popen.shell(curl_bin .. ' -k -s ' .. ver ..
+    local ph = my_shell(curl_bin .. ' -k -s ' .. ver ..
         ' ' .. protocol .. '://localhost:3300/write')
     local result = ph:wait().exit_code
     t.assert(result == 0, 'http request failed')
@@ -382,7 +400,7 @@ local test_write_header_params = function(ver, use_tls)
     else
         protocol = 'http'
     end
-    local ph = popen.shell(curl_bin .. ' -k -s ' .. ver ..
+    local ph = my_shell(curl_bin .. ' -k -s ' .. ver ..
         ' ' .. protocol .. '://localhost:3300/write_header')
     local result = ph:wait().exit_code
     t.assert(result == 0, 'http request failed')
@@ -470,7 +488,7 @@ end
 
 local check_site_content = function(cmd, str)
     ensure_popen()
-    local ph = popen.shell(cmd, "r")
+    local ph = my_shell_r(cmd)
     local output = ph:read()
     local result = ph:wait().exit_code
     assert(result == 0, 'curl failed')
@@ -923,8 +941,8 @@ local launch_hungry_curls = function(path, ver, use_tls)
     end
     for i = 1, curl_count do
         curls[#curls + 1] =
-            popen.shell(curl_bin .. ' ' .. ver ..
-                ' -k -s -o /dev/null ' .. proto .. '://' .. path, 'r')
+            my_shell(curl_bin .. ' ' .. ver ..
+                ' -k -s -o /dev/null ' .. proto .. '://' .. path)
     end
 end
 
