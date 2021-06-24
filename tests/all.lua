@@ -49,11 +49,54 @@ local ensure_shutdown_works = function()
         'This test requires httpng.shutdown() to work')
 end
 
+local using_popen = function()
+    return popen ~= nil
+    --return false --TO_REMOVE
+end
+
+local ensure_can_start_and_kill_processes = function()
+    --t.skip('simulating broken process launch or kill')
+end
+
+--[[
+    Actually it now checks that we can launch processes and kill them,
+    not necessarily using popen module (which is more efficient).
+    Please use ensure_can_start_and_kill_processes() in new code.
+--]]
 local ensure_popen = function()
-    t.skip_if(popen == nil, 'This test requires popen')
+    --t.skip_if(popen == nil, 'This test requires popen')
+    ensure_can_start_and_kill_processes()
+end
+
+local my_http_cfg = function(cfg)
+    http.cfg(cfg)
+    if not using_popen() then
+        -- FIXME: Wait until initialized? To investigate.
+        fiber.sleep(0.1)
+    end
+end
+
+local get_client_result = function(ph)
+    local result
+    if using_popen() then
+        return ph:wait().exit_code
+    end
+
+    --FIXME: Stopgap, can't easily obtain it.
+    fiber.sleep(0.1)
+    return 0
 end
 
 local my_shell_internal = function(cmd, stdout)
+    if not using_popen() then
+        os.remove 'tmp_pid.txt'
+        os.execute('tests/process_helper ' .. cmd)
+        local file = assert(io.open 'tmp_pid.txt')
+        local pid = file:read('*a')
+        file:close()
+        return pid
+    end
+
     local opts = {}
     opts.shell = true
     opts.setsid = true
@@ -342,7 +385,7 @@ local function cfg_bad_handlers(use_tls)
     if (use_tls) then
         cfg.listen = listen_with_single_ssl_pair
     end
-    http.cfg(cfg)
+    my_http_cfg(cfg)
 end
 
 local test_write_params = function(ver, use_tls)
@@ -357,7 +400,8 @@ local test_write_params = function(ver, use_tls)
     end
     local ph = my_shell(curl_bin .. ' -k -s ' .. ver ..
         ' ' .. protocol .. '://localhost:3300/write')
-    local result = ph:wait().exit_code
+    local result = get_client_result(ph)
+
     t.assert(result == 0, 'http request failed')
     t.assert(write_handler_launched == true, 'Handler was not launched')
     t.assert(bad_write_ok == false,
@@ -401,8 +445,9 @@ local test_write_header_params = function(ver, use_tls)
         protocol = 'http'
     end
     local ph = my_shell(curl_bin .. ' -k -s ' .. ver ..
+        ' -o /dev/null ' ..
         ' ' .. protocol .. '://localhost:3300/write_header')
-    local result = ph:wait().exit_code
+    local result = get_client_result(ph)
     t.assert(result == 0, 'http request failed')
     t.assert(write_header_handler_launched == true, 'Handler was not launched')
     t.assert(bad_write_header_ok == false,
@@ -486,15 +531,37 @@ local check_http_version_handler = function(req, io)
     return {body = 'foo'}
 end
 
-local check_site_content = function(cmd, str)
+local check_site_content = function(ver, proto, location, str)
     ensure_popen()
-    local ph = my_shell_r(cmd)
-    local output = ph:read()
-    local result = ph:wait().exit_code
-    assert(result == 0, 'curl failed')
+    local target
+    if using_popen() then
+        target = ' '
+    else
+        target = ' -o tmp_curl.txt '
+    end
+    local cmd = curl_bin .. ' -k -s ' .. ver .. target ..
+        proto .. '://' .. location
+    local output
+    if using_popen() then
+        local ph = my_shell_r(cmd)
+        local result = ph:wait().exit_code
+        output = ph:read()
+        assert(result == 0, 'curl failed')
+    else
+        os.remove('tmp_curl.txt')
+        local result = get_client_result(my_shell(cmd))
+        assert(result == 0, 'curl failed')
+        local file = io.open('tmp_curl.txt')
+        if (file == nil) then
+            error('nothing read')
+        end
+        output = file:read('*a')
+        file:close()
+    end
+
     if (output ~= str) then
         print('Expected: "'..str..'", actual: "'..output..'"')
-        assert(output == str)
+        assert(output == str, 'Got unexpected response from HTTP(S) server')
     end
 end
 
@@ -505,9 +572,8 @@ local test_curl_supports_v2 = function()
     version_handler_launched = false
     received_http1_req = false
     received_http2_req = false
-    http.cfg{handler = check_http_version_handler}
-    local cmd_alt = curl_bin .. ' -k -s --http2 http://localhost:3300'
-    check_site_content(cmd_alt, 'foo')
+    my_http_cfg{handler = check_http_version_handler}
+    check_site_content('--http2', 'http', 'localhost:3300', 'foo')
     assert(version_handler_launched == true)
     if (not received_http1_req and received_http2_req) then
         http2_supported = true
@@ -532,12 +598,11 @@ local cfg_for_two_sites = function(cfg, first, second, ver, use_tls)
     else
         proto = 'http'
     end
-    http.cfg(cfg)
-    local cmd_main = curl_bin .. ' ' .. ver .. ' -k -s ' ..
-        proto .. '://localhost:3300/' .. first
-    local cmd_alt = curl_bin .. ' ' .. ver .. ' -k -s ' ..
-        proto .. '://localhost:3300/' .. second
-    return cmd_main, cmd_alt
+    my_http_cfg(cfg)
+    local location_main = 'localhost:3300/' .. first
+    local location_alt = 'localhost:3300/' .. second
+
+    return proto, location_main, location_alt
 end
 
 local test_extra_sites = function(ver, use_tls)
@@ -545,16 +610,16 @@ local test_extra_sites = function(ver, use_tls)
         sites = { { path = '/alt', handler = foo_handler } },
         threads = 4,
     }
-    local cmd_main, cmd_alt = cfg_for_two_sites(cfg, '', 'alt', ver, use_tls)
-
-    check_site_content(cmd_main, 'not found')
-    check_site_content(cmd_alt, 'foo')
+    local proto, location_main, location_alt =
+        cfg_for_two_sites(cfg, '', 'alt', ver, use_tls)
+    check_site_content(ver, proto, location_main, 'not found')
+    check_site_content(ver, proto, location_alt, 'foo')
 
     cfg.sites[#cfg.sites + 1] = { path = '/', handler = bar_handler }
 
-    http.cfg(cfg)
-    check_site_content(cmd_main, 'bar')
-    check_site_content(cmd_alt, 'foo')
+    my_http_cfg(cfg)
+    check_site_content(ver, proto, location_main, 'bar')
+    check_site_content(ver, proto, location_alt, 'foo')
 end
 
 g_hot_reload.test_extra_sites_http1_insecure = function()
@@ -580,15 +645,16 @@ local test_add_primary_handler = function(ver, use_tls)
         sites = { { path = '/alt', handler = foo_handler } },
         threads = 4,
     }
-    local cmd_main, cmd_alt = cfg_for_two_sites(cfg, '', 'alt', ver, use_tls)
-    check_site_content(cmd_main, 'not found')
-    check_site_content(cmd_alt, 'foo')
+    local proto, location_main, location_alt =
+        cfg_for_two_sites(cfg, '', 'alt', ver, use_tls)
+    check_site_content(ver, proto, location_main, 'not found')
+    check_site_content(ver, proto, location_alt, 'foo')
 
     cfg.handler = bar_handler
 
-    http.cfg(cfg)
-    check_site_content(cmd_main, 'bar')
-    check_site_content(cmd_alt, 'foo')
+    my_http_cfg(cfg)
+    check_site_content(ver, proto, location_main, 'bar')
+    check_site_content(ver, proto, location_alt, 'foo')
 end
 
 g_hot_reload.test_add_primary_handler_http1_insecure = function()
@@ -609,16 +675,17 @@ local test_add_intermediate_site = function(ver, use_tls)
         handler = foo_handler,
         threads = 4,
     }
-    local cmd_main, cmd_alt = cfg_for_two_sites(cfg, '', 'alt', ver, use_tls)
-    check_site_content(cmd_main, 'foo')
-    check_site_content(cmd_alt, 'foo')
+    local proto, location_main, location_alt =
+        cfg_for_two_sites(cfg, '', 'alt', ver, use_tls)
+    check_site_content(ver, proto, location_main, 'foo')
+    check_site_content(ver, proto, location_alt, 'foo')
 
     cfg.sites = {}
     cfg.sites[#cfg.sites + 1] = { path = '/alt', handler = bar_handler }
 
-    http.cfg(cfg)
-    check_site_content(cmd_main, 'foo')
-    check_site_content(cmd_alt, 'bar')
+    my_http_cfg(cfg)
+    check_site_content(ver, proto, location_main, 'foo')
+    check_site_content(ver, proto, location_alt, 'bar')
 end
 
 g_hot_reload.test_add_intermediate_site_http1_insecure = function()
@@ -639,15 +706,16 @@ local test_add_intermediate_site_alt = function(ver, use_tls)
         sites = { { path = '/', handler = foo_handler } },
         threads = 4,
     }
-    local cmd_main, cmd_alt = cfg_for_two_sites(cfg, '', 'alt', ver, use_tls)
-    check_site_content(cmd_main, 'foo')
-    check_site_content(cmd_alt, 'foo')
+    local proto, location_main, location_alt =
+        cfg_for_two_sites(cfg, '', 'alt', ver, use_tls)
+    check_site_content(ver, proto, location_main, 'foo')
+    check_site_content(ver, proto, location_alt, 'foo')
 
     cfg.sites[#cfg.sites + 1] = { path = '/alt', handler = bar_handler }
 
-    http.cfg(cfg)
-    check_site_content(cmd_main, 'foo')
-    check_site_content(cmd_alt, 'bar')
+    my_http_cfg(cfg)
+    check_site_content(ver, proto, location_main, 'foo')
+    check_site_content(ver, proto, location_alt, 'bar')
 end
 
 g_hot_reload.test_add_intermediate_site_alt_http1_insecure = function()
@@ -668,18 +736,19 @@ local test_add_duplicate_paths = function(ver, use_tls)
         sites = { { path = '/foo', handler = foo_handler } },
         threads = 4,
     }
-    local cmd_main, cmd_alt =
+    local proto, location_main, location_alt =
         cfg_for_two_sites(cfg, 'foo', 'bar', ver, use_tls)
-    check_site_content(cmd_main, 'foo')
-    check_site_content(cmd_alt, 'not found')
+    check_site_content(ver, proto, location_main, 'foo')
+    check_site_content(ver, proto, location_alt, 'not found')
 
     cfg.sites[#cfg.sites + 1] = { path = '/bar', handler = bar_handler }
     cfg.sites[#cfg.sites + 1] = { path = '/bar', handler = bar_handler }
 
     t.assert_error_msg_content_equals("Can't add duplicate paths",
         http.cfg, cfg)
-    check_site_content(cmd_main, 'foo')
-    check_site_content(cmd_alt, 'not found')
+    if not using_popen() then fiber.sleep(0.1) end
+    check_site_content(ver, proto, location_main, 'foo')
+    check_site_content(ver, proto, location_alt, 'not found')
 end
 
 g_hot_reload.test_add_duplicate_paths_http1_insecure = function()
@@ -705,17 +774,20 @@ local test_add_duplicate_paths_alt = function(ver, use_tls)
         sites = { { path = '/', handler = foo_handler } },
         threads = 4,
     }
-    local cmd_main, cmd_alt = cfg_for_two_sites(cfg, '', 'alt', ver, use_tls)
-    check_site_content(cmd_main, 'foo')
-    check_site_content(cmd_alt, 'foo')
+    local proto, location_main, location_alt =
+        cfg_for_two_sites(cfg, '', 'alt', ver, use_tls)
+    check_site_content(ver, proto, location_main, 'foo')
+    check_site_content(ver, proto, location_alt, 'foo')
 
     cfg.sites[#cfg.sites + 1] = { path = '/alt', handler = bar_handler }
     cfg.sites[#cfg.sites + 1] = { path = '/alt', handler = bar_handler }
 
     t.assert_error_msg_content_equals("Can't add duplicate paths",
         http.cfg, cfg)
-    check_site_content(cmd_main, 'foo')
-    check_site_content(cmd_alt, 'foo')
+    if not using_popen() then fiber.sleep(0.1) end
+
+    check_site_content(ver, proto, location_main, 'foo')
+    check_site_content(ver, proto, location_alt, 'foo')
 end
 
 g_hot_reload.test_add_duplicate_paths_alt_http1_insecure = function()
@@ -739,16 +811,16 @@ local test_remove_path = function(ver, use_tls)
         },
         threads = 4,
     }
-    local cmd_main, cmd_alt =
+    local proto, location_main, location_alt =
         cfg_for_two_sites(cfg, 'foo', 'bar', ver, use_tls)
-    check_site_content(cmd_main, 'foo')
-    check_site_content(cmd_alt, 'bar')
+    check_site_content(ver, proto, location_main, 'foo')
+    check_site_content(ver, proto, location_alt, 'bar')
 
     cfg.sites[#cfg.sites] = nil
 
-    http.cfg(cfg)
-    check_site_content(cmd_main, 'foo')
-    check_site_content(cmd_alt, 'not found')
+    my_http_cfg(cfg)
+    check_site_content(ver, proto, location_main, 'foo')
+    check_site_content(ver, proto, location_alt, 'not found')
 end
 
 g_hot_reload.test_remove_path_http1_insecure = function()
@@ -771,13 +843,14 @@ local test_remove_all_paths = function(ver, use_tls)
         },
         threads = 4,
     }
-    local cmd_main = cfg_for_two_sites(cfg, ver, '', 'alt', use_tls)
-    check_site_content(cmd_main, 'foo')
+    local proto, location_main, location_alt =
+        cfg_for_two_sites(cfg, '', 'bar', ver, use_tls)
+    check_site_content(ver, proto, location_main, 'foo')
 
     cfg.sites = nil
 
-    http.cfg(cfg)
-    check_site_content(cmd_main, 'not found')
+    my_http_cfg(cfg)
+    check_site_content(ver, proto, location_main, 'not found')
 end
 
 g_hot_reload.test_remove_all_paths_http1_insecure = function()
@@ -798,13 +871,14 @@ local test_remove_all_paths_alt = function(ver, use_tls)
         handler = foo_handler,
         threads = 4,
     }
-    local cmd_main = cfg_for_two_sites(cfg, '', 'alt', ver, use_tls)
-    check_site_content(cmd_main, 'foo')
+    local proto, location_main, location_alt =
+        cfg_for_two_sites(cfg, '', 'bar', ver, use_tls)
+    check_site_content(ver, proto, location_main, 'foo')
 
     cfg.handler = nil
 
-    http.cfg(cfg)
-    check_site_content(cmd_main, 'not found')
+    my_http_cfg(cfg)
+    check_site_content(ver, proto, location_main, 'not found')
 end
 
 g_hot_reload.test_remove_all_paths_alt_http1_insecure = function()
@@ -912,9 +986,14 @@ local function kill_curls()
     if (curls == nil) then
         return
     end
-    local k, curl
-    for k, curl in pairs(curls) do
-        curl:close()
+    if using_popen() then
+        for _, curl in pairs(curls) do
+            curl:close()
+        end
+    else
+        for _, curl in pairs(curls) do
+            os.execute('sh -c "kill ' .. curl .. '" 2>/dev/null')
+        end
     end
     curls = nil
 end
@@ -1043,7 +1122,7 @@ local test_FLAKY_decrease_stubborn_threads_with_timeout =
         cfg.listen = listen_with_single_ssl_pair
     end
 
-    http.cfg(cfg)
+    my_http_cfg(cfg)
 
     launch_hungry_curls('localhost:3300', ver, use_tls)
     fiber.sleep(0.1)
@@ -1100,7 +1179,7 @@ local test_FLAKY_decrease_not_so_stubborn_thr_with_timeout =
         cfg.listen = listen_with_single_ssl_pair
     end
 
-    http.cfg(cfg)
+    my_http_cfg(cfg)
 
     assert(cfg.thread_termination_timeout > 0.1)
     launch_hungry_curls('localhost:3300', ver, use_tls)
@@ -1162,18 +1241,18 @@ local test_replace_handlers = function(ver, use_tls)
         sites = { { path = '/alt', handler = alt_foo_handler } },
         threads = 4,
     }
-    local cmd_main, cmd_alt = cfg_for_two_sites(cfg, '', 'alt', ver, use_tls)
-    local check = check_site_content
+    local proto, location_main, location_alt =
+        cfg_for_two_sites(cfg, '', 'alt', ver, use_tls)
 
-    check(cmd_main, 'foo')
-    check(cmd_alt, 'FOO')
+    check_site_content(ver, proto, location_main, 'foo')
+    check_site_content(ver, proto, location_alt, 'FOO')
 
     cfg.handler = bar_handler
     cfg.sites[1].handler = alt_bar_handler
-    http.cfg(cfg)
+    my_http_cfg(cfg)
 
-    check(cmd_main, 'bar')
-    check(cmd_alt, 'BAR')
+    check_site_content(ver, proto, location_main, 'bar')
+    check_site_content(ver, proto, location_alt, 'BAR')
 end
 
 g_hot_reload.test_replace_handlers_http1_insecure = function()
@@ -1225,10 +1304,8 @@ local test_something = function(ver, use_tls, query, handler, expected)
     else
         proto = 'http'
     end
-    http.cfg(cfg)
-    local cmd_main = curl_bin .. ' ' .. ver .. ' -k -s ' ..
-        proto .. '://localhost:3300' .. query
-    check_site_content(cmd_main, expected)
+    my_http_cfg(cfg)
+    check_site_content(ver, proto, 'localhost:3300' .. query, expected)
 end
 
 local test_some_query = function(ver, use_tls, query, expected)
@@ -1300,9 +1377,9 @@ g_good_handlers.test_curl_supports_v1 = function()
     version_handler_launched = false
     received_http1_req = false
     received_http2_req = false
-    http.cfg{handler = check_http_version_handler}
-    local cmd_main = curl_bin ..' -k -s --http1.1 http://localhost:3300'
-    check_site_content(cmd_main, 'foo')
+    my_http_cfg{handler = check_http_version_handler}
+    check_site_content('--http1.1', 'http', 'localhost:3300', 'foo')
+
     assert(version_handler_launched == true)
     assert(received_http1_req == true)
     assert(received_http2_req == false)
@@ -1354,6 +1431,7 @@ g_wrong_config.test_combo5 = function()
 end
 
 local test_cancellation = function(ver, use_tls)
+    ensure_can_start_and_kill_processes()
     local cfg = {
         handler = query_handler, -- Almost any (not stubborn!)
         threads = 4,
@@ -1400,23 +1478,17 @@ local test_host = function(ver, use_tls)
     else
         proto = 'http'
     end
-    http.cfg(cfg)
+    my_http_cfg(cfg)
 
-    local cmd_foo = curl_bin .. ' -k -s ' .. ver .. ' ' .. proto ..
-        '://foo.tarantool.io:3300'
-    check_site_content(cmd_foo, 'foo.tarantool.io')
+    check_site_content(ver, proto, 'foo.tarantool.io:3300', 'foo.tarantool.io')
+    check_site_content(ver, proto, 'bar.tarantool.io:3300', 'bar.tarantool.io')
 
-    local cmd_bar = curl_bin .. ' -k -s ' .. ver .. ' ' .. proto ..
-        '://bar.tarantool.io:3300'
-    check_site_content(cmd_bar, 'bar.tarantool.io')
-
-    local cmd_localhost = curl_bin .. ' -k -s ' .. ver .. ' ' .. proto ..
-        '://localhost:3300'
     if use_tls then
-        local ok, err = pcall(check_site_content, cmd_localhost, 'localhost')
+        local ok, err = pcall(check_site_content, ver, proto,
+            'localhost:3300', 'localhost')
         assert(ok == false)
     else
-        check_site_content(cmd_localhost, 'localhost')
+        check_site_content(ver, proto, 'localhost:3300', 'localhost')
     end
 end
 
@@ -1446,17 +1518,13 @@ local encryption_handler = function(req, io)
 end
 
 local test_req_encryption_info = function(ver)
-    http.cfg{
+    my_http_cfg{
         listen = { 8080, { port = 3300, tls = { ssl_pairs['foo'] } } },
         handler = encryption_handler,
     }
 
-    local cmd_insecure = curl_bin .. ' -k -s ' .. ver ..
-        ' http://foo.tarantool.io:8080'
-    check_site_content(cmd_insecure, 'insecure')
-    local cmd_encrypted = curl_bin .. ' -k -s ' .. ver ..
-        ' https://foo.tarantool.io:3300'
-    check_site_content(cmd_encrypted, 'encrypted')
+    check_site_content(ver, 'http', 'foo.tarantool.io:8080', 'insecure')
+    check_site_content(ver, 'https', 'foo.tarantool.io:3300', 'encrypted')
 end
 
 g_good_handlers.test_req_encryption_info_http1 = function()

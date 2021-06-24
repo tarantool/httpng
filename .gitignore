@@ -30,6 +30,8 @@ Makefile
 cmake_install.cmake
 build.luarocks/
 *.pc
+tests/process_helper
+tmp_*
 
 # macOS files
 .DS_Store
