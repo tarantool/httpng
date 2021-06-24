@@ -138,3 +138,6 @@ endif (NOT(ENABLE_ASAN))
 # Install library
 install(TARGETS httpng_c LIBRARY DESTINATION ${TARANTOOL_INSTALL_LIBDIR})
 install(FILES httpng.lua DESTINATION ${TARANTOOL_INSTALL_LUADIR})
+
+add_executable(process_helper tests/process_helper.c)
+set_target_properties(process_helper PROPERTIES OUTPUT_NAME ${CMAKE_CURRENT_SOURCE_DIR}/tests/process_helper)
