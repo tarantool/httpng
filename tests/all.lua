@@ -1116,7 +1116,7 @@ local test_FLAKY_decrease_stubborn_threads_with_timeout =
     local cfg = {
         handler = stubborn_handler,
         threads = 2,
-        thread_termination_timeout = 1,
+        thread_termination_timeout = 2,
     }
     if use_tls then
         cfg.listen = listen_with_single_ssl_pair
@@ -1135,7 +1135,7 @@ local test_FLAKY_decrease_stubborn_threads_with_timeout =
 ::retry::
     local ok, err = pcall(http.cfg, cfg)
     if (ok) then
-        assert(fiber.clock() - start >= cfg.thread_termination_timeout - 0.2,
+        assert(fiber.clock() - start >= cfg.thread_termination_timeout - 0.5,
             'threads have terminated too early');
         return
     end
