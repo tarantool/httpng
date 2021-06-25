@@ -51,7 +51,6 @@ end
 
 local using_popen = function()
     return popen ~= nil
-    --return false --TO_REMOVE
 end
 
 local ensure_can_start_and_kill_processes = function()
@@ -77,21 +76,34 @@ local my_http_cfg = function(cfg)
 end
 
 local get_client_result = function(ph)
+    if ph == nil then
+        return nil
+    end
+
     local result
     if using_popen() then
         return ph:wait().exit_code
     end
 
-    --FIXME: Stopgap, can't easily obtain it.
-    fiber.sleep(0.1)
-    return 0
+    local ok, status = pcall(http._debug_wait_process, ph)
+    if not ok then
+        error('Unable to determine process exit code, reason: ' .. status)
+    end
+    return status
 end
 
 local my_shell_internal = function(cmd, stdout)
     if not using_popen() then
         os.remove 'tmp_pid.txt'
-        os.execute('tests/process_helper ' .. cmd)
+        if (os.execute('tests/process_helper ' .. cmd) ~= 0) then
+            return nil
+        end
+    ::retry_pid::
         local file = assert(io.open 'tmp_pid.txt')
+        if (file == nil) then
+            fiber.sleep(0.001)
+            goto retry_pid
+        end
         local pid = file:read('*a')
         file:close()
         return pid
@@ -993,6 +1005,7 @@ local function kill_curls()
     else
         for _, curl in pairs(curls) do
             os.execute('sh -c "kill ' .. curl .. '" 2>/dev/null')
+            pcall(http._debug_wait_process, curl) -- Avoid zombies.
         end
     end
     curls = nil

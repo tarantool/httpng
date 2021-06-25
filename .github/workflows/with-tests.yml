@@ -71,4 +71,9 @@ jobs:
       working-directory: ${{github.workspace}}
       # FIXME: luatest doesn't understand neither absolute paths nor ".."!
       # FIXME: Should enable Leak Sanitizer some day...
-      run: ASAN_OPTIONS=detect_leaks=0 LUA_CPATH="${{github.workspace}}/build/?.dylib;${{github.workspace}}/build/?.so" build/.rocks/bin/luatest -v -r 1 tests/all.lua --shuffle all
+      run: |
+        killall process_helper || true
+        ulimit -n 65536 || true
+        ulimit -u 4096 || true
+        ASAN_OPTIONS=detect_leaks=0 LUA_CPATH="${{github.workspace}}/build/?.dylib;${{github.workspace}}/build/?.so" build/.rocks/bin/luatest -v -r 1 tests/all.lua --shuffle all
+      shell: bash
