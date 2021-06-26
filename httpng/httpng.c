@@ -5366,10 +5366,11 @@ retry_send:
 	if (bytes_sent < 0) {
 		if (errno == EINTR)
 			goto retry_send;
-		if (errno == EPIPE) {
+		if (errno == EPIPE || errno == ENOTCONN) {
 			close(reaper_client_fd);
 			goto retry_everything;
 		}
+		perror("send() to process_helper failed");
 		lerr = "send() to process_helper failed";
 		goto error_cant_send;
 	}
@@ -5380,6 +5381,7 @@ retry_send:
 	pid_t code;
 	/* FIXME: Handle EINTR at least? */
 	if (recv(reaper_client_fd, &code, sizeof(code), 0) < sizeof(code)) {
+		perror("recv() from process_helper failed");
 		lerr = "recv() from process_helper failed";
 		goto error_cant_recv;
 	}

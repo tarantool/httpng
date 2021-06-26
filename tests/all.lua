@@ -1023,7 +1023,7 @@ local launch_hungry_curls = function(path, ver, use_tls)
     ensure_popen()
     assert(curls == nil)
     curls = {}
-    local curl_count = 32
+    local curl_count = 48
     local i
     local proto
     if use_tls then
@@ -1054,7 +1054,7 @@ local test_FLAKY_decrease_stubborn_threads = function(ver, use_tls)
     fiber.sleep(0.1)
 
     launch_hungry_curls('localhost:3300', ver, use_tls)
-    fiber.sleep(0.3)
+    fiber.sleep(1)
 
     cfg.threads = 1
     http.cfg(cfg)
@@ -1137,6 +1137,7 @@ local test_FLAKY_decrease_stubborn_threads_with_timeout =
 
     my_http_cfg(cfg)
 
+    local curls_start = fiber.clock()
     launch_hungry_curls('localhost:3300', ver, use_tls)
     fiber.sleep(0.1)
 
@@ -1148,8 +1149,14 @@ local test_FLAKY_decrease_stubborn_threads_with_timeout =
 ::retry::
     local ok, err = pcall(http.cfg, cfg)
     if (ok) then
-        assert(fiber.clock() - start >= cfg.thread_termination_timeout - 0.5,
-            'threads have terminated too early');
+        local now = fiber.clock()
+        if (not(now - start >= cfg.thread_termination_timeout - 0.5)) then
+            print('now - start = ', now - start)
+            print('now - curls_start = ', now - curl_start)
+            print('cfg.thread_termination_timeout = ',
+                cfg.thread_termination_timeout)
+            error('threads have terminated too early');
+        end
         return
     end
     assert(err == 'Unable to reconfigure until threads will shut down')
@@ -1195,6 +1202,7 @@ local test_FLAKY_decrease_not_so_stubborn_thr_with_timeout =
     my_http_cfg(cfg)
 
     assert(cfg.thread_termination_timeout > 0.1)
+    local curls_start = fiber.clock()
     launch_hungry_curls('localhost:3300', ver, use_tls)
     fiber.sleep(0.1)
 
@@ -1206,8 +1214,12 @@ local test_FLAKY_decrease_not_so_stubborn_thr_with_timeout =
 ::retry::
     local ok, err = pcall(http.cfg, cfg)
     if (ok) then
-        assert(fiber.clock() - start >= 0.4,
-            'threads have terminated too early');
+        local now = fiber.clock()
+        if (now - start < 0.4) then
+            print('now - start = ', now - start)
+            print('now - curls_start = ', now - curls_start)
+            error('threads have terminated too early');
+        end
         assert(fiber.clock() - start < cfg.thread_termination_timeout + 0.5,
             'threads have terminated too late');
         return
