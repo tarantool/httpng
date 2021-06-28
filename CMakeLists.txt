@@ -78,7 +78,6 @@ set(USE_STATIC_WSLAY ON)
 
 add_subdirectory(third_party/h2o EXCLUDE_FROM_ALL)
 add_subdirectory(third_party/xtm EXCLUDE_FROM_ALL)
-add_subdirectory(third_party/msgpuck EXCLUDE_FROM_ALL)
 
 #set(HTTPNG_USE_LIBUV ON)
 
