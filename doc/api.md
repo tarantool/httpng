@@ -45,6 +45,8 @@ httpng module exports the following functions:
 
 - `openssl_security_level`: Integer, defaults to 1. Please see OpenSSL 1.1* documentation for details.
 
+- `routers`: Array of tables describing request "route handlers" (see below). Ignored if `handler` is specified. [`sites` would be removed when `routers` are actually implemented].
+
 - `shuttle_size`: Integer, specifies the max size in bytes of the internal buffer used to pass data between HTTP(S) server threads and TX thread. Defaults to 65536. One "shuttle" is used for every HTTP(s) request. Lowering its value helps decrease memory usage but limits maximum HTTP(S) request (not response!) body size (but also look on `use_body_split`) as well as the maximal accepted size of request headers.
 
 - `sites`: Array describing HTTP(S) sites, each entry should contain a table with the following fields:
@@ -81,6 +83,104 @@ httpng module exports the following functions:
 
 When you are calling `cfg()` after successful call to `cfg()`, it performs reconfiguration (hot reload). You can replace `handler`s, add and/or remove `path`s, increase or decrease `threads`, change `thread_termination_timeout`. Attempts to change other parameters would throw an error. To reconfigure, call `cfg()` with modified cfg table - if you would create a new one and e. g. forget to add one of the existing `sites`, it would be removed. Please note that hot reload never reorders `sites` except for '/' so you can get 'wrong' order when adding 'overlapping' `path`s (not sure using them is a good idea in the first place).
 
+### Route handlers
+
+The concept is compatible with tarantool/http v1
+(https://github.com/tarantool/http/tree/1.1.0) which is inspired by
+[Mojolicious](http://mojolicio.us/perldoc/Mojolicious/Guides/Routing) API.
+
+Each route handler table can contain the following fields:
+- `file`: String, template file name (can be relative to `{app_dir}/templates`,
+where `app_dir` is the path set when creating the server).
+If no template file name extension is provided, the extension is set to
+".html.el", meaning HTML with embedded Lua.
+- `handler`: Function which this HTTP(S) request is routed to or string
+in the format `controller_name#action_name` which means "call function
+named `action_name` from file `{app_dir}/controllers/controller_name`".
+- `host`: String, virtual host name like `foo.tarantool.io` (optional).
+Exact match only.
+- `method`: String, HTTP(S) method (`POST`, `GET`, etc).
+- `native_file`: String, filename to serve w/o calling Lua handlers.
+- `native_folder`: String, file system folder to serve w/o calling Lua handlers.
+- `native_mime`: (to be defined) Used to fill in `Content-Type` when serving
+files/folders w/o calling Lua handlers.
+- `path`: String, HTTP(S) path expression (see description below).
+- `template`: String with template or function to get the template (useful if
+template body must be taken from a database).
+
+`routers` in cfg table specifies an array with tables specified above.
+Order of entries is important. When HTTP(S) server is configured,
+this array is parsed and each entry is determined to be "simple" or "complex".
+"Simple" entries do not contain `method` or placeholders in `path`,
+these entries are sorted to avoid overlaps and are processed first.
+"Complex" entries are processed in the order specified.
+It is recommended to place more frequently accessed paths first
+to improve performance.
+
+The following placeholders specifications are supported:
+- Standard: colon prefix followed by a name, e. g. `:name`.
+These placeholders would match all characters except "." and "/".
+E. g. HTTP(S) request for "/sebastian/hello" with route handler specification
+"/:name/hello" would match and create stash entry "name" with value "sebastian".
+You can optionally use angle brackets to separate placeholder name from the
+surrounding characters, e. g. "/<:name>hello" would match "/sebastianhello".
+Please see Mojolicious documentation for more examples.
+Colon prefix is optional for standard placeholders when angle brackets
+are used.
+- Relaxed: hash prefix, match all characters except "/". E. g. "/#name/hello".
+- Wildcard: asterix prefix, match all characters. E. g. "/*name/hello".
+
+You can use `req:stash('name')` to get matched string from request handler.
+There are also special stash names:
+- `controller` - the controller name.
+- `action` - the handler name in the controller.
+- `format` - the current output format (e.g. `html`, `txt`). It is
+  detected automatically based on the request's `path` (for example, `/abc.js`
+  sets `format` to `js`). When producing a response, `format` is used
+  to serve the response's 'Content-type:'.
+
+Handlers can optionally use template to generate responses by returning
+`req:render({params_for_template})`.
+Template from matched route handler is used, it can be taken from file,
+Lua string, returned by Lua function (see `file` and `template` above).
+Templates can contain Lua code, example:
+```html
+<html>
+    <head>
+        <title><%= title %></title>
+    </head>
+    <body>
+        <ul>
+            % for i = 1, 10 do
+                <li><%= item[i].key %>: <%= item[i].value %></li>
+            % end
+        </ul>
+    </body>
+</html>
+```
+To embed Lua code into a template, use:
+
+* `<% lua-here %>` - insert any Lua code, including multi-line.
+  Can be used anywhere in the template.
+* `% lua-here` - a single-line Lua substitution. Can only be
+  present at the beginning of a line (with optional preceding spaces
+  and tabs, which are ignored).
+
+A few control characters may follow `%`:
+
+* `=` (e.g., `<%= value + 1 %>`) - runs the embedded Lua code
+  and inserts the result into HTML. Special HTML characters,
+  such as `<`, `>`, `&`, `"`, are escaped.
+* `==` (e.g., `<%== value + 10 %>`) - the same, but without
+  escaping.
+
+A Lua statement inside the template has access to the following
+environment:
+
+1. Lua variables defined in the template,
+1. stashed variables,
+1. variables standing for keys in the `render` table.
+
 ### Handlers
 
 `function handler(req, io)`
@@ -99,6 +199,8 @@ This is what HTTPNG is about - handling HTTP(S) requests. Handlers are Lua funct
   - `path`: String, contains "path" of HTTP(S) request - that is, '/en/download?a=b' for 'https://www.tarantool.io/en/download?a=b'.
   - `peer`: Table, contains IP address and port of HTTP(S) client in `socket.getaddrinfo()` format.
   - `query`: String, everything after "?" in path or `nil`.
+  - `stash`: Function `(req, name)` to get string matched by placeholder `name`
+(see "Route handlers").
   - `version_major`: Number, contains "major" part of HTTP version ('2' for 'HTTP 2.0').
   - `version_minor`: Number, contains "minor" part of HTTP version ('0' for 'HTTP 2.0').
   - `_shuttle`: Userdata, please do not touch.
