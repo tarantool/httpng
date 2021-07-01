@@ -1160,7 +1160,8 @@ local test_FLAKY_decrease_stubborn_threads_with_timeout =
         return
     end
     assert(err == 'Unable to reconfigure until threads will shut down')
-    assert(fiber.clock() - start < cfg.thread_termination_timeout + 1)
+    assert(fiber.clock() - start < cfg.thread_termination_timeout + 1,
+        'threads have terminated too late')
     fiber.sleep(0.05)
     goto retry
 end
