@@ -629,6 +629,7 @@ local test_extra_sites = function(ver, use_tls)
 
     cfg.sites[#cfg.sites + 1] = { path = '/', handler = bar_handler }
 
+    cfg.listen = nil
     my_http_cfg(cfg)
     check_site_content(ver, proto, location_main, 'bar')
     check_site_content(ver, proto, location_alt, 'foo')
@@ -663,6 +664,7 @@ local test_add_primary_handler = function(ver, use_tls)
     check_site_content(ver, proto, location_alt, 'foo')
 
     cfg.handler = bar_handler
+    cfg.listen = nil
 
     my_http_cfg(cfg)
     check_site_content(ver, proto, location_main, 'bar')
@@ -694,6 +696,7 @@ local test_add_intermediate_site = function(ver, use_tls)
 
     cfg.sites = {}
     cfg.sites[#cfg.sites + 1] = { path = '/alt', handler = bar_handler }
+    cfg.listen = nil
 
     my_http_cfg(cfg)
     check_site_content(ver, proto, location_main, 'foo')
@@ -724,6 +727,7 @@ local test_add_intermediate_site_alt = function(ver, use_tls)
     check_site_content(ver, proto, location_alt, 'foo')
 
     cfg.sites[#cfg.sites + 1] = { path = '/alt', handler = bar_handler }
+    cfg.listen = nil
 
     my_http_cfg(cfg)
     check_site_content(ver, proto, location_main, 'foo')
@@ -829,6 +833,7 @@ local test_remove_path = function(ver, use_tls)
     check_site_content(ver, proto, location_alt, 'bar')
 
     cfg.sites[#cfg.sites] = nil
+    cfg.listen = nil
 
     my_http_cfg(cfg)
     check_site_content(ver, proto, location_main, 'foo')
@@ -860,6 +865,7 @@ local test_remove_all_paths = function(ver, use_tls)
     check_site_content(ver, proto, location_main, 'foo')
 
     cfg.sites = nil
+    cfg.listen = nil
 
     my_http_cfg(cfg)
     check_site_content(ver, proto, location_main, 'not found')
@@ -888,6 +894,7 @@ local test_remove_all_paths_alt = function(ver, use_tls)
     check_site_content(ver, proto, location_main, 'foo')
 
     cfg.handler = nil
+    cfg.listen = nil
 
     my_http_cfg(cfg)
     check_site_content(ver, proto, location_main, 'not found')
@@ -971,26 +978,6 @@ g_hot_reload.test_FLAKY_after_decrease_threads = function()
     end
 end
 
-g_hot_reload.test_combo1_http1_tls = function()
-    g_hot_reload.test_extra_sites_http1_tls()
-    g_bad_handlers.test_write_params_http1_tls()
-end
-
-g_hot_reload.test_combo1_http1_insecure = function()
-    g_hot_reload.test_extra_sites_http1_insecure()
-    g_bad_handlers.test_write_params_http1_insecure()
-end
-
-g_hot_reload.test_combo1_http2_tls = function()
-    g_hot_reload.test_extra_sites_http2_tls()
-    g_bad_handlers.test_write_params_http2_tls()
-end
-
-g_hot_reload.test_combo1_http2_insecure = function()
-    g_hot_reload.test_extra_sites_http2_insecure()
-    g_bad_handlers.test_write_params_http2_insecure()
-end
-
 local curls
 g_hot_reload_with_curls = t.group 'hot_reload_with_curls'
 
@@ -1057,6 +1044,7 @@ local test_FLAKY_decrease_stubborn_threads = function(ver, use_tls)
     fiber.sleep(1)
 
     cfg.threads = 1
+    cfg.listen = nil
     http.cfg(cfg)
 
     cfg.threads = 2
@@ -1097,32 +1085,6 @@ g_hot_reload_with_curls.test_FLAKY_decrease_stubborn_threads_http2_tls =
     test_FLAKY_decrease_stubborn_threads('--http2', true)
 end
 
-g_hot_reload_with_curls.test_FLAKY_decrease_stubborn_thr_combo2_http1_insec =
-        function()
-    g_hot_reload.test_extra_sites_http1_insecure()
-    g_hot_reload_with_curls.
-        test_FLAKY_decrease_stubborn_threads_http1_insecure()
-end
-
-g_hot_reload_with_curls.test_FLAKY_decrease_stubborn_thr_combo2_http1_tls =
-        function()
-    g_hot_reload.test_extra_sites_http1_tls()
-    g_hot_reload_with_curls.test_FLAKY_decrease_stubborn_threads_http1_tls()
-end
-
-g_hot_reload_with_curls.test_FLAKY_decrease_stubborn_threads_combo2_http2_insec
-        = function()
-    g_hot_reload.test_extra_sites_http2_insecure()
-    g_hot_reload_with_curls.
-        test_FLAKY_decrease_stubborn_threads_http2_insecure()
-end
-
-g_hot_reload_with_curls.test_FLAKY_decrease_stubborn_threads_combo2_http2_tls =
-        function()
-    g_hot_reload.test_extra_sites_http2_tls()
-    g_hot_reload_with_curls.test_FLAKY_decrease_stubborn_threads_http2_tls()
-end
-
 local test_FLAKY_decrease_stubborn_threads_with_timeout =
         function(ver, use_tls)
     ensure_popen()
@@ -1142,6 +1104,7 @@ local test_FLAKY_decrease_stubborn_threads_with_timeout =
     fiber.sleep(0.1)
 
     cfg.threads = 1
+    cfg.listen = nil
     local start = fiber.clock()
     http.cfg(cfg)
 
@@ -1208,6 +1171,7 @@ local test_FLAKY_decrease_not_so_stubborn_thr_with_timeout =
     fiber.sleep(0.1)
 
     cfg.threads = 1
+    cfg.listen = nil
     local start = fiber.clock()
     http.cfg(cfg)
 
@@ -1275,6 +1239,7 @@ local test_replace_handlers = function(ver, use_tls)
 
     cfg.handler = bar_handler
     cfg.sites[1].handler = alt_bar_handler
+    cfg.listen = nil
     my_http_cfg(cfg)
 
     check_site_content(ver, proto, location_main, 'bar')
@@ -1644,4 +1609,30 @@ end
 
 g_bad_handlers.test_faulty_handler_http1_insecure = function()
     test_faulty_handler('--http1.1')
+end
+
+g_hot_reload.test_min_proto = function()
+    local cfg = { handler = function() end, min_proto_version = 'tls1.2'}
+    http.cfg(cfg)
+    cfg.min_proto_version = 'tls1.3'
+    t.assert_error_msg_content_equals(
+        "min_proto_version can't be changed on reconfiguration", http.cfg, cfg)
+end
+
+g_hot_reload.test_security_level = function()
+    local cfg = { handler = function() end, openssl_security_level = 1}
+    http.cfg(cfg)
+    cfg.openssl_security_level = 2
+    t.assert_error_msg_content_equals(
+        "openssl_security_level can't be changed on reconfiguration",
+        http.cfg, cfg)
+end
+
+g_hot_reload.test_listen_change = function()
+    local cfg = { handler = function() end, listen = 3300}
+    http.cfg(cfg)
+    cfg.listen = 8080
+    t.assert_error_msg_content_equals(
+        "listen can't be changed on reconfiguration",
+        http.cfg, cfg)
 end

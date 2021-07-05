@@ -3103,6 +3103,44 @@ tls_not_a_table:
 
 /* Launched in TX thread. */
 static int
+load_default_listen_params(const char **lerr)
+{
+	conf.num_listeners = 2;
+	conf.sni_maps = NULL;
+	if ((conf.listener_cfgs = calloc(conf.num_listeners,
+	    sizeof(*conf.listener_cfgs))) == NULL) {
+		*lerr = "allocation memory for listener_cfgs failed";
+		goto Error;
+	}
+
+	static const uint16_t port = 3300;
+	{
+		const char *const addr = "0.0.0.0";
+
+		const int fd = open_listener(addr, port, lerr);
+		if (fd < 0)
+			goto Error;
+		register_listener_cfgs_socket(fd, NULL, 0);
+	}
+
+	{
+		const char *const addr = "::";
+
+		const int fd = open_listener(addr, port, lerr);
+		if (fd < 0)
+			goto Error;
+		register_listener_cfgs_socket(fd, NULL, 1);
+	}
+
+	return 0;
+
+Error:
+	close_listener_cfgs_sockets();
+	return 1;
+}
+
+/* Launched in TX thread. */
+static int
 load_and_handle_listen_from_lua(lua_State *L, int lua_stack_idx_table,
 				const char **lerr)
 {
@@ -3112,7 +3150,10 @@ load_and_handle_listen_from_lua(lua_State *L, int lua_stack_idx_table,
 	lua_getfield(L, lua_stack_idx_table, "listen");
 	int need_to_pop = 1;
 	if (lua_isnil(L, -1)) {
-		*lerr = "listen is absent";
+		if (load_default_listen_params(lerr) == 0) {
+			lua_pop(L, need_to_pop);
+			return 0;
+		}
 		goto listen_invalid_type;
 	}
 
@@ -4887,10 +4928,13 @@ Skip_main_lua_handler:
 	;
 	lua_getfield(L, LUA_STACK_IDX_TABLE, "min_proto_version");
 	if (lua_isnil(L, -1)) {
-		/* FIXME: min_proto_version report */
-		conf.min_tls_proto_version = DEFAULT_MIN_TLS_PROTO_VERSION_NUM;
-		fprintf(stderr, "Using default min_proto_version="
-			DEFAULT_MIN_TLS_PROTO_VERSION_STR "\n");
+		if (!is_hot_reload) {
+			/* FIXME: min_proto_version report */
+			conf.min_tls_proto_version =
+				DEFAULT_MIN_TLS_PROTO_VERSION_NUM;
+			fprintf(stderr, "Using default min_proto_version="
+				DEFAULT_MIN_TLS_PROTO_VERSION_STR "\n");
+		}
 		goto Skip_min_proto_version;
 	}
 
@@ -4930,7 +4974,15 @@ Skip_main_lua_handler:
 			if (protos[idx].len == min_proto_version_len &&
 			    !memcmp(&protos[idx].str, min_proto_version_str,
 			    min_proto_version_len)) {
-				conf.min_tls_proto_version = protos[idx].num;
+				if (is_hot_reload) {
+					if (conf.min_tls_proto_version !=
+					    protos[idx].num) {
+		lerr = "min_proto_version can't be changed on reconfiguration";
+						goto min_proto_version_invalid;
+					}
+				} else
+					conf.min_tls_proto_version =
+						protos[idx].num;
 				goto Proto_found;
 			}
 		}
@@ -4944,24 +4996,43 @@ Skip_main_lua_handler:
 Skip_min_proto_version:
 	lua_getfield(L, LUA_STACK_IDX_TABLE, "openssl_security_level");
 	if (lua_isnil(L, -1)) {
-		conf.openssl_security_level = DEFAULT_OPENSSL_SECURITY_LEVEL;
-		fprintf(stderr, "Using default openssl_security_level=%d\n",
-			DEFAULT_OPENSSL_SECURITY_LEVEL);
+		if (!is_hot_reload) {
+			conf.openssl_security_level =
+				DEFAULT_OPENSSL_SECURITY_LEVEL;
+			fprintf(stderr,
+				"Using default openssl_security_level=%d\n",
+				DEFAULT_OPENSSL_SECURITY_LEVEL);
+		}
 		goto Skip_openssl_security_level;
 	}
-	conf.openssl_security_level = my_lua_tointegerx(L, -1, &is_integer);
+	const uint64_t openssl_security_level =
+		my_lua_tointegerx(L, -1, &is_integer);
 	if (!is_integer) {
 		lerr = "openssl_security_level is not a number";
 		goto invalid_openssl_security_level;
 	}
-	if (conf.openssl_security_level > 5) {
+	if (openssl_security_level > 5) {
 		lerr = "openssl_security_level is invalid";
 		goto invalid_openssl_security_level;
 	}
+	if (is_hot_reload) {
+		if (conf.openssl_security_level != openssl_security_level) {
+	lerr = "openssl_security_level can't be changed on reconfiguration";
+			goto invalid_openssl_security_level;
+		}
+	} else
+		conf.openssl_security_level = openssl_security_level;
 
 Skip_openssl_security_level:
-	if (is_hot_reload)
+	if (is_hot_reload) {
+		lua_getfield(L, LUA_STACK_IDX_TABLE, "listen");
+		if (!lua_isnil(L, -1)) {
+			lerr = "listen can't be changed on reconfiguration";
+			goto listen_invalid;
+		}
 		goto Apply_new_config_hot_reload;
+	}
+
 	if (load_and_handle_listen_from_lua(L, LUA_STACK_IDX_TABLE, &lerr) != 0)
 		goto listen_invalid;
 

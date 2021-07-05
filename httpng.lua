@@ -416,11 +416,13 @@ export.cfg = function (config)
     if config == nil then
         error("No parameters specified", 2)
     end
-    local prepared_listen = prepare_listen_for_c(config.listen)
-    check_for_duplicate_listeners(prepared_listen)
-    config.listen = prepared_listen
+    if (config.listen ~= nil) then
+        local prepared_listen = prepare_listen_for_c(config.listen)
+        check_for_duplicate_listeners(prepared_listen)
+        config.listen = prepared_listen
+        log.debug("Listeners for C:\n" .. print_table_to_string(config.listen))
+    end
 
-    log.debug("Listeners for C:\n" .. print_table_to_string(config.listen))
     local res, err = pcall(httpng_c.cfg, config)
     if err then
         error(err, 2)
