@@ -16,11 +16,21 @@ jobs:
       fail-fast: false
       matrix:
         os: ['ubuntu-latest', 'macos-latest']
-        tarantool-ref: ['1.10', '2.7']
+        tarantool-ref: ['1.10', '2.1', '2.2', '2.3', '2.4', '2.5', '2.6', '2.7', '2.8', 'master']
         enable_asan: [true, false]
         exclude:
           - os: 'macos-latest'
             tarantool-ref: '1.10'
+          - os: 'macos-latest'
+            tarantool-ref: '2.1'
+          - os: 'macos-latest'
+            tarantool-ref: '2.2'
+          - os: 'macos-latest'
+            tarantool-ref: '2.3'
+          - os: 'macos-latest'
+            tarantool-ref: '2.4'
+          - os: 'macos-latest'
+            tarantool-ref: '2.5'
     runs-on: ${{matrix.os}}
 
     steps:
