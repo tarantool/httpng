@@ -427,6 +427,10 @@ __thread thread_ctx_t *curr_thread_ctx;
 static const char shuttle_field_name[] = "_shuttle";
 static const char msg_cant_reap[] =
 	"Unable to reconfigure until threads will shut down";
+static const char min_proto_version_reconf[] =
+	"min_proto_version can't be changed on reconfiguration";
+static const char openssl_security_level_reconf[] =
+	"openssl_security_level can't be changed on reconfiguration";
 static const char msg_bad_cert_num[] =
 	"Only one key/certificate pair can be specified if SNI is disabled";
 #ifndef NDEBUG
@@ -478,6 +482,20 @@ my_xtm_delete_queue_from_tx(thread_ctx_t *thread_ctx)
 __attribute__((weak)) void
 complain_loudly_about_leaked_fds(void)
 {
+}
+
+/* Launched in TX thread. */
+static inline bool
+is_box_null(lua_State *L, int idx)
+{
+	return luaL_iscdata(L, idx) && lua_touserdata(L, idx) == NULL;
+}
+
+/* Launched in TX thread. */
+static inline bool
+is_nil_or_null(lua_State *L, int idx)
+{
+	return lua_isnil(L, idx) || is_box_null(L, idx);
 }
 
 /* Launched in TX thread. */
@@ -4514,7 +4532,7 @@ Skip_c_sites:
 #define PROCESS_OPTIONAL_PARAM(name) \
 	lua_getfield(L, LUA_STACK_IDX_TABLE, #name); \
 	uint64_t name; \
-	if (lua_isnil(L, -1)) \
+	if (is_nil_or_null(L, -1)) \
 		name = DEFAULT_##name; \
 	else { \
 		name = my_lua_tointegerx(L, -1, &is_integer); \
@@ -4545,7 +4563,7 @@ Skip_c_sites:
 
 	lua_getfield(L, LUA_STACK_IDX_TABLE, "thread_termination_timeout");
 	double thread_termination_timeout;
-	if (lua_isnil(L, -1))
+	if (is_nil_or_null(L, -1))
 		thread_termination_timeout = DEFAULT_thread_termination_timeout;
 	else {
 		int is_number;
@@ -4560,7 +4578,7 @@ Skip_c_sites:
 #ifdef SPLIT_LARGE_BODY
 	lua_getfield(L, LUA_STACK_IDX_TABLE, "use_body_split");
 	const bool use_body_split =
-		lua_isnil(L, -1) ? false : lua_toboolean(L, -1);
+		is_nil_or_null(L, -1) ? false : lua_toboolean(L, -1);
 #endif /* SPLIT_LARGE_BODY */
 
 	/* FIXME: Add sanity checks, especially shuttle_size -
@@ -4927,13 +4945,17 @@ Skip_main_lua_handler:
 
 	;
 	lua_getfield(L, LUA_STACK_IDX_TABLE, "min_proto_version");
-	if (lua_isnil(L, -1)) {
+	if (is_nil_or_null(L, -1)) {
 		if (!is_hot_reload) {
 			/* FIXME: min_proto_version report */
 			conf.min_tls_proto_version =
 				DEFAULT_MIN_TLS_PROTO_VERSION_NUM;
 			fprintf(stderr, "Using default min_proto_version="
 				DEFAULT_MIN_TLS_PROTO_VERSION_STR "\n");
+		} else if (is_box_null(L, -1) && conf.min_tls_proto_version !=
+		    DEFAULT_MIN_TLS_PROTO_VERSION_NUM) {
+			lerr = min_proto_version_reconf;
+			goto min_proto_version_invalid;
 		}
 		goto Skip_min_proto_version;
 	}
@@ -4977,7 +4999,7 @@ Skip_main_lua_handler:
 				if (is_hot_reload) {
 					if (conf.min_tls_proto_version !=
 					    protos[idx].num) {
-		lerr = "min_proto_version can't be changed on reconfiguration";
+						lerr = min_proto_version_reconf;
 						goto min_proto_version_invalid;
 					}
 				} else
@@ -4995,13 +5017,17 @@ Skip_main_lua_handler:
 
 Skip_min_proto_version:
 	lua_getfield(L, LUA_STACK_IDX_TABLE, "openssl_security_level");
-	if (lua_isnil(L, -1)) {
+	if (is_nil_or_null(L, -1)) {
 		if (!is_hot_reload) {
 			conf.openssl_security_level =
 				DEFAULT_OPENSSL_SECURITY_LEVEL;
 			fprintf(stderr,
 				"Using default openssl_security_level=%d\n",
 				DEFAULT_OPENSSL_SECURITY_LEVEL);
+		} else if (is_box_null(L, -1) && conf.openssl_security_level !=
+		    DEFAULT_OPENSSL_SECURITY_LEVEL) {
+			lerr = openssl_security_level_reconf;
+			goto invalid_openssl_security_level;
 		}
 		goto Skip_openssl_security_level;
 	}
@@ -5017,7 +5043,7 @@ Skip_min_proto_version:
 	}
 	if (is_hot_reload) {
 		if (conf.openssl_security_level != openssl_security_level) {
-	lerr = "openssl_security_level can't be changed on reconfiguration";
+			lerr = openssl_security_level_reconf;
 			goto invalid_openssl_security_level;
 		}
 	} else

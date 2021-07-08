@@ -1636,3 +1636,48 @@ g_hot_reload.test_listen_change = function()
         "listen can't be changed on reconfiguration",
         http.cfg, cfg)
 end
+
+g_hot_reload.test_null_threads = function()
+    http.cfg{threads = 4, handler = function() end}
+    http.cfg{threads = box.NULL}
+end
+
+g_hot_reload.test_null_thread_termination_timeout = function()
+    http.cfg{thread_termination_timeout = 5, handler = function() end}
+    http.cfg{thread_termination_timeout = box.NULL}
+end
+
+g_hot_reload.test_null_shuttle_size = function()
+    http.cfg{shuttle_size = 1024, handler = function() end}
+    t.assert_error_msg_content_equals(
+        "Reconfiguration can't change shuttle_size",
+        http.cfg, {shuttle_size = box.NULL})
+end
+
+g_hot_reload.test_change_min_proto_version = function()
+    http.cfg{min_proto_version = 'tls1.3', handler = function() end}
+    t.assert_error_msg_content_equals(
+        "min_proto_version can't be changed on reconfiguration",
+        http.cfg, {min_proto_version = 'tls1.2'})
+end
+
+g_hot_reload.test_null_min_proto_version = function()
+    http.cfg{min_proto_version = 'tls1.3', handler = function() end}
+    t.assert_error_msg_content_equals(
+        "min_proto_version can't be changed on reconfiguration",
+        http.cfg, {min_proto_version = box.NULL})
+end
+
+g_hot_reload.test_null_security_level = function()
+    http.cfg{openssl_security_level = 5, handler = function() end}
+    t.assert_error_msg_content_equals(
+        "openssl_security_level can't be changed on reconfiguration",
+        http.cfg, {openssl_security_level = box.NULL})
+end
+
+g_hot_reload.test_null_listen = function()
+    http.cfg{listen = 8080, handler = function() end}
+    t.assert_error_msg_content_equals(
+        "listen can't be changed on reconfiguration",
+        http.cfg, {listen = box.NULL})
+end
