@@ -450,7 +450,7 @@ extern void free_shuttle(shuttle_t *);
  * to TX thread. */
 extern void free_shuttle_with_anchor(shuttle_t *);
 
-extern shuttle_t *prepare_shuttle(h2o_req_t *);
+extern shuttle_t *prepare_shuttle2(h2o_req_t *);
 static void fill_http_headers(lua_State *L, lua_response_t *response,
 	int param_lua_idx);
 
@@ -656,9 +656,6 @@ alloc_recv_data(void)
 	/* FIXME: Use per-thread pools? */
 	recv_data_t *const recv_data = (recv_data_t *)
 		malloc(conf.recv_data_size);
-	if (recv_data == NULL)
-		/* FIXME: Should terminate connection instead. */
-		h2o_fatal("no memory");
 	return recv_data;
 }
 
@@ -667,6 +664,8 @@ static inline recv_data_t *
 prepare_websocket_recv_data(shuttle_t *parent, unsigned payload_bytes)
 {
 	recv_data_t *const recv_data = alloc_recv_data();
+	if (recv_data == NULL)
+		return NULL;
 	recv_data->parent_shuttle = parent;
 	recv_data->payload_bytes = payload_bytes;
 	return recv_data;
@@ -1203,6 +1202,8 @@ websocket_msg_callback(h2o_websocket_conn_t *conn,
 {
 	shuttle_t *const shuttle = (shuttle_t*)conn->data;
 	if (arg == NULL) {
+	do_close:
+		;
 		lua_response_t *const response =
 			(lua_response_t *)&shuttle->payload;
 		assert(conn == response->ws_conn);
@@ -1228,6 +1229,8 @@ websocket_msg_callback(h2o_websocket_conn_t *conn,
 			? conf.max_recv_bytes_lua_websocket : bytes_remain;
 		recv_data_t *const recv_data =
 			prepare_websocket_recv_data(shuttle, bytes_to_send);
+		if (recv_data == NULL)
+			goto do_close;
 		memcpy(get_websocket_recv_location(recv_data), pos,
 			bytes_to_send);
 		stubborn_dispatch_recv(get_curr_thread_ctx()->queue_to_tx,
@@ -2106,7 +2109,13 @@ prepare_authority(h2o_req_t *req)
 static int
 lua_req_handler(lua_h2o_handler_t *self, h2o_req_t *req)
 {
-	shuttle_t *const shuttle = prepare_shuttle(req);
+	shuttle_t *const shuttle = prepare_shuttle2(req);
+	if (shuttle == NULL) {
+		req->res.status = 500;
+		req->res.reason = "No memory";
+		h2o_send_inline(req, H2O_STRLIT("No memory\n"));
+		return 0;
+	}
 	lua_response_t *const response = (lua_response_t *)&shuttle->payload;
 	if ((response->un.req.method_len = req->method.len) >
 	    sizeof(response->un.req.method)) {
@@ -2372,9 +2381,6 @@ alloc_shuttle(thread_ctx_t *thread_ctx)
 	/* FIXME: Use per-thread pools */
 	(void)thread_ctx;
 	shuttle_t *const shuttle = (shuttle_t *)malloc(conf.shuttle_size);
-	if (shuttle == NULL)
-		/* FIXME: Should fail HTTP(S) request instead. */
-		h2o_fatal("no memory");
 	return shuttle;
 }
 
@@ -2417,13 +2423,15 @@ anchor_dispose(void *param)
 
 /* Launched in HTTP server thread. */
 shuttle_t *
-prepare_shuttle(h2o_req_t *req)
+prepare_shuttle2(h2o_req_t *req)
 {
+	thread_ctx_t *const thread_ctx = get_curr_thread_ctx();
+	shuttle_t *const shuttle = alloc_shuttle(thread_ctx);
+	if (shuttle == NULL)
+		return NULL;
 	anchor_t *const anchor = (anchor_t *)h2o_mem_alloc_shared(&req->pool,
 		sizeof(anchor_t), &anchor_dispose);
 	anchor->user_free_shuttle = NULL;
-	thread_ctx_t *const thread_ctx = get_curr_thread_ctx();
-	shuttle_t *const shuttle = alloc_shuttle(thread_ctx);
 	shuttle->anchor = anchor;
 	anchor->shuttle = shuttle;
 	shuttle->never_access_this_req_from_tx_thread = req;
