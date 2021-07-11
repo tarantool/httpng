@@ -1681,3 +1681,36 @@ g_hot_reload.test_null_listen = function()
         "listen can't be changed on reconfiguration",
         http.cfg, {listen = box.NULL})
 end
+
+g_hot_reload.test_reload_file = function()
+    local filename = 'tmp_reload_test'
+    local filename_ext = filename .. '.lua'
+    local file = io.open(filename_ext, 'w')
+    file:write(
+    [[
+    local handler = function(req, io)
+        return { body = 'foo' }
+    end
+
+    return {handler = handler}
+    ]]
+    )
+    file:close()
+
+    http.cfg{handler = require(filename).handler}
+    check_site_content('', 'http', 'localhost:3300', 'foo')
+    local file = io.open(filename_ext, 'w')
+    file:write(
+    [[
+    local handler = function(req, io)
+        return { body = 'bar' }
+    end
+
+    return {handler = handler}
+    ]]
+    )
+    file:close()
+    package.loaded[filename] = nil
+    http.cfg{handler = require(filename).handler}
+    check_site_content('', 'http', 'localhost:3300', 'bar')
+end
