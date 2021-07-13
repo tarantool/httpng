@@ -1115,7 +1115,7 @@ local test_FLAKY_decrease_stubborn_threads_with_timeout =
         local now = fiber.clock()
         if (not(now - start >= cfg.thread_termination_timeout - 0.5)) then
             print('now - start = ', now - start)
-            print('now - curls_start = ', now - curl_start)
+            print('now - curls_start = ', now - curls_start)
             print('cfg.thread_termination_timeout = ',
                 cfg.thread_termination_timeout)
             error('threads have terminated too early');
