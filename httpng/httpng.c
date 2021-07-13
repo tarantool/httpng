@@ -3986,8 +3986,11 @@ on_shutdown_internal(lua_State *L, bool called_from_callback)
 	    ++thr_idx)
 		h2o_config_dispose(&conf.thread_ctxs[thr_idx].globalconf);
 	free(conf.thread_ctxs);
-	for (idx = 0; idx < conf.lua_site_count; ++idx)
-		free(conf.lua_sites[idx].path);
+	for (idx = 0; idx < conf.lua_site_count; ++idx) {
+		const lua_site_t *const site = &conf.lua_sites[idx];
+		luaL_unref(L, LUA_REGISTRYINDEX, site->lua_handler_ref);
+		free(site->path);
+	}
 	free(conf.lua_sites);
 	conf.configured = false;
 	conf.idx_of_root_site = -1;
